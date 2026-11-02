@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+.venv/
+*.log
+backend/.env
+Tally_Bidirectional_ERP_PRD.docx

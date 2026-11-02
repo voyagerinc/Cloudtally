@@ -1,0 +1,35 @@
+# Pilot deployment (PRD §8). TallyPrime itself runs on Windows and is reached over the
+# private network: set ERP connector host to the Tally machine's LAN/VPN address.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: erp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: tally_erp
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U erp -d tally_erp"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    environment:
+      ERP_DATABASE_URL: postgresql+psycopg://erp:${POSTGRES_PASSWORD}@db:5432/tally_erp
+    command: sh -c "python -m app.cli init-db && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports: ["127.0.0.1:8000:8000"]   # put a TLS reverse proxy in front for other users
+    depends_on:
+      db: {condition: service_healthy}
+
+  worker:
+    build: ./backend
+    environment:
+      ERP_DATABASE_URL: postgresql+psycopg://erp:${POSTGRES_PASSWORD}@db:5432/tally_erp
+    command: python -m app.workers.sync_worker
+    restart: unless-stopped
+    depends_on:
+      db: {condition: service_healthy}
+
+volumes:
+  pgdata:

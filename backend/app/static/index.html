@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tally Bidirectional ERP</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <strong>Tally&nbsp;Bidirectional&nbsp;ERP</strong>
+  <select id="company" aria-label="Company"></select>
+  <button id="open-tally" class="secondary" title="List the companies open in Tally and open or link one">Open Tally company</button>
+  <nav id="tabs">
+    <button data-tab="dashboard">Sync</button>
+    <button data-tab="vouchers">Vouchers</button>
+    <button data-tab="entry">New voucher</button>
+    <button data-tab="conflicts">Conflicts <span id="conflict-badge" class="badge" hidden></span></button>
+    <button data-tab="reports">Reports</button>
+    <button data-tab="masters">Ledgers</button>
+    <button data-tab="items">Stock items</button>
+    <button data-tab="settings">Connector</button>
+    <button data-tab="audit">Audit</button>
+  </nav>
+  <span id="whoami"></span>
+  <button id="logout" class="link">Sign out</button>
+</header>
+
+<section id="login" class="panel narrow" hidden>
+  <h2>Sign in</h2>
+  <p class="muted">Paste your API key. Create one with <code>python -m app.cli create-user &lt;name&gt; --superadmin</code>.</p>
+  <form id="login-form"><input id="apikey" type="password" placeholder="erp_…" required autocomplete="off"><button>Sign in</button></form>
+  <p id="login-error" class="error"></p>
+</section>
+
+<main>
+<section id="dashboard" class="tab" hidden>
+  <div class="row between"><h2>Synchronization</h2>
+    <div><button id="check-tally">Check Tally</button> <button id="run-sync" disabled title="Check Tally first">Sync now</button>
+      <button id="retry-failed" class="secondary">Retry all failed</button>
+      <a id="errors-csv" class="button secondary" href="#">Export error log</a></div></div>
+  <div id="tally-check" class="check-panel" hidden></div>
+  <div id="sync-progress" class="panel progress-panel" hidden aria-live="polite"></div>
+  <div id="health" class="cards"></div>
+  <h3>Amended in Tally and synced</h3>
+  <table id="amends"></table>
+  <h3>Outbound queue (ERP → Tally)</h3>
+  <div class="row filters">
+    <select id="job-status"><option value="">All statuses</option><option>pending</option><option>failed</option><option>conflict</option><option>completed</option><option>paused</option><option>superseded</option></select>
+    <input id="job-number" placeholder="Voucher number">
+    <button id="job-filter" class="secondary">Filter</button>
+  </div>
+  <table id="jobs"></table>
+  <h3>Inbound (Tally → ERP)</h3>
+  <table id="inbox"></table>
+  <h3>Reconciliation</h3>
+  <form id="recon-form" class="row filters"><input type="date" id="recon-from" required><input type="date" id="recon-to" required>
+    <button>Reconcile with Tally</button></form>
+  <pre id="recon-result" class="small"></pre>
+</section>
+
+<section id="vouchers" class="tab" hidden>
+  <h2>Vouchers</h2>
+  <form id="vfilter" class="row filters">
+    <input type="date" id="vf-from"><input type="date" id="vf-to">
+    <select id="vf-type"><option value="">All types</option></select>
+    <select id="vf-sync"><option value="">Any sync state</option><option>pending</option><option>synced</option><option>failed</option><option>conflict</option><option>not_synced</option></select>
+    <input id="vf-q" placeholder="Search number, party, narration">
+    <button>Search</button>
+  </form>
+  <table id="vlist"></table>
+  <div id="vdetail" class="panel" hidden></div>
+</section>
+
+<section id="entry" class="tab" hidden>
+  <div class="row between"><h2 id="entry-title">New voucher</h2>
+    <span class="muted small">F4 Contra · F5 Payment · F6 Receipt · F7 Journal · F8 Sales · F9 Purchase · Ctrl+Enter save · Alt+N add line</span></div>
+  <form id="vform" class="panel">
+    <div class="grid">
+      <label>Type<select id="ve-type" required></select></label>
+      <label>Number<input id="ve-number" placeholder="auto"></label>
+      <label>Date<input id="ve-date" type="date" required></label>
+      <label>Party<input id="ve-party" list="ledger-names"></label>
+      <label>Reference<input id="ve-ref"></label>
+    </div>
+    <table class="lines"><thead><tr><th>Ledger</th><th class="num">Debit</th><th class="num">Credit</th><th>Bill ref</th><th></th></tr></thead>
+      <tbody id="ve-lines"></tbody>
+      <tfoot><tr><td><button type="button" id="ve-add" class="secondary">+ Line</button></td>
+        <td class="num" id="ve-dr">0.00</td><td class="num" id="ve-cr">0.00</td><td colspan="2" id="ve-diff"></td></tr></tfoot></table>
+    <label>Narration<textarea id="ve-narration" rows="2"></textarea></label>
+    <div class="row"><select id="ve-action"><option value="post">Save &amp; post</option><option value="draft">Save as draft</option><option value="submit">Submit for approval</option></select>
+      <button>Save</button> <span id="ve-msg"></span></div>
+    <input type="hidden" id="ve-id"><input type="hidden" id="ve-version">
+  </form>
+  <datalist id="ledger-names"></datalist>
+</section>
+
+<section id="conflicts" class="tab" hidden>
+  <h2>Open conflicts</h2>
+  <p class="muted">A voucher changed in both ERP and Tally before they synchronized. Nothing was overwritten; choose which version wins.</p>
+  <div id="conflict-list"></div>
+</section>
+
+<section id="reports" class="tab" hidden>
+  <h2>Reports</h2>
+  <form id="rform" class="row filters">
+    <select id="r-name">
+      <option value="trial-balance">Trial Balance</option><option value="profit-loss">Profit &amp; Loss</option>
+      <option value="balance-sheet">Balance Sheet</option><option value="day-book">Day Book</option>
+      <option value="stock-summary">Stock Summary</option><option value="outstanding">Receivables (ageing)</option>
+      <option value="outstanding-payable">Payables (ageing)</option><option value="register-Sales">Sales Register</option>
+      <option value="register-Purchase">Purchase Register</option>
+    </select>
+    <input type="date" id="r-from"><input type="date" id="r-to"><button>Show</button>
+    <a id="r-csv" class="button secondary" href="#">CSV</a>
+  </form>
+  <div id="r-out"></div>
+</section>
+
+<section id="masters" class="tab" hidden>
+  <div class="row between"><h2>Ledgers</h2>
+    <span><input id="lq" placeholder="Search ledgers"> <button type="button" id="l-new">Create ledger</button></span></div>
+  <datalist id="group-names"></datalist>
+  <table id="ltable"></table>
+</section>
+
+<section id="items" class="tab" hidden>
+  <div class="row between"><h2>Stock items</h2><input id="iq" placeholder="Search items, group or HSN"></div>
+  <p class="muted small" id="icount"></p>
+  <table id="itable"></table>
+</section>
+
+<dialog id="item-dlg">
+  <div class="row between"><h2 id="id-name"></h2><button type="button" id="id-close" class="secondary">Close</button></div>
+  <div id="id-body"></div>
+</dialog>
+
+<dialog id="lf-dlg" class="wide">
+  <form id="lf" novalidate>
+    <div class="row between"><h2 id="lf-title">Ledger Creation</h2>
+      <span><button>Save</button> <button type="button" id="lf-cancel" class="secondary">Cancel</button></span></div>
+    <p id="lf-msg" class="error"></p>
+    <div class="details">
+      <section><h3>Ledger</h3>
+        <label>Name *<input name="name" required maxlength="200"></label>
+        <label>Under (group) *<input name="group" list="group-names" required></label>
+        <div class="row"><label>Opening balance<input name="opening_amount" inputmode="decimal" placeholder="0.00"></label>
+          <label>Dr / Cr<select name="opening_side"><option>Dr</option><option>Cr</option></select></label></div>
+      </section>
+      <section><h3>Mailing details</h3>
+        <label>Mailing name<input name="mailing_name" maxlength="300"></label>
+        <label>Address<textarea name="address" rows="3" maxlength="1000"></textarea></label>
+        <label>State<input name="state" list="lf-states"></label>
+        <div class="row"><label>Country<input name="country" list="lf-countries"></label>
+          <label>PIN code<input name="pincode" maxlength="100"></label></div>
+      </section>
+      <section><h3>Tax registration details</h3>
+        <label>PAN / IT No.<input name="pan" maxlength="10" class="upper"></label>
+        <label>Registration type<select name="gst_registration_type"><option value=""></option>
+          <option>Regular</option><option>Composition</option><option>Unregistered/Consumer</option>
+          <option>Unknown</option><option>Regular - SEZ</option><option>OIDAR</option></select></label>
+        <label>GSTIN / UIN<input name="gstin" maxlength="15" class="upper"></label>
+        <label>Place of supply<input name="place_of_supply" list="lf-states"></label>
+      </section>
+      <section><h3>Credit</h3>
+        <label class="check"><input type="checkbox" name="is_billwise"> Maintain balances bill-by-bill</label>
+        <label>Default credit period (days)<input name="credit_days" type="number" min="0" max="3650"></label>
+      </section>
+      <section><h3>Contact details</h3>
+        <label>Contact person<input name="contact_person" maxlength="200"></label>
+        <div class="row"><label>Phone no.<input name="phone" maxlength="100"></label>
+          <label>Mobile no.<input name="mobile" maxlength="100"></label></div>
+        <label>Fax no.<input name="fax" maxlength="100"></label>
+        <label>E-mail<input name="email" type="email" maxlength="300"></label>
+        <label>CC to (if any)<input name="email_cc" maxlength="300"></label>
+        <label>Website<input name="website" maxlength="200"></label>
+      </section>
+      <section><h3>MSME registration details</h3>
+        <label>Type of enterprise<select name="msme_type"><option value=""></option><option>Micro</option><option>Small</option><option>Medium</option></select></label>
+        <label>Udyam registration number<input name="msme_udyam_no" maxlength="40" class="upper" placeholder="UDYAM-HR-03-0023487"></label>
+        <label>Activity type<select name="msme_activity"><option value=""></option><option>Manufacturing</option><option>Services</option><option>Traders</option></select></label>
+        <label>Applicable from<input name="msme_from" type="date"></label>
+      </section>
+      <section id="lf-own-bank"><h3>Bank account details</h3>
+        <label>A/c holder's name<input name="bank_account_holder" maxlength="200"></label>
+        <label>A/c no.<input name="bank_account_no" maxlength="40"></label>
+        <label>IFS code<input name="bank_ifsc" maxlength="11" class="upper"></label>
+        <label>Bank name<input name="bank_name" maxlength="200"></label>
+        <label>Branch<input name="bank_branch" maxlength="300"></label>
+      </section>
+      <section id="lf-party-banks"><h3>Bank details of the party</h3>
+        <div id="lf-banks"></div>
+        <button type="button" id="lf-add-bank" class="secondary">Add bank account</button>
+      </section>
+    </div>
+  </form>
+  <datalist id="lf-states"></datalist><datalist id="lf-countries"></datalist>
+</dialog>
+
+<dialog id="ledger-dlg">
+  <div class="row between"><h2 id="ld-name"></h2>
+    <span><button type="button" id="ld-reveal" class="secondary">Show bank &amp; PAN</button>
+      <button type="button" id="ld-edit">Alter</button>
+      <button type="button" id="ld-close" class="secondary">Close</button></span></div>
+  <div id="ld-body"></div>
+</dialog>
+
+<section id="settings" class="tab" hidden>
+  <h2>Tally connector</h2>
+  <form id="cform" class="panel">
+    <div class="grid">
+      <label>Tally host<input id="c-host" value="localhost"></label>
+      <label>Port<input id="c-port" type="number" value="9000"></label>
+      <label>Tally company name<input id="c-name" required></label>
+      <label>Identify vouchers by<select id="c-alter"><option value="masterid">MasterID</option><option value="guid">GUID</option><option value="remoteid">RemoteID</option></select></label>
+      <label>Import Tally vouchers from<input id="c-from" type="date"></label>
+    </div>
+    <div class="row wrap">
+      <label class="check"><input type="checkbox" id="c-enabled"> Connector enabled</label>
+      <label class="check"><input type="checkbox" id="c-in"> Inbound (Tally → ERP)</label>
+      <label class="check"><input type="checkbox" id="c-out"> Outbound (ERP → Tally)</label>
+    </div>
+    <fieldset><legend>Emergency freeze</legend>
+      <label class="check"><input type="checkbox" id="c-fout"> Freeze outbound</label>
+      <label class="check"><input type="checkbox" id="c-fin"> Freeze inbound</label>
+      <label>Frozen voucher types (comma separated)<input id="c-ftypes"></label>
+    </fieldset>
+    <div class="row"><button>Save connector</button><button type="button" id="c-test" class="secondary">Test connection</button>
+      <button type="button" id="c-import" class="secondary">Import masters from Tally</button><span id="c-msg"></span></div>
+  </form>
+  <pre id="c-result" class="small" hidden></pre>
+</section>
+
+<section id="audit" class="tab" hidden>
+  <h2>Audit trail</h2>
+  <table id="atable"></table>
+</section>
+</main>
+
+<dialog id="tally-dlg">
+  <h2>Open a Tally company</h2>
+  <p class="muted">Each Tally company gets its own ERP company with separate books. A newly linked company starts in
+    shadow mode: it receives data from Tally, and nothing is written to Tally.</p>
+  <form id="td-form" class="row">
+    <label>Tally host<input id="td-host" value="localhost" required></label>
+    <label>Port<input id="td-port" type="number" value="9000" required></label>
+    <button>List companies</button>
+  </form>
+  <p id="td-msg" class="muted"></p>
+  <table id="td-table"></table>
+  <div class="row"><button type="button" id="td-close" class="secondary">Close</button></div>
+</dialog>
+<script src="/static/app.js"></script>
+</body>
+</html>
