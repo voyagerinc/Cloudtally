@@ -3,7 +3,7 @@
 #
 #   sudo bash deploy/server-setup.sh tallycloud.voyager.co.in admin@voyager.co.in
 #
-# Run it from the cloned repository (recommended location: /opt/tallycloud). Safe to run again:
+# Run it from the cloned repository, e.g. /root/projects/tallycloud. Safe to run again:
 # it keeps an existing database password and .env, and only adds what is missing.
 #
 # What it installs: PostgreSQL, Python venv, the app as a systemd service on 127.0.0.1:8000,
@@ -13,18 +13,17 @@ set -euo pipefail
 
 DOMAIN=${1:?usage: server-setup.sh <domain> <email for Let\'s Encrypt>}
 EMAIL=${2:?usage: server-setup.sh <domain> <email for Let\'s Encrypt>}
-APP_DIR=$(cd "$(dirname "$0")/.." && pwd)
+APP_DIR=$(cd "$(dirname "$0")/.." && pwd -P)   # real path, also when started through a symlink
 APP_USER=tallycloud
 TUNNEL_USER=tallytunnel
 ENV_FILE="$APP_DIR/backend/.env"
 
 [ "$(id -u)" = 0 ] || { echo "Run as root (sudo)."; exit 1; }
-case "$APP_DIR" in /root/*) echo "Clone the repository outside /root (e.g. /opt/tallycloud): the service account cannot read /root."; exit 1;; esac
 
 echo "==> Packages"
 apt-get update -q
 DEBIAN_FRONTEND=noninteractive apt-get install -yq python3 python3-venv python3-pip postgresql nginx certbot \
-  python3-certbot-nginx ufw openssl
+  python3-certbot-nginx ufw openssl acl
 
 echo "==> Accounts"
 id "$APP_USER" >/dev/null 2>&1 || useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$APP_USER"
@@ -33,6 +32,14 @@ install -d -m 700 -o "$TUNNEL_USER" -g "$TUNNEL_USER" "/home/$TUNNEL_USER/.ssh"
 touch "/home/$TUNNEL_USER/.ssh/authorized_keys"
 chown "$TUNNEL_USER:$TUNNEL_USER" "/home/$TUNNEL_USER/.ssh/authorized_keys"
 chmod 600 "/home/$TUNNEL_USER/.ssh/authorized_keys"
+
+# The app's account must pass through the parent folders (e.g. /root, which only root may enter) to
+# reach APP_DIR. Grant it "pass through" (x) only: it still cannot list or read anything else there.
+d=$(dirname "$APP_DIR")
+while [ "$d" != "/" ]; do
+  sudo -u "$APP_USER" test -x "$d" || setfacl -m "u:$APP_USER:x" "$d"
+  d=$(dirname "$d")
+done
 
 echo "==> Database"
 systemctl enable --now postgresql

@@ -50,7 +50,7 @@ Write-Host ""
 Write-Host "Tunnel task installed and started ('Tally Cloud tunnel' in Task Scheduler)." -ForegroundColor Green
 Write-Host "If this is the first time, run this on the server (one line):" -ForegroundColor Yellow
 Write-Host ""
-Write-Host ("  sudo bash /opt/tallycloud/deploy/add-tally-pc.sh `"" + (Get-Content "$key.pub").Trim() + "`" $RemotePort")
+Write-Host ("  sudo bash /root/projects/tallycloud/deploy/add-tally-pc.sh `"" + (Get-Content "$key.pub").Trim() + "`" $RemotePort")
 Write-Host ""
 Write-Host "Then, in the Tally Cloud web app: Connector tab, host 127.0.0.1, port $RemotePort, and Check Tally."
 Write-Host "Problems: see $dir\tunnel.log"

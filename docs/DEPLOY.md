@@ -46,16 +46,18 @@ On GitHub: **voyagerinc/Cloudtally → Settings → Deploy keys → Add deploy k
 
 ## 3. Get the code
 
-Use `/opt/tallycloud`, not `/root/projects/...`; the service account cannot read `/root`.
+The app lives in `/root/projects/tallycloud`. The setup script lets the app's own service account pass
+through `/root` and `/root/projects` to reach it, without being able to read anything else there.
 
 ```bash
-git clone git@github.com:voyagerinc/Cloudtally.git /opt/tallycloud
+cd /root/projects/tallycloud
+git clone git@github.com:voyagerinc/Cloudtally.git .
 ```
 
 ## 4. Install
 
 ```bash
-sudo bash /opt/tallycloud/deploy/server-setup.sh tallycloud.voyager.co.in <your-email>
+sudo bash /root/projects/tallycloud/deploy/server-setup.sh tallycloud.voyager.co.in <your-email>
 ```
 
 This installs PostgreSQL (with a generated password in `backend/.env`, readable only by the app),
@@ -63,8 +65,8 @@ the app as the `tallycloud` systemd service, nginx with an HTTPS certificate, an
 (only SSH and HTTPS open). Then create the first sign-in key:
 
 ```bash
-cd /opt/tallycloud/backend
-sudo -u tallycloud /opt/tallycloud/.venv/bin/python -m app.cli create-user admin --superadmin
+cd /root/projects/tallycloud/backend
+sudo -u tallycloud /root/projects/tallycloud/.venv/bin/python -m app.cli create-user admin --superadmin
 ```
 
 The key is printed **once**. Store it in your password manager.
@@ -79,7 +81,7 @@ from the repository to the PC and run:
 powershell -ExecutionPolicy Bypass -File setup-tally-tunnel.ps1
 ```
 
-It prints one line starting with `sudo bash /opt/tallycloud/deploy/add-tally-pc.sh "ssh-ed25519 …" 9000`.
+It prints one line starting with `sudo bash /root/projects/tallycloud/deploy/add-tally-pc.sh "ssh-ed25519 …" 9000`.
 Run that line on the VPS. Then, on the VPS:
 
 ```bash
@@ -104,7 +106,7 @@ switch automatic sync off on the Sync tab during office hours until that first c
 ## Updating
 
 ```bash
-cd /opt/tallycloud && git pull
+cd /root/projects/tallycloud && git pull
 .venv/bin/pip install -q -r backend/requirements.txt
 cd backend && sudo -u tallycloud ../.venv/bin/python -m app.cli init-db
 sudo systemctl restart tallycloud
