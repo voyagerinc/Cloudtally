@@ -27,7 +27,7 @@ def licence_status(db: DB, user: CurrentUser, company_id: uuid.UUID | None = Non
         out.update(installation_id=st.installation_id, server_url=st.server_url or settings.license_server_url,
                    activated=bool(st.installation_secret), last_check_at=st.last_check_at,
                    last_attempt_at=st.last_attempt_at, last_error=st.last_error, update_available=st.update_available,
-                   companies_used=db.query(Company).count(),
+                   companies_used=db.query(Company).count(), can_install_updates=bool(settings.install_dir),
                    public_key_set=bool(settings.license_public_key))
     return out
 
@@ -79,6 +79,37 @@ def deactivate(db: DB, user: CurrentUser):
     audit.record(db, actor_of(user), "licence.deactivate", "licence", None)
     db.commit()
     return licence_status(db, user)
+
+
+# ------------------------------------------------------------------ updates of this installation
+
+@router.post("/update/download")
+def download_update(db: DB, user: CurrentUser):
+    """Looks for a newer version the licence covers; downloads it and checks Voyager's signature."""
+    _client_admin(user)
+    try:
+        upd = client.fetch_update(db)
+    except client.LicenceError as exc:
+        raise HTTPException(422, str(exc))
+    audit.record(db, actor_of(user), "licence.update_download", "licence", None,
+                 after={"version": upd["version"] if upd else None})
+    db.commit()
+    return {"update": upd, "message": f"Version {upd['version']} is downloaded and checked." if upd
+            else f"This server runs the newest version ({__version__})."}
+
+
+@router.post("/update/install", status_code=202)
+def install_update(db: DB, user: CurrentUser):
+    _client_admin(user)
+    try:
+        version = client.install_update(db)
+    except client.LicenceError as exc:
+        raise HTTPException(422, str(exc))
+    audit.record(db, actor_of(user), "licence.update_install", "licence", None,
+                 after={"from": __version__, "to": version})
+    db.commit()
+    return {"installing": version, "message": f"Installing version {version}. Tally Cloud restarts in a minute or two; "
+                                              "everyone is signed in again automatically."}
 
 
 # ------------------------------------------------------------------ first start of a new installation

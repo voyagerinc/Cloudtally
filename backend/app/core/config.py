@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     license_signing_key_file: str | None = None    # server: Ed25519 private key (PEM), never in git
     license_public_key: str | None = None          # client: base64 public key that checks the cloud's signature
     license_server_url: str = "https://tallycloud.voyager.co.in"
+    install_dir: str | None = None                 # client: where deploy/windows/install-server.ps1 installed it
     release_dir: str | None = None                 # server: where uploaded installers are kept
     public_url: str = "https://tallycloud.voyager.co.in"   # for links in invitations
     # Optional e-mail for invitations and licence notices; without it the portal shows the link to copy.

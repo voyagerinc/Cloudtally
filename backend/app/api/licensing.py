@@ -26,7 +26,7 @@ from app.core.config import settings
 from app.core.security import check_password_rules, hash_key, hash_password
 from app.licensing import service
 from app.licensing.core import (
-    MODULES, effective_status, hash_license_key, new_license_key, sign_bytes, version_allowed,
+    MODULES, effective_status, hash_license_key, new_license_key, sign_bytes, version_allowed, version_tuple,
 )
 from app.licensing.enforce import customer_entitlement, live_users
 from app.models import (
@@ -153,6 +153,52 @@ def validate(body: InstallationIn, request: Request, db: DB):
     out = service.entitlement_token(db, lic, inst)
     db.commit()
     return out
+
+
+def _server_link(release_id: uuid.UUID, inst_id: uuid.UUID, exp: int) -> str:
+    msg = f"server:{release_id}:{inst_id}:{exp}".encode()
+    return f"{inst_id}.{exp}.{hmac.new(_LINK_KEY, msg, hashlib.sha256).hexdigest()}"
+
+
+@router.post("/licenses/update")
+def update_offer(body: InstallationIn, request: Request, db: DB):
+    """The newest release this server's licence covers, newer than what it runs, with a 5-minute link."""
+    lic, inst = _installation(db, body, request, "update_check")
+    if lic.customer.status != "active" or effective_status(lic.status, lic.starts_at, lic.expires_at,
+                                                          utcnow().date()) not in ("active", "pending"):
+        db.commit()
+        raise HTTPException(403, "Updates need an active licence. Renew it first.")
+    rel = service.latest_release_for(db, lic, inst.product_version)
+    db.commit()
+    if rel is None:
+        return {"update": None}
+    exp = int(utcnow().timestamp()) + LINK_SECONDS
+    return {"update": {**{k: v for k, v in _release_out(rel).items() if k != "status"},
+                       "url": f"/api/v1/licenses/update/{rel.id}?t={_server_link(rel.id, inst.id, exp)}"}}
+
+
+@router.get("/licenses/update/{release_id}")
+def update_download(release_id: uuid.UUID, t: str, request: Request, db: DB):
+    _server_only()
+    try:
+        iid, exp, sig = t.split(".")
+        ok = int(exp) >= utcnow().timestamp() and hmac.compare_digest(
+            sig, _server_link(release_id, uuid.UUID(iid), int(exp)).split(".")[2])
+    except ValueError:
+        ok = False
+    inst = db.get(Installation, uuid.UUID(iid)) if ok else None
+    rel = db.get(SoftwareRelease, release_id)
+    if inst is None or inst.status != "active" or rel is None or rel.status != "published":
+        raise HTTPException(403, "This update link has expired. Check for updates again.")
+    if not version_allowed(rel.version, inst.license.min_version, inst.license.max_version):
+        raise HTTPException(403, "This release is not covered by the licence")
+    path = _release_path(rel)
+    if not path.is_file():
+        raise HTTPException(410, "The release file is missing on the server. Contact Voyager.")
+    db.add(DownloadEvent(customer_id=inst.license.customer_id, username=f"server: {inst.server_label or inst.hostname}",
+                         release_id=rel.id, version=rel.version, result="ok", ip=_ip(request)))
+    db.commit()
+    return FileResponse(path, filename=rel.file_name, media_type="application/octet-stream")
 
 
 @router.post("/licenses/deactivate")
@@ -849,12 +895,40 @@ def _release_path(rel: SoftwareRelease) -> Path:
     return Path(settings.release_dir or ".") / f"{rel.id}-{rel.file_name}"
 
 
+def _latest_version(db, platform: str) -> str | None:
+    versions = db.scalars(select(SoftwareRelease.version).where(SoftwareRelease.platform == platform))
+    return max(versions, key=version_tuple, default=None)
+
+
+def next_version(v: str) -> str:
+    parts = list(version_tuple(v)) + [0] * (3 - len(version_tuple(v)))
+    parts[2] += 1
+    return ".".join(map(str, parts[:3]))
+
+
+def _package_version(path: Path) -> str | None:
+    """The VERSION file that deploy/make_release.py puts at the top of every package."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as z:
+            return z.read("VERSION").decode().strip()
+    except (KeyError, zipfile.BadZipFile, OSError, UnicodeDecodeError):
+        return None
+
+
 @router.get("/admin/releases")
 def admin_releases(db: DB, user: CurrentUser):
     _superadmin(user)
     rels = db.scalars(select(SoftwareRelease).order_by(SoftwareRelease.created_at.desc()))
     return [{**_release_out(r), "downloads": db.scalar(select(func.count(DownloadEvent.id)).where(
         DownloadEvent.release_id == r.id, DownloadEvent.result == "ok"))} for r in rels]
+
+
+@router.get("/admin/releases/next-version")
+def release_next_version(db: DB, user: CurrentUser, platform: str = "windows"):
+    _superadmin(user)
+    latest = _latest_version(db, platform)
+    return {"latest": latest, "next": next_version(latest) if latest else "1.0.0"}
 
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
@@ -867,8 +941,11 @@ def upload_release(db: DB, user: CurrentUser, version: str = Form(..., max_lengt
     _superadmin(user)
     if not re.fullmatch(r"\d+(\.\d+){0,3}", version.strip()):
         raise HTTPException(422, "Version like 1.2.0")
-    if db.scalar(select(SoftwareRelease.id).where(SoftwareRelease.version == version, SoftwareRelease.platform == platform)):
-        raise HTTPException(409, f"Version {version} for {platform} already exists")
+    version = version.strip()
+    latest = _latest_version(db, platform)
+    if latest and version_tuple(version) <= version_tuple(latest):
+        raise HTTPException(409, f"Every update needs a higher version number. The latest {platform} release is "
+                                 f"{latest}; use {next_version(latest)} or higher.")
     folder = _release_dir()
     folder.mkdir(parents=True, exist_ok=True)
     name = SAFE_NAME.sub("_", Path(file.filename or f"TallyCloud-{version}.exe").name)[:150]
@@ -883,6 +960,12 @@ def upload_release(db: DB, user: CurrentUser, version: str = Form(..., max_lengt
             size += len(chunk)
             out.write(chunk)
     rel.sha256, rel.file_size = digest.hexdigest(), size
+    if name.lower().endswith(".zip"):
+        packaged = _package_version(tmp)
+        if packaged != version:
+            tmp.unlink(missing_ok=True)
+            raise HTTPException(422, f"This package is version {packaged or 'unknown'}, not {version}. "
+                                     "Build it with deploy/make_release.py, or give its real version.")
     try:
         rel.signature = sign_bytes(rel.sha256.encode())    # installations can check the file came from us
     except RuntimeError:

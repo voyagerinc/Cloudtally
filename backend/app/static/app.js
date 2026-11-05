@@ -1568,7 +1568,11 @@ $("#licf").onsubmit = async (e) => {
 
 // ------------------------------------------------------------------ licence portal: releases
 renderers.releases = async () => {
-  const rows = await api("/admin/releases");
+  const [rows, nv] = await Promise.all([api("/admin/releases"), api("/admin/releases/next-version")]);
+  $("#rel-latest").textContent = nv.latest ? `Latest release: ${nv.latest}. The next one must be ${nv.next} or higher.`
+    : "No release yet: the first one is usually 1.0.0.";
+  const vin = $("#rel-form").elements.namedItem("version");
+  if (!vin.value) vin.value = nv.next;
   table($("#rel-table"), [
     { label: "Version", key: "version" }, { label: "Platform", key: "platform" }, { label: "File", key: "file_name" },
     { label: "Size", num: true, get: (r) => size(r.file_size) }, { label: "SHA-256", get: (r) => r.sha256.slice(0, 12) + "…" },
@@ -1632,6 +1636,22 @@ renderers.licence = async () => {
   ].map(([k, v, sub]) => `<div class="card"><div class="k">${esc(k)}</div><div class="v">${v}</div><div class="small muted">${sub}</div></div>`).join("");
   $("#lc-error").textContent = l.last_error ? `Last attempt: ${l.last_error}` : "";
   $("#lc-form").hidden = !!l.activated; $("#lc-actions").hidden = !l.activated;
+  const u = l.update_available;
+  $("#lc-update").hidden = !u;
+  if (u) $("#lc-update").innerHTML = `<h4>Version ${esc(u.version)} is available</h4>
+    <p class="small">${esc(u.release_notes || "")}</p>
+    ${u.verified ? `<p class="small okmsg">Downloaded and checked: signed by Voyager, fingerprint matches.</p>
+      ${l.can_install_updates ? `<button type="button" id="lc-install">Install update and restart</button>`
+        : `<p class="small muted">This server was not set up with the Windows installer; install the package by hand.</p>`}`
+      : `<button type="button" id="lc-download">Download and check</button>`}`;
+  const dl = $("#lc-download"), inst = $("#lc-install");
+  if (dl) dl.onclick = () => getUpdate();
+  if (inst) inst.onclick = async () => {
+    if (!confirm(`Install version ${u.version}? Tally Cloud restarts: everyone is disconnected for a minute or two. `
+      + "If the new version does not start, the previous one comes back by itself.")) return;
+    try { const r = await api("/licence/update/install", { method: "POST" }); alert(r.message); waitForRestart(u.version); }
+    catch (err) { $("#lc-error").textContent = err.message; }
+  };
   $("#lc-form").elements.namedItem("server_url").value = l.server_url || "";
 };
 $("#lc-form").onsubmit = async (e) => {
@@ -1642,6 +1662,25 @@ $("#lc-form").onsubmit = async (e) => {
     await renderers.licence(); refreshBanner(); alert("Activated."); }
   catch (err) { $("#lc-error").textContent = err.message; } finally { btn.disabled = false; }
 };
+async function getUpdate() {
+  $("#lc-error").textContent = "Looking for updates…";
+  try { const r = await api("/licence/update/download", { method: "POST" }); $("#lc-error").textContent = r.message; await renderers.licence(); }
+  catch (err) { $("#lc-error").textContent = err.message; }
+}
+$("#lc-get-update").onclick = () => getUpdate();
+function waitForRestart(version) {
+  $("#lc-error").textContent = `Installing ${version}… this page reloads when Tally Cloud is back.`;
+  const started = Date.now();
+  const poll = async () => {
+    try {
+      const l = await api("/licence");
+      if (l.version === version) { location.reload(); return; }
+    } catch (_) { /* restarting */ }
+    if (Date.now() - started < 10 * 60000) setTimeout(poll, 5000);
+    else $("#lc-error").textContent = "The update is taking long. Reload this page; the Licence tab shows the version that runs.";
+  };
+  setTimeout(poll, 10000);
+}
 $("#lc-check").onclick = async () => { try { await api("/licence/check", { method: "POST" }); await renderers.licence(); refreshBanner(); } catch (err) { $("#lc-error").textContent = err.message; } };
 $("#lc-deactivate").onclick = async () => {
   if (!confirm("Deactivate this server? Its licence slot is given back so you can activate another server. This server becomes read-only; no data is deleted.")) return;

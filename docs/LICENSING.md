@@ -94,7 +94,51 @@ The public key that installations need:
 curl -s https://tallycloud.voyager.co.in/api/v1/licensing/public-key
 ```
 
-## Setting up an installation by hand (until the Windows installer exists)
+## Releases and versions
+
+Every update is a release with a **higher version number**. The version lives in one place,
+`backend/app/__init__.py`.
+
+1. **Build the package** on the development PC, from committed code:
+   ```
+   python deploy/make_release.py --bump patch      # fixes:        1.0.0 -> 1.0.1
+   python deploy/make_release.py --bump minor      # new features: 1.0.1 -> 1.1.0
+   git push origin main v1.0.1
+   ```
+   It writes the new version, commits it, tags the commit `v1.0.1`, and builds
+   `dist/TallyCloud-1.0.1.zip`. The zip holds `VERSION`, `install.cmd`, `README.txt` and the app.
+   Add `--public-key <key from the portal>` to include the portal's public key. Without it, the
+   installer fetches the key from the portal over HTTPS.
+2. **Upload** it on the portal's **Releases** tab. The portal shows the latest version and fills in the
+   next one. It **refuses a version that is not higher** than every earlier release, and a package whose
+   `VERSION` file says something else. Every file gets its SHA-256 and an Ed25519 signature made with the
+   portal's private key.
+3. **Publish** it once it is tested. Only licences whose version range covers it can see it.
+4. **The customer's server admin** sees it in two places:
+   * **Portal → My licence → Downloads**: the zip, for a first installation.
+   * **Their server → Licence → Check for updates**: the server downloads the release with its own
+     credentials. It checks the signature first and the SHA-256 after downloading, and refuses a file
+     that fails either check. Then **Install update and restart** runs `update-server.ps1`. That script
+     keeps settings and data, swaps the app folder, installs packages, updates the database, and
+     restarts. If the new version does not start, it puts the previous one back. Log:
+     `C:\TallyCloud\logs\update.log`.
+
+## First installation on a customer's Windows server or PC
+
+Unpack the release zip, then right-click `install.cmd` → **Run as administrator**. The script
+(`deploy/windows/install-server.ps1`):
+
+* installs Python 3.12 and PostgreSQL 16 with winget if they are missing;
+* makes a separate database with a random password, kept in `C:\TallyCloud\secrets` (readable by
+  administrators only);
+* installs the app in `C:\TallyCloud\app` and starts it with Windows (task *Tally Cloud*, port 8080);
+* opens port 8080 for the office network only (Domain and Private firewall profiles).
+
+The browser then opens the **first-run page**: licence key, and the manager's user ID and password.
+Other users open `http://<computer name>:8080`. Running the installer again repairs the installation and
+keeps its data.
+
+## Setting up an installation by hand (without the installer)
 
 In that server's `backend/.env`:
 
@@ -104,7 +148,7 @@ ERP_LICENSE_PUBLIC_KEY=<public key from the portal>
 ERP_LICENSE_SERVER_URL=https://tallycloud.voyager.co.in
 ```
 
-Start the app, sign in as its super admin, open **Licence**, and enter the licence key.
+Start the app and open it. The first-run page asks for the licence key and creates the manager.
 
 ## Migration and rollback
 
@@ -117,12 +161,12 @@ Start the app, sign in as its super admin, open **Licence**, and enter the licen
 
 ## Known limitations
 
-* **The Windows installer itself (FR-07) is not built yet.** The portal already stores, signs and
-  serves installer files. Packaging the app with Python, PostgreSQL, a Windows service and the public
-  key, and the data-preserving upgrade, is the next phase. Until then, installations are set up by
-  hand as shown above.
-* **Updates on an installation** are shown, not installed: the company admin downloads the new
-  installer from the portal.
+* **The Windows install and update scripts have not been run on a clean Windows machine yet.** Try them
+  on a test PC before the first customer. The package is a signed zip with `install.cmd`, not a
+  signed `.exe`. Code-signing an `.exe` needs a code-signing certificate.
+* The office network reaches the app over plain HTTP on port 8080 (LAN only; the firewall rule
+  excludes public networks). For HTTPS inside the office, put a reverse proxy with a certificate in
+  front of it.
 * **MFA** (optional in the PRD) is not implemented.
 * **E-mail** is implemented with standard SMTP but has not been tested against a real mail server.
 * **Rate limits** on activation and invitation endpoints are kept in memory, per app process. That

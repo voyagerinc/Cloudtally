@@ -115,6 +115,99 @@ def deactivate(db: Session) -> None:
     enforce.forget_cached()
 
 
+def updates_dir():
+    from pathlib import Path
+    base = Path(settings.install_dir) if settings.install_dir else Path(__file__).resolve().parents[3]
+    folder = base / "updates"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def check_signature(sha256_hex: str, signature: str | None) -> bool:
+    """True when Voyager's private key signed this file's SHA-256 (the installer cannot be swapped)."""
+    import base64
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    if not signature or not settings.license_public_key:
+        return False
+    try:
+        sig = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
+        Ed25519PublicKey.from_public_bytes(base64.b64decode(settings.license_public_key)).verify(sig, sha256_hex.encode())
+        return True
+    except (InvalidSignature, ValueError):
+        return False
+
+
+def _get_file(url: str, dest) -> str:
+    """Streams a download to `dest`; returns its SHA-256."""
+    import hashlib
+    digest = hashlib.sha256()
+    try:
+        with httpx.stream("GET", url, timeout=120, follow_redirects=False) as r:
+            if r.status_code >= 400:
+                raise LicenceError(f"The download failed ({r.status_code})")
+            with open(dest, "wb") as f:
+                for chunk in r.iter_bytes(1 << 20):
+                    digest.update(chunk)
+                    f.write(chunk)
+    except httpx.HTTPError as exc:
+        raise LicenceError(f"The download failed: {exc.__class__.__name__}") from exc
+    return digest.hexdigest()
+
+
+def fetch_update(db: Session) -> dict | None:
+    """Asks the cloud for a newer permitted release, downloads it and checks hash and signature.
+
+    Returns the update (with "file" set once it is downloaded and verified), or None when up to date."""
+    st = state(db)
+    if not st.installation_secret:
+        raise LicenceError("This installation is not activated yet")
+    base = st.server_url or settings.license_server_url
+    offer = _post(base, "/licenses/update", {"installation_id": st.installation_id,
+                                             "installation_secret": st.installation_secret,
+                                             "product_version": __version__}).get("update")
+    if offer is None:
+        st.update_available = None
+        db.commit()
+        return None
+    if not check_signature(offer["sha256"], offer.get("signature")):
+        raise LicenceError(f"Version {offer['version']} is not signed by Voyager. It was not downloaded.")
+    dest = updates_dir() / f"TallyCloud-{offer['version']}.zip"
+    part = dest.with_suffix(".part")
+    got = _get_file(base.rstrip("/") + offer["url"], part)
+    if got != offer["sha256"]:
+        part.unlink(missing_ok=True)
+        raise LicenceError("The downloaded file does not match its fingerprint (SHA-256). Try again.")
+    part.replace(dest)
+    st.update_available = {k: offer[k] for k in ("version", "release_notes", "sha256", "file_size")} | {
+        "file": str(dest), "verified": True}
+    db.commit()
+    return st.update_available
+
+
+def install_update(db: Session) -> str:
+    """Starts deploy/windows/update-server.ps1 on the downloaded package; it restarts the app."""
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+    st = state(db)
+    upd = st.update_available or {}
+    pkg = Path(upd.get("file") or "")
+    if not upd.get("verified") or not pkg.is_file():
+        raise LicenceError("Download and check the update first")
+    if sys.platform != "win32" or not settings.install_dir:
+        raise LicenceError("Installing updates from this page works on servers set up with the Windows installer")
+    # Run a copy: the script replaces the app folder it lives in.
+    script = updates_dir() / "update-server.ps1"
+    shutil.copyfile(Path(settings.install_dir) / "app" / "deploy" / "windows" / "update-server.ps1", script)
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    subprocess.Popen(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+                      "-Package", str(pkg), "-InstallDir", settings.install_dir],
+                     creationflags=flags, close_fds=True)
+    return upd["version"]
+
+
 def due(st: LicenseState) -> bool:
     payload = verify(st.token, settings.license_public_key) if st.token else None
     hours = int((payload or {}).get("heartbeat_hours") or 24)

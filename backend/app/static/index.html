@@ -324,8 +324,11 @@
 
 <section id="releases" class="tab" hidden>
   <h2>Software releases</h2>
-  <p class="muted small">Upload the signed Windows installer. Company admins see a release in their portal once it is
-    published and their licence covers its version.</p>
+  <p class="muted small">Every update needs a new, higher version. Build the package on the development PC with
+    <code>python deploy/make_release.py --bump patch</code> (or <code>minor</code> for new features); it stamps the
+    version into the package. Upload it here, check it, then <b>Publish</b>: company admins download it from their
+    portal, and activated servers install it from their Licence tab.</p>
+  <p class="small" id="rel-latest"></p>
   <form id="rel-form" class="panel row">
     <label>Version<input name="version" required placeholder="1.1.0" pattern="\d+(\.\d+){0,3}"></label>
     <label>Installer<input name="file" type="file" required accept=".exe,.msi,.zip"></label>
@@ -356,8 +359,10 @@
     </div>
     <button>Activate</button>
   </form>
+  <div id="lc-update" class="lic-box" hidden></div>
   <div class="row" id="lc-actions" hidden>
     <button type="button" id="lc-check" class="secondary">Check now</button>
+    <button type="button" id="lc-get-update" class="secondary">Check for updates</button>
     <button type="button" id="lc-deactivate" class="secondary danger">Deactivate (moving to another server)</button>
   </div>
 </section>

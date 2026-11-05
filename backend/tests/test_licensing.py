@@ -375,3 +375,126 @@ def test_only_the_manager_runs_tally_sync(db, admin):
     assert api.get(f"{V1}/sync/dashboard?company_id={cid}", headers=heads["accadmin"]).status_code == 200
     catalog = api.get(f"{V1}/permissions", headers=heads["manager"]).json()
     assert "sync.manage" not in {p["key"] for g in catalog["groups"] for p in g["permissions"]}
+
+
+def _package(version: str, extra: dict | None = None) -> bytes:
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("VERSION", version + "\n")
+        z.writestr("app/backend/app/main.py", "# app\n")
+        for k, v in (extra or {}).items():
+            z.writestr(k, v)
+    return buf.getvalue()
+
+
+def _upload(admin_headers, version, data=None, name=None):
+    data = _package(version) if data is None else data
+    return api.post(f"{V1}/admin/releases", headers=admin_headers, data={"version": version, "release_notes": f"v{version}"},
+                    files={"file": (name or f"TallyCloud-{version}.zip", io.BytesIO(data), "application/zip")})
+
+
+def test_every_release_needs_a_higher_version(db, admin, portal):
+    assert api.get(f"{V1}/admin/releases/next-version", headers=admin).json() == {"latest": None, "next": "1.0.0"}
+    assert _upload(admin, "1.0.0").status_code == 201
+    r = _upload(admin, "1.0.0")
+    assert r.status_code == 409 and "1.0.1 or higher" in r.json()["detail"]
+    assert _upload(admin, "0.9.9").status_code == 409
+    r = _upload(admin, "1.0.1", data=_package("1.0.5"))          # the package says another version
+    assert r.status_code == 422 and "version 1.0.5" in r.json()["detail"]
+    assert _upload(admin, "1.1.0").status_code == 201
+    assert api.get(f"{V1}/admin/releases/next-version", headers=admin).json() == {"latest": "1.1.0", "next": "1.1.1"}
+
+
+def test_installation_downloads_checks_and_offers_its_update(db, admin, portal, monkeypatch, tmp_path):
+    from app import __version__
+    lic = licence(admin, customer(admin), max_version="9")
+
+    def via_portal(base_url, path, body):
+        monkeypatch.setattr(settings, "license_mode", "server")
+        try:
+            r = api.post(V1 + path, json=body)
+        finally:
+            monkeypatch.setattr(settings, "license_mode", "client")
+        if r.status_code >= 400:
+            raise lic_client.LicenceError(r.json()["detail"])
+        return r.json()
+
+    def get_via_portal(url, dest):
+        monkeypatch.setattr(settings, "license_mode", "server")
+        try:
+            r = api.get(url.split("tallycloud.voyager.co.in", 1)[-1])
+        finally:
+            monkeypatch.setattr(settings, "license_mode", "client")
+        if r.status_code >= 400:
+            raise lic_client.LicenceError(r.json()["detail"])
+        dest.write_bytes(r.content)
+        from hashlib import sha256
+        return sha256(r.content).hexdigest()
+
+    monkeypatch.setattr(lic_client, "_post", via_portal)
+    monkeypatch.setattr(lic_client, "_get_file", get_via_portal)
+    monkeypatch.setattr(settings, "install_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "license_mode", "client")
+    enforce.forget_cached()
+    assert api.post(f"{V1}/licence/activate", headers=admin, json={"license_key": lic["license_key"]}).status_code == 200
+
+    # Nothing newer yet.
+    r = api.post(f"{V1}/licence/update/download", headers=admin)
+    assert r.status_code == 200 and r.json()["update"] is None
+
+    # A newer published release: downloaded, fingerprint and Voyager's signature checked.
+    newer = ".".join(str(int(x) + (1 if i == 0 else 0)) for i, x in enumerate(__version__.split(".")))
+    monkeypatch.setattr(settings, "license_mode", "server")
+    rel = _upload(admin, newer).json()
+    api.post(f"{V1}/admin/releases/{rel['id']}/status", headers=admin, json={"status": "published"})
+    monkeypatch.setattr(settings, "license_mode", "client")
+    r = api.post(f"{V1}/licence/update/download", headers=admin)
+    assert r.status_code == 200, r.text
+    upd = r.json()["update"]
+    assert upd["version"] == newer and upd["verified"]
+    assert (tmp_path / "updates" / f"TallyCloud-{newer}.zip").read_bytes() == _package(newer)
+    s = api.get(f"{V1}/licence", headers=admin).json()
+    assert s["update_available"]["version"] == newer and s["can_install_updates"]
+
+    # A release whose signature is not Voyager's is never downloaded.
+    from app.models import SoftwareRelease
+    row = db.get(SoftwareRelease, rel["id"])
+    db.refresh(row)
+    row.signature = row.signature[::-1]
+    db.commit()
+    r = api.post(f"{V1}/licence/update/download", headers=admin)
+    assert r.status_code == 422 and "not signed by Voyager" in r.json()["detail"]
+
+
+def test_make_release_bumps_tags_and_stamps_the_version(tmp_path):
+    import subprocess
+    import sys
+    import zipfile
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[2]
+    clone = tmp_path / "repo"
+    subprocess.run(["git", "clone", "-q", str(repo), str(clone)], check=True)
+    for k, v in (("user.email", "release@test"), ("user.name", "release test")):
+        subprocess.run(["git", "-C", str(clone), "config", k, v], check=True)
+    # This working copy's builder and scripts, committed in the clone (they may not be committed here yet).
+    import shutil
+    for rel in ("deploy/make_release.py", "deploy/windows/install-server.ps1", "deploy/windows/update-server.ps1"):
+        shutil.copyfile(repo / rel, clone / rel)
+    subprocess.run(["git", "-C", str(clone), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(clone), "commit", "-q", "-m", "builder"], check=True)
+    run = lambda *a: subprocess.run([sys.executable, str(clone / "deploy" / "make_release.py"), *a, "--out", str(tmp_path / "dist")],
+                                    cwd=clone, capture_output=True, text=True)
+    before = core.version_tuple((clone / "backend/app/__init__.py").read_text())
+    r = run("--bump", "patch")
+    assert r.returncode == 0, r.stderr
+    version = f"{before[0]}.{before[1]}.{before[2] + 1}"
+    with zipfile.ZipFile(tmp_path / "dist" / f"TallyCloud-{version}.zip") as z:
+        assert z.read("VERSION").decode().strip() == version
+        assert f'__version__ = "{version}"' in z.read("app/backend/app/__init__.py").decode()
+        assert "install.cmd" in z.namelist() and "app/deploy/windows/install-server.ps1" in z.namelist()
+    tags = subprocess.run(["git", "-C", str(clone), "tag", "--list", f"v{version}"], capture_output=True, text=True).stdout
+    assert tags.strip() == f"v{version}"
+    # Changed code without a new version is refused.
+    (clone / "README.md").write_text("changed\n")
+    assert run().returncode != 0
