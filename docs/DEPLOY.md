@@ -136,8 +136,8 @@ be activated again. To run without the portal, call the setup with `PORTAL=no`.
 
 ## Updating
 
-**From the web page:** sign in as a super admin and open the **Server** tab. *Check for updates* shows
-what is new on GitHub; *Update & restart* pulls it, installs Python packages, updates the database and
+**From the web page:** sign in as a super admin and open the **System admin** tab. *Check for updates* shows
+what is new on GitHub; *Deploy & restart* pulls it, installs Python packages, updates the database and
 restarts the app (users are disconnected for a few seconds). If the new version does not start, the
 server goes back to the previous one. *Restart only* restarts the app. The log of the last run is shown
 there and kept in `/var/lib/tallycloud-update/state/update.log`.

@@ -22,7 +22,7 @@
     <button data-tab="settings" data-perm="sync.read">Connector</button>
     <button data-tab="audit" data-perm="audit.read">Audit</button>
     <button data-tab="users" data-perm="users.manage">Users</button>
-    <button data-tab="server" data-perm="superadmin">Server</button>
+    <button data-tab="server" data-perm="superadmin">System admin</button>
     <button data-tab="customers" data-perm="portal-admin">Customers</button>
     <button data-tab="releases" data-perm="portal-admin">Releases</button>
     <button data-tab="mylicence" data-perm="portal-customer">My licence</button>
@@ -296,14 +296,15 @@
 </section>
 
 <section id="server" class="tab" hidden>
-  <h2>Server</h2>
-  <p class="muted small">Update pulls the latest version from GitHub, updates the database and restarts the app.
+  <h2>System admin</h2>
+  <p class="muted small"><b>Deploy &amp; restart</b> pulls the latest code from GitHub, installs Python packages,
+    updates the database and restarts the app.
     Everyone is disconnected for a few seconds; a sync that is running stops and continues after the restart.
     If the new version does not start, the server goes back to the previous one.</p>
   <div id="sv-cards" class="cards"></div>
   <div class="row filters">
     <button type="button" id="sv-check" class="secondary">Check for updates</button>
-    <button type="button" id="sv-update">Update &amp; restart</button>
+    <button type="button" id="sv-update">Deploy &amp; restart</button>
     <button type="button" id="sv-restart" class="secondary">Restart only</button>
     <span id="sv-msg" class="muted" aria-live="polite"></span>
   </div>

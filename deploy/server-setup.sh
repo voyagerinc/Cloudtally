@@ -156,7 +156,7 @@ if [ "${PORTAL:-yes}" != no ]; then
   grep -q '^ERP_PUBLIC_URL=' "$ENV_FILE" || echo "ERP_PUBLIC_URL=https://$DOMAIN" >> "$ENV_FILE"
 fi
 
-echo "==> Updates from the web app (super admin: Server tab)"
+echo "==> Updates from the web app (super admin: System admin tab)"
 # The app may only drop a request file into inbox/; deploy/update.sh does the work as root.
 UPDATE_DIR=/var/lib/tallycloud-update
 install -d -m 755 -o root -g root "$UPDATE_DIR"

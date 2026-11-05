@@ -1,4 +1,4 @@
-"""Server tab: a super admin pulls the latest version from GitHub and restarts the app.
+"""System admin tab: a super admin pulls the latest version from GitHub and restarts the app.
 
 The app has no root rights. It only drops a request file naming a fixed action; deploy/update.sh,
 started by systemd as root, does the work and reports back through status.json and update.log."""

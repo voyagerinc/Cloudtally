@@ -101,6 +101,7 @@ const SPECIAL_TABS = {
   "portal-admin": () => state.user?.is_superadmin && state.user.license_mode === "server",
   "portal-customer": () => state.user?.license_mode === "server" && !!state.user.customer_id,
   "licence-client": () => state.user?.is_superadmin && state.user.license_mode === "client",
+  superadmin: () => !!state.user?.is_superadmin,
 };
 function applyPerms() {
   const reportOpts = [...$("#r-name").options];
@@ -1292,7 +1293,12 @@ renderers.server = async () => {
   try { s = await api("/admin/system"); }
   catch (err) {
     // During a restart the server does not answer for a few seconds.
-    if (/not set up/.test(err.message)) { $("#sv-msg").textContent = err.message; return; }
+    if (/not set up/.test(err.message)) {
+      $("#sv-msg").textContent = "Deploying from this page is not set up on this server yet. Run once on the server, as root: "
+        + "cd ~/projects/tallycloud && git pull && sudo bash deploy/server-setup.sh tallycloud.voyager.co.in <your e-mail>";
+      ["#sv-check", "#sv-update", "#sv-restart"].forEach((id) => ($(id).disabled = true));
+      return;
+    }
     $("#sv-msg").textContent = "Waiting for the server to come back…"; pollServer(3000); return;
   }
   const label = { ok: "done", failed: "failed", running: "running", never: "never run" }[s.state] || s.state;
@@ -1317,7 +1323,7 @@ async function serverAction(action, question) {
   catch (err) { alert(err.message); }
 }
 $("#sv-check").onclick = () => serverAction("check");
-$("#sv-update").onclick = () => serverAction("update", "Pull the latest version from GitHub and restart Tally Cloud?\n\nEveryone is disconnected for a few seconds.");
+$("#sv-update").onclick = () => serverAction("update", "Deploy the latest code from GitHub and restart Tally Cloud?\n\nEveryone is disconnected for a few seconds. If the new version does not start, the server goes back to the previous one.");
 $("#sv-restart").onclick = () => serverAction("restart", "Restart Tally Cloud?\n\nEveryone is disconnected for a few seconds.");
 
 // ------------------------------------------------------------------ licence: banner on every page

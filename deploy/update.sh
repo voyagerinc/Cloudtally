@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pulls Tally Cloud from GitHub and restarts it, when a super admin asks for it on the Server tab.
+# Pulls Tally Cloud from GitHub and restarts it, when a super admin asks for it on the System admin tab.
 #
 # Started by systemd (tallycloud-update.path -> tallycloud-update.service) as root. The web app itself
 # runs without root rights: all it can do is drop a request file naming one fixed action
