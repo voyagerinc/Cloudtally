@@ -168,8 +168,10 @@ echo "==> Firewall"
 # Tally is never exposed: the tunnel ends on 127.0.0.1. Turning ufw on here could cut off the other
 # software on this server, so rules are only added when it is already on.
 if ufw status | grep -q "Status: active"; then
-  ufw allow OpenSSH >/dev/null
-  ufw allow 'Nginx Full' >/dev/null
+  # by port: nginx.org's package has no ufw "Nginx Full" profile
+  ufw allow 22/tcp >/dev/null
+  ufw allow 80/tcp >/dev/null
+  ufw allow 443/tcp >/dev/null
   echo "    ufw is on: allowed SSH, HTTP and HTTPS"
 else
   echo "    ufw is off; left off (other software here may need its ports). Nothing extra is exposed."
