@@ -29,19 +29,37 @@ function Random-Secret { -join ((48..57) + (65..90) + (97..122) | Get-Random -Co
 function Only-Admins($path) {   # the folder holds the database password: SYSTEM and administrators only
   icacls $path /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" | Out-Null
 }
+function Winget-Try($id, $extra) {
+  # True when winget installed it. Download servers fail now and then, so callers retry.
+  if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) { return $false }
+  $wargs = @("install", "-e", "--id", $id, "--silent", "--accept-package-agreements", "--accept-source-agreements") + $extra
+  & winget.exe @wargs
+  return ($LASTEXITCODE -eq 0)
+}
 function Winget-Install($id, $extra) {
   if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
     throw "winget is missing. Install 'App Installer' from the Microsoft Store, or install $id by hand, then run this again."
   }
-  $wargs = @("install", "-e", "--id", $id, "--silent", "--accept-package-agreements", "--accept-source-agreements") + $extra
-  & winget.exe @wargs
-  if ($LASTEXITCODE -ne 0) { throw "Installing $id failed (winget exit code $LASTEXITCODE)." }
+  for ($try = 1; $try -le 3; $try++) {
+    if (Winget-Try $id $extra) { return }
+    Write-Host "    download or install failed (attempt $try of 3)" -ForegroundColor Yellow
+    Start-Sleep -Seconds 10
+  }
+  throw "Installing $id failed 3 times. Install it by hand, then run install.cmd again."
 }
 
 # ------------------------------------------------------------------ Python 3.11+
 function Find-Python {
-  foreach ($c in @("C:\Program Files\Python312\python.exe", "C:\Program Files\Python311\python.exe")) {
+  foreach ($c in @("C:\Program Files\Python313\python.exe", "C:\Program Files\Python312\python.exe",
+                   "C:\Program Files\Python311\python.exe")) {
     if (Test-Path $c) { return $c }
+  }
+  # Any Python 3.11+ already on this computer (py launcher or PATH).
+  foreach ($cmd in @(@("py", "-3"), @("python"))) {
+    try {
+      $exe = & $cmd[0] $cmd[1..9] -c "import sys; print(sys.executable if sys.version_info >= (3, 11) else '')" 2>$null
+      if ($LASTEXITCODE -eq 0 -and $exe -and (Test-Path $exe)) { return $exe.Trim() }
+    } catch { }
   }
   return $null
 }
@@ -58,27 +76,70 @@ Write-Host "    Python: $python"
 $secrets = Join-Path $InstallDir "secrets"
 New-Item -ItemType Directory -Force $secrets | Out-Null
 Only-Admins $secrets
-function Find-Psql { Get-ChildItem "C:\Program Files\PostgreSQL\*\bin\psql.exe" -ErrorAction SilentlyContinue | Sort-Object FullName | Select-Object -Last 1 }
-$psql = Find-Psql
+function Find-Postgres {
+  # Any PostgreSQL that runs as a Windows service, wherever it is installed: its psql and its port.
+  $services = Get-CimInstance Win32_Service -Filter "Name LIKE 'postgresql%'" -ErrorAction SilentlyContinue | Sort-Object Name -Descending
+  foreach ($svc in $services) {
+    if ($svc.PathName -match '^"?(?<exe>[^"]*pg_ctl\.exe)"?.*?-D\s+"?(?<data>[^"]+?)"?(\s|$)') {
+      $bin, $data = (Split-Path $Matches.exe), $Matches.data
+      $psqlExe = Join-Path $bin "psql.exe"
+      if (-not (Test-Path $psqlExe)) { continue }
+      $pgPort = 5432
+      $conf = Join-Path $data "postgresql.conf"
+      if (Test-Path $conf) {
+        $m = Select-String -Path $conf -Pattern '^\s*port\s*=\s*(\d+)' | Select-Object -Last 1
+        if ($m) { $pgPort = [int]$m.Matches[0].Groups[1].Value }
+      }
+      if ($svc.State -ne "Running") { Start-Service $svc.Name }
+      return [pscustomobject]@{ Psql = $psqlExe; Port = $pgPort; Name = $svc.Name }
+    }
+  }
+  $p = Get-ChildItem "C:\Program Files\PostgreSQL\*\bin\psql.exe" -ErrorAction SilentlyContinue | Sort-Object FullName | Select-Object -Last 1
+  if ($p) { return [pscustomobject]@{ Psql = $p.FullName; Port = 5432; Name = "PostgreSQL" } }
+  return $null
+}
+function Install-Postgres($super) {
+  $override = "--mode unattended --unattendedmodeui none --superpassword $super --serverport 5432"
+  foreach ($id in @("PostgreSQL.PostgreSQL.16", "PostgreSQL.PostgreSQL.17")) {
+    for ($try = 1; $try -le 2; $try++) {
+      Write-Host "==> Installing $id (attempt $try)"
+      if (Winget-Try $id @("--override", $override)) { return }
+      Write-Host "    the download failed; trying again in 15 seconds" -ForegroundColor Yellow
+      Start-Sleep -Seconds 15
+    }
+  }
+  throw ("PostgreSQL could not be downloaded: the EnterpriseDB download server refused it. Install PostgreSQL " +
+         "by hand from https://www.enterprisedb.com/downloads/postgres-postgresql-downloads (remember the password " +
+         "you give the 'postgres' user), then run install.cmd again. It finds that PostgreSQL and asks for the password.")
+}
+
 $superFile = Join-Path $secrets "postgres-superuser.txt"
-if (-not $psql) {
-  Write-Host "==> Installing PostgreSQL 16"
+$pg = Find-Postgres
+if (-not $pg) {
   $super = Random-Secret
   Set-Content -Path $superFile -Value $super -Encoding ASCII
-  Winget-Install "PostgreSQL.PostgreSQL.16" @("--override", "--mode unattended --unattendedmodeui none --superpassword $super --serverport 5432")
-  $psql = Find-Psql
-  if (-not $psql) { throw "PostgreSQL was installed but psql.exe was not found." }
-} elseif (Test-Path $superFile) {
-  $super = (Get-Content $superFile -Raw).Trim()
-} else {
-  $sec = Read-Host -AsSecureString "PostgreSQL is already installed. Password of its 'postgres' user"
-  $super = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+  Install-Postgres $super
+  $pg = Find-Postgres
+  if (-not $pg) { throw "PostgreSQL was installed but could not be found. Run install.cmd again." }
 }
-$env:PGPASSWORD = $super
+Write-Host "    PostgreSQL: $($pg.Name), port $($pg.Port)"
 function Sql($q) {
-  $out = & $psql.FullName -h 127.0.0.1 -U postgres -d postgres -tAc $q
+  $out = & $pg.Psql -h 127.0.0.1 -p $pg.Port -U postgres -d postgres -tAc $q
   if ($LASTEXITCODE -ne 0) { throw "PostgreSQL refused: $q" }
   return $out
+}
+if (Test-Path $superFile) { $super = (Get-Content $superFile -Raw).Trim() } else { $super = $null }
+for ($try = 1; $try -le 3; $try++) {
+  if (-not $super) {
+    $sec = Read-Host -AsSecureString "PostgreSQL is already installed on this computer. Password of its 'postgres' user"
+    $super = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+  }
+  $env:PGPASSWORD = $super
+  & $pg.Psql -h 127.0.0.1 -p $pg.Port -U postgres -d postgres -tAc "select 1" 2>$null | Out-Null
+  if ($LASTEXITCODE -eq 0) { break }
+  Write-Host "    that password was not accepted" -ForegroundColor Yellow
+  $super = $null
+  if ($try -eq 3) { throw "PostgreSQL did not accept the password of its 'postgres' user." }
 }
 
 $envFile = Join-Path $secrets "tallycloud.env"
@@ -96,7 +157,7 @@ if (Test-Path $envFile) {
   else { $publicKey = (Invoke-RestMethod "$LicenceServer/api/v1/licensing/public-key").public_key }
   @(
     "# Made by install-server.ps1. Kept across updates.",
-    "ERP_DATABASE_URL=postgresql+psycopg://tallycloud:$dbPass@127.0.0.1:5432/tallycloud",
+    "ERP_DATABASE_URL=postgresql+psycopg://tallycloud:$dbPass@127.0.0.1:$($pg.Port)/tallycloud",
     "ERP_LICENSE_MODE=client",
     "ERP_LICENSE_PUBLIC_KEY=$publicKey",
     "ERP_LICENSE_SERVER_URL=$LicenceServer",
