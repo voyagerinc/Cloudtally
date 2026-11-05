@@ -1,0 +1,83 @@
+# Automatic software release: push a version tag and GitHub builds the package, attaches it to a
+# GitHub Release and uploads it to the licence portal (Releases tab).
+#
+#   python deploy/make_release.py --bump patch      (on the development PC: new version, commit, tag)
+#   git push origin main v1.0.1                     (this workflow does the rest)
+#
+# One-time setup (repository -> Settings -> Secrets and variables -> Actions):
+#   secret   TALLYCLOUD_RELEASE_TOKEN   from the portal server: sudo ../.venv/bin/python -m app.cli release-token
+#   variable TALLYCLOUD_PORTAL_URL      optional, default https://tallycloud.voyager.co.in
+#   variable TALLYCLOUD_PUBLIC_KEY      optional, the portal's public key, built into the package
+#   variable TALLYCLOUD_AUTO_PUBLISH    optional, "true" publishes at once; otherwise the release
+#                                       arrives as a draft to check and publish on the Releases tab
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write          # to create the GitHub Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # tags and history, for the release notes
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check the tag is the version in the code
+        id: version
+        run: |
+          version=$(sed -n 's/^__version__ = "\(.*\)".*/\1/p' backend/app/__init__.py)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match __version__ $version in backend/app/__init__.py. Use deploy/make_release.py --bump."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build the package
+        run: |
+          if [ -n "${{ vars.TALLYCLOUD_PUBLIC_KEY }}" ]; then
+            python deploy/make_release.py --public-key "${{ vars.TALLYCLOUD_PUBLIC_KEY }}"
+          else
+            python deploy/make_release.py
+          fi
+
+      - name: Release notes from the commits since the previous version
+        run: |
+          prev=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          range=${prev:+$prev..}$GITHUB_REF_NAME
+          git log --no-merges --pretty='- %s' "$range" | grep -v '^- Release [0-9]' > notes.md || true
+          [ -s notes.md ] || echo "- Tally Cloud ${{ steps.version.outputs.version }}" > notes.md
+          cat notes.md
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "dist/TallyCloud-${{ steps.version.outputs.version }}.zip" \
+            --title "Tally Cloud ${{ steps.version.outputs.version }}" --notes-file notes.md
+
+      - name: Upload to the licence portal
+        env:
+          TOKEN: ${{ secrets.TALLYCLOUD_RELEASE_TOKEN }}
+          PORTAL: ${{ vars.TALLYCLOUD_PORTAL_URL || 'https://tallycloud.voyager.co.in' }}
+          PUBLISH: ${{ vars.TALLYCLOUD_AUTO_PUBLISH == 'true' && 'true' || 'false' }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::Secret TALLYCLOUD_RELEASE_TOKEN is not set, so the package was not uploaded to the portal. It is attached to the GitHub Release."
+            exit 0
+          fi
+          curl --fail-with-body -sS -X POST "$PORTAL/api/v1/admin/releases/from-github" \
+            -H "X-Release-Token: $TOKEN" \
+            -F "version=${{ steps.version.outputs.version }}" -F "platform=windows" -F "publish=$PUBLISH" \
+            -F "release_notes=<notes.md" \
+            -F "file=@dist/TallyCloud-${{ steps.version.outputs.version }}.zip"
+          echo
+          echo "Uploaded to $PORTAL ($([ "$PUBLISH" = true ] && echo published || echo 'draft: publish it on the Releases tab'))."

@@ -87,6 +87,27 @@ def license_keygen(args) -> None:
     print(f"  {public}")
 
 
+def release_token(args) -> None:
+    """Licence portal: a token with which GitHub Actions uploads releases (it can do nothing else).
+
+    Writes its hash to backend/.env (run as root on the server) and prints the token once, for the
+    GitHub secret TALLYCLOUD_RELEASE_TOKEN. Running it again replaces the old token."""
+    import re
+    import secrets
+    from pathlib import Path
+    token = "rel_" + secrets.token_urlsafe(32)
+    env = Path(args.env)
+    text = env.read_text(encoding="utf-8") if env.exists() else ""
+    line = f"ERP_RELEASE_TOKEN_HASH={hash_key(token)}"
+    text = re.sub(r"(?m)^ERP_RELEASE_TOKEN_HASH=.*$", line, text) if "ERP_RELEASE_TOKEN_HASH=" in text \
+        else text.rstrip("\n") + ("\n" if text else "") + line + "\n"
+    env.write_text(text, encoding="utf-8")
+    print(f"Release token written to {env} (as a hash). Restart the app: sudo systemctl restart tallycloud")
+    print("Put this in GitHub: repository -> Settings -> Secrets and variables -> Actions -> New repository secret")
+    print("  Name:  TALLYCLOUD_RELEASE_TOKEN")
+    print(f"  Value: {token}")
+
+
 def set_password(args) -> None:
     with SessionLocal() as db:
         user = db.scalar(select(User).where(User.username == args.username))
@@ -192,6 +213,10 @@ def main() -> None:
     kg.add_argument("--out", default="/etc/tallycloud/license_signing.pem")
     kg.add_argument("--force", action="store_true")
     kg.set_defaults(fn=license_keygen)
+
+    rt = sub.add_parser("release-token", help="licence portal: token for GitHub Actions to upload releases")
+    rt.add_argument("--env", default=".env", help="the .env file to write the token's hash to")
+    rt.set_defaults(fn=release_token)
 
     sp = sub.add_parser("set-password", help="set a user's password (also unlocks and switches the user on)")
     sp.add_argument("username")

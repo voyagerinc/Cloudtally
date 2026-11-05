@@ -97,23 +97,27 @@ curl -s https://tallycloud.voyager.co.in/api/v1/licensing/public-key
 ## Releases and versions
 
 Every update is a release with a **higher version number**. The version lives in one place,
-`backend/app/__init__.py`.
+`backend/app/__init__.py`. Releases reach the portal **automatically through GitHub**.
 
-1. **Build the package** on the development PC, from committed code:
+1. **On the development PC**, from committed code:
    ```
    python deploy/make_release.py --bump patch      # fixes:        1.0.0 -> 1.0.1
    python deploy/make_release.py --bump minor      # new features: 1.0.1 -> 1.1.0
    git push origin main v1.0.1
    ```
-   It writes the new version, commits it, tags the commit `v1.0.1`, and builds
-   `dist/TallyCloud-1.0.1.zip`. The zip holds `VERSION`, `install.cmd`, `README.txt` and the app.
-   Add `--public-key <key from the portal>` to include the portal's public key. Without it, the
-   installer fetches the key from the portal over HTTPS.
-2. **Upload** it on the portal's **Releases** tab. The portal shows the latest version and fills in the
-   next one. It **refuses a version that is not higher** than every earlier release, and a package whose
-   `VERSION` file says something else. Every file gets its SHA-256 and an Ed25519 signature made with the
-   portal's private key.
-3. **Publish** it once it is tested. Only licences whose version range covers it can see it.
+   `--bump` writes the new version, commits it and tags the commit `v1.0.1`.
+2. **GitHub Actions** (`.github/workflows/release.yml`) starts when the tag arrives:
+   * it checks that the tag is the version in the code;
+   * it builds `TallyCloud-1.0.1.zip` (holding `VERSION`, `install.cmd`, `README.txt` and the app);
+   * it creates a **GitHub Release** with the package and notes made from the commit messages;
+   * it **uploads the package to the portal**.
+
+   The upload arrives as a draft, or published when the repository variable
+   `TALLYCLOUD_AUTO_PUBLISH` is `true`.
+3. **The portal** refuses a version that is not higher than every earlier release, and a package whose
+   `VERSION` file says something else. It signs every file (SHA-256 plus an Ed25519 signature).
+   On the **Releases** tab, check a draft and **Publish** it. Only licences whose version range covers
+   a release can see it.
 4. **The customer's server admin** sees it in two places:
    * **Portal → My licence → Downloads**: the zip, for a first installation.
    * **Their server → Licence → Check for updates**: the server downloads the release with its own
@@ -122,6 +126,26 @@ Every update is a release with a **higher version number**. The version lives in
      keeps settings and data, swaps the app folder, installs packages, updates the database, and
      restarts. If the new version does not start, it puts the previous one back. Log:
      `C:\TallyCloud\logs\update.log`.
+
+### One-time setup of the automatic release
+
+1. On the portal server, make the release token. It writes only a hash to `.env`:
+   ```bash
+   cd ~/projects/tallycloud/backend
+   sudo ../.venv/bin/python -m app.cli release-token
+   sudo systemctl restart tallycloud
+   ```
+2. On GitHub, open **voyagerinc/Cloudtally → Settings → Secrets and variables → Actions** and add:
+   * **secret** `TALLYCLOUD_RELEASE_TOKEN`: the token printed in step 1. It can only upload releases.
+   * **variable** `TALLYCLOUD_PUBLIC_KEY` (optional): the output of
+     `curl -s https://tallycloud.voyager.co.in/api/v1/licensing/public-key`, so the installer carries
+     the key.
+   * **variable** `TALLYCLOUD_AUTO_PUBLISH` (optional): `true` to publish without checking first.
+   * **variable** `TALLYCLOUD_PORTAL_URL` (optional): the portal address, if it is not
+     tallycloud.voyager.co.in.
+
+Without the secret, the workflow still builds the package and attaches it to the GitHub Release; it
+only skips the upload. A package can always be uploaded by hand on the Releases tab.
 
 ## First installation on a customer's Windows server or PC
 

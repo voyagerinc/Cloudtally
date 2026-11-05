@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     license_server_url: str = "https://tallycloud.voyager.co.in"
     install_dir: str | None = None                 # client: where deploy/windows/install-server.ps1 installed it
     release_dir: str | None = None                 # server: where uploaded installers are kept
+    release_token_hash: str | None = None          # server: GitHub Actions' upload token (python -m app.cli release-token)
     public_url: str = "https://tallycloud.voyager.co.in"   # for links in invitations
     # Optional e-mail for invitations and licence notices; without it the portal shows the link to copy.
     smtp_host: str | None = None

@@ -325,10 +325,12 @@
 
 <section id="releases" class="tab" hidden>
   <h2>Software releases</h2>
-  <p class="muted small">Every update needs a new, higher version. Build the package on the development PC with
-    <code>python deploy/make_release.py --bump patch</code> (or <code>minor</code> for new features); it stamps the
-    version into the package. Upload it here, check it, then <b>Publish</b>: company admins download it from their
-    portal, and activated servers install it from their Licence tab.</p>
+  <p class="muted small">Releases arrive here by themselves from GitHub. On the development PC:
+    <code>python deploy/make_release.py --bump patch</code> (or <code>minor</code> for new features), then
+    <code>git push origin main v1.0.1</code>. GitHub builds the package and uploads it as a draft, or published if
+    the repository variable TALLYCLOUD_AUTO_PUBLISH is true. Check a draft, then <b>Publish</b>: company admins
+    download it from their portal, and activated servers install it from their Licence tab. Every update needs a
+    new, higher version. You can still upload a package by hand below.</p>
   <p class="small" id="rel-latest"></p>
   <form id="rel-form" class="panel row">
     <label>Version<input name="version" required placeholder="1.1.0" pattern="\d+(\.\d+){0,3}"></label>

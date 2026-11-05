@@ -22,6 +22,7 @@ from sqlalchemy import func, select
 
 from app import audit
 from app.api.deps import DB, CurrentUser, actor_of
+from app.audit import Actor
 from app.core.config import settings
 from app.core.security import check_password_rules, hash_key, hash_password
 from app.licensing import service
@@ -939,6 +940,26 @@ def upload_release(db: DB, user: CurrentUser, version: str = Form(..., max_lengt
                    platform: str = Form("windows", max_length=20), release_notes: str | None = Form(None),
                    file: UploadFile = File(...)):
     _superadmin(user)
+    return _store_release(db, actor_of(user), version, platform, release_notes, file, publish=False)
+
+
+@router.post("/admin/releases/from-github", status_code=201)
+def upload_release_from_github(request: Request, db: DB, version: str = Form(..., max_length=30),
+                               platform: str = Form("windows", max_length=20),
+                               release_notes: str | None = Form(None, max_length=20000),
+                               publish: bool = Form(False), file: UploadFile = File(...)):
+    """Called by GitHub Actions when a version tag is pushed (.github/workflows/release.yml).
+
+    It authenticates with the release token (X-Release-Token), which can do nothing but this."""
+    _server_only()
+    token = request.headers.get("x-release-token") or ""
+    if not settings.release_token_hash or not token or not hmac.compare_digest(hash_key(token), settings.release_token_hash):
+        raise HTTPException(401, "Wrong or missing release token")
+    return _store_release(db, Actor("github-actions", "integration"), version, platform, release_notes, file, publish)
+
+
+def _store_release(db, actor: Actor, version: str, platform: str, release_notes: str | None, file: UploadFile,
+                   publish: bool) -> dict:
     if not re.fullmatch(r"\d+(\.\d+){0,3}", version.strip()):
         raise HTTPException(422, "Version like 1.2.0")
     version = version.strip()
@@ -950,7 +971,7 @@ def upload_release(db: DB, user: CurrentUser, version: str = Form(..., max_lengt
     folder.mkdir(parents=True, exist_ok=True)
     name = SAFE_NAME.sub("_", Path(file.filename or f"TallyCloud-{version}.exe").name)[:150]
     rel = SoftwareRelease(id=uuid.uuid4(), version=version.strip(), platform=platform, file_name=name, file_size=0,
-                          sha256="", release_notes=release_notes, status="draft", created_by=user.username)
+                          sha256="", release_notes=release_notes, status="draft", created_by=actor.name)
     tmp = folder / f".upload-{rel.id}"
     digest = hashlib.sha256()
     size = 0
@@ -970,10 +991,16 @@ def upload_release(db: DB, user: CurrentUser, version: str = Form(..., max_lengt
         rel.signature = sign_bytes(rel.sha256.encode())    # installations can check the file came from us
     except RuntimeError:
         rel.signature = None
+    if publish and not rel.signature:
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(422, "Cannot publish an unsigned release: set ERP_LICENSE_SIGNING_KEY_FILE on the portal")
     os.replace(tmp, _release_path(rel))
+    if publish:
+        rel.status, rel.published_at = "published", utcnow()
     db.add(rel)
-    audit.record(db, actor_of(user), "release.upload", "release", rel.id,
-                 after={"version": rel.version, "platform": platform, "sha256": rel.sha256, "size": size})
+    audit.record(db, actor, "release.upload", "release", rel.id,
+                 after={"version": rel.version, "platform": platform, "sha256": rel.sha256, "size": size,
+                        "status": rel.status})
     db.commit()
     return _release_out(rel)
 

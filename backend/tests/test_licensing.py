@@ -482,7 +482,7 @@ def test_make_release_bumps_tags_and_stamps_the_version(tmp_path):
     for rel in ("deploy/make_release.py", "deploy/windows/install-server.ps1", "deploy/windows/update-server.ps1"):
         shutil.copyfile(repo / rel, clone / rel)
     subprocess.run(["git", "-C", str(clone), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(clone), "commit", "-q", "-m", "builder"], check=True)
+    subprocess.run(["git", "-C", str(clone), "commit", "-q", "--allow-empty", "-m", "builder"], check=True)
     run = lambda *a: subprocess.run([sys.executable, str(clone / "deploy" / "make_release.py"), *a, "--out", str(tmp_path / "dist")],
                                     cwd=clone, capture_output=True, text=True)
     before = core.version_tuple((clone / "backend/app/__init__.py").read_text())
@@ -498,3 +498,34 @@ def test_make_release_bumps_tags_and_stamps_the_version(tmp_path):
     # Changed code without a new version is refused.
     (clone / "README.md").write_text("changed\n")
     assert run().returncode != 0
+
+
+def test_github_actions_uploads_with_the_release_token_only(db, admin, portal, monkeypatch, tmp_path):
+    import subprocess
+    import sys
+    env = tmp_path / ".env"
+    env.write_text("ERP_DATABASE_URL=x\nERP_RELEASE_TOKEN_HASH=old\n")
+    out = subprocess.run([sys.executable, "-m", "app.cli", "release-token", "--env", str(env)],
+                         capture_output=True, text=True, check=True).stdout
+    token = out.split("Value: ")[1].strip()
+    lines = env.read_text().splitlines()
+    assert lines[0] == "ERP_DATABASE_URL=x" and len([x for x in lines if x.startswith("ERP_RELEASE_TOKEN_HASH=")]) == 1
+    assert token not in env.read_text()                         # only its hash is kept on the server
+    monkeypatch.setattr(settings, "release_token_hash", lines[1].split("=", 1)[1])
+
+    def push(version, tok, publish="false"):
+        return api.post(f"{V1}/admin/releases/from-github", headers={"X-Release-Token": tok} if tok else {},
+                        data={"version": version, "publish": publish, "release_notes": "- Faster sync"},
+                        files={"file": (f"TallyCloud-{version}.zip", io.BytesIO(_package(version)), "application/zip")})
+
+    assert push("1.0.0", None).status_code == 401
+    assert push("1.0.0", "rel_wrong").status_code == 401
+    r = push("1.0.0", token)
+    assert r.status_code == 201 and r.json()["status"] == "draft" and r.json()["signature"]
+    assert push("1.0.0", token).status_code == 409                   # every update needs a higher version
+    r = push("1.0.1", token, publish="true")
+    assert r.status_code == 201 and r.json()["status"] == "published"
+    rels = api.get(f"{V1}/admin/releases", headers=admin).json()
+    assert {(x["version"], x["status"]) for x in rels} == {("1.0.0", "draft"), ("1.0.1", "published")}
+    # The token opens nothing else.
+    assert api.get(f"{V1}/admin/customers", headers={"X-Release-Token": token}).status_code == 401
