@@ -137,11 +137,23 @@ chmod -R g+rX,o-rwx "$APP_DIR"
 echo "==> Schema"
 (cd "$APP_DIR/backend" && sudo -u "$APP_USER" "$APP_DIR/.venv/bin/python" -m app.cli init-db)
 
+echo "==> Updates from the web app (super admin: Server tab)"
+# The app may only drop a request file into inbox/; deploy/update.sh does the work as root.
+UPDATE_DIR=/var/lib/tallycloud-update
+install -d -m 755 -o root -g root "$UPDATE_DIR"
+install -d -m 770 -o root -g "$APP_USER" "$UPDATE_DIR/inbox"
+install -d -m 750 -o root -g "$APP_USER" "$UPDATE_DIR/state"
+grep -q '^ERP_UPDATE_DIR=' "$ENV_FILE" || echo "ERP_UPDATE_DIR=$UPDATE_DIR" >> "$ENV_FILE"
+for unit in tallycloud-update.service tallycloud-update.path; do
+  sed -e "s#__APP_DIR__#$APP_DIR#g" "$APP_DIR/deploy/$unit" > "/etc/systemd/system/$unit"
+done
+
 echo "==> Service"
 sed -e "s#__APP_DIR__#$APP_DIR#g" -e "s#__APP_USER__#$APP_USER#g" -e "s#__APP_PORT__#$APP_PORT#g" \
   "$APP_DIR/deploy/tallycloud.service" > "$SERVICE"
 systemctl daemon-reload
 systemctl enable tallycloud
+systemctl enable --now tallycloud-update.path
 systemctl restart tallycloud
 
 echo "==> nginx"
@@ -191,7 +203,7 @@ if curl -fsS "http://127.0.0.1:$APP_PORT/health" >/dev/null; then echo "==> App 
 cat <<EOF
 
 Done. Next:
-  1. Create the first user (prints the sign-in key once):
+  1. Create the super admin (asks for a password; sign in with user ID admin and that password):
        cd $APP_DIR/backend && sudo -u $APP_USER $APP_DIR/.venv/bin/python -m app.cli create-user admin --superadmin
   2. Connect each Tally PC with a tunnel (docs/DEPLOY.md, step 5). The port must be free here;
      add-tally-pc.sh refuses one that other software already uses:

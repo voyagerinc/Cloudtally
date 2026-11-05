@@ -80,14 +80,18 @@ sudo DB_PORT=6060 bash /root/projects/tallycloud/deploy/server-setup.sh tallyclo
 
 This installs PostgreSQL (with a generated password in `backend/.env`, readable only by the app),
 the app as the `tallycloud` systemd service, and its nginx site with an HTTPS certificate. Then
-create the first sign-in key:
+create the first user, the super admin. It asks for a password (nothing shows while you type):
 
 ```bash
 cd /root/projects/tallycloud/backend
 sudo -u tallycloud /root/projects/tallycloud/.venv/bin/python -m app.cli create-user admin --superadmin
 ```
 
-The key is printed **once**. Store it in your password manager.
+Sign in with user ID `admin` and that password. The super admin links Tally companies and makes a
+**company admin** for each company (Users tab → Add user → role *Company admin*). Each company admin
+then adds their own users and ticks what each may use, down to single reports. Forgotten password:
+`sudo -u tallycloud /root/projects/tallycloud/.venv/bin/python -m app.cli set-password <user ID>`
+(run in `backend/`).
 
 ## 5. Connect the Tally PC
 
@@ -116,7 +120,7 @@ and reconnects by itself. Its log is `%USERPROFILE%\.tallycloud\tunnel.log`.
 
 ## 6. Use it
 
-Open `https://tallycloud.voyager.co.in`, sign in with the key, then **Open Tally company** with host
+Open `https://tallycloud.voyager.co.in`, sign in as `admin`, then **Open Tally company** with host
 `127.0.0.1` and port `9000`. Link the company, then **Check Tally** on the Sync tab.
 
 Automatic sync is on (`ERP_AUTO_SYNC=true` in `backend/.env`). A newly linked large company first
@@ -125,11 +129,20 @@ switch automatic sync off on the Sync tab during office hours until that first c
 
 ## Updating
 
+**From the web page:** sign in as a super admin and open the **Server** tab. *Check for updates* shows
+what is new on GitHub; *Update & restart* pulls it, installs Python packages, updates the database and
+restarts the app (users are disconnected for a few seconds). If the new version does not start, the
+server goes back to the previous one. *Restart only* restarts the app. The log of the last run is shown
+there and kept in `/var/lib/tallycloud-update/state/update.log`.
+
+The app has no root rights for this: it only drops a request file into `/var/lib/tallycloud-update/inbox/`,
+and `deploy/update.sh` (started by the `tallycloud-update.path` watcher) does the work as root.
+
+**By hand**, when the setup itself changed (new service files, nginx), run the setup again:
+
 ```bash
 cd /root/projects/tallycloud && git pull
-.venv/bin/pip install -q -r backend/requirements.txt
-cd backend && sudo -u tallycloud ../.venv/bin/python -m app.cli init-db
-sudo systemctl restart tallycloud
+sudo bash deploy/server-setup.sh tallycloud.voyager.co.in <your-email>
 ```
 
 ## Operating

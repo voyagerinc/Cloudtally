@@ -1,0 +1,9 @@
+[Unit]
+Description=Tally Cloud: watch for update requests from the web app (Server tab)
+
+[Path]
+PathExists=/var/lib/tallycloud-update/inbox/request
+Unit=tallycloud-update.service
+
+[Install]
+WantedBy=multi-user.target

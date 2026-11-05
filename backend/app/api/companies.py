@@ -87,13 +87,6 @@ def lock_period(fy_id: uuid.UUID, body: PeriodLockIn, db: DB, user: CurrentUser)
 
 # ------------------------------------------------------------------ users
 
-@router.get("/me")
-def me(db: DB, user: CurrentUser):
-    return {"id": user.id, "username": user.username, "display_name": user.display_name,
-            "is_superadmin": user.is_superadmin,
-            "companies": [{"company_id": a.company_id, "role": a.role} for a in user.access]}
-
-
 @router.post("/users", status_code=201)
 def create_user(body: UserIn, db: DB, user: CurrentUser):
     if not user.is_superadmin:

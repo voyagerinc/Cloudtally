@@ -1,26 +1,56 @@
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, Query
+from fastapi import Depends, Header, HTTPException, Query, Request
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.audit import Actor
+from app.core.config import settings
 from app.core.db import get_db
-from app.core.security import has_perm, role_for, user_for_key
-from app.models import Company, User
+from app.core.security import has_perm, hash_key, role_for, user_for_key
+from app.models import Company, User, UserSession
 from app.models.base import utcnow
 
 DB = Annotated[Session, Depends(get_db)]
 
+# What a user who still has to replace an admin-chosen password may do.
+_PASSWORD_CHANGE_PATHS = ("/api/v1/me", "/api/v1/auth/")
 
-def current_user(db: DB, x_api_key: Annotated[str | None, Header()] = None) -> User:
-    if not x_api_key:
-        raise HTTPException(401, "Missing X-API-Key header")
-    user = user_for_key(db, x_api_key)
-    if user is None:
-        raise HTTPException(401, "Invalid API key")
-    user.last_login_at = utcnow()
+
+def session_for(db: Session, token: str) -> UserSession | None:
+    now = utcnow()
+    s = db.scalar(select(UserSession).where(UserSession.token_hash == hash_key(token)))
+    if s is None:
+        return None
+    if s.expires_at <= now or s.last_seen_at + timedelta(hours=settings.session_idle_hours) <= now:
+        db.delete(s)
+        db.commit()
+        return None
+    if now - s.last_seen_at > timedelta(minutes=5):     # keep the session alive without a write per request
+        s.last_seen_at = now
+        db.commit()
+    return s
+
+
+def current_user(request: Request, db: DB, x_api_key: Annotated[str | None, Header()] = None,
+                 authorization: Annotated[str | None, Header()] = None) -> User:
+    user = None
+    if authorization and authorization.lower().startswith("bearer "):
+        s = session_for(db, authorization[7:].strip())
+        user = db.get(User, s.user_id) if s else None
+        if user is not None and user.must_change_password and not request.url.path.startswith(_PASSWORD_CHANGE_PATHS):
+            raise HTTPException(403, "Change your password first")
+    elif x_api_key:
+        user = user_for_key(db, x_api_key)
+        if user is not None:
+            user.last_login_at = utcnow()
+    else:
+        raise HTTPException(401, "Please sign in")
+    if user is None or not user.is_active:
+        raise HTTPException(401, "Your sign-in has expired; please sign in again")
+    request.state.user = user
     return user
 
 
@@ -38,7 +68,7 @@ def authorize(db: Session, user: User, company_id: uuid.UUID, perm: str) -> Comp
     if company is None or role_for(db, user, company_id) is None:
         raise HTTPException(404, "Company not found")
     if not has_perm(db, user, company_id, perm):
-        raise HTTPException(403, f"Your role does not allow {perm}")
+        raise HTTPException(403, "You do not have permission for this. Ask your company admin.")
     return company
 
 

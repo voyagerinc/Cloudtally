@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, Uuid
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -43,10 +43,17 @@ class User(IdMixin, TimestampMixin, Base):
 
     username: Mapped[str] = mapped_column(String(100), unique=True)
     display_name: Mapped[str | None] = mapped_column(String(200))
-    api_key_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    # API key for integrations; people sign in with a password. Either may be missing.
+    api_key_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
+    password_hash: Mapped[str | None] = mapped_column(String(200))
+    # Set when an admin chose the password: the user must pick their own at the next sign-in.
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
+    failed_logins: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_superadmin: Mapped[bool] = mapped_column(Boolean, default=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str | None] = mapped_column(String(100))
 
     access: Mapped[list["UserCompanyAccess"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
@@ -57,7 +64,21 @@ class UserCompanyAccess(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), primary_key=True)
     company_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("companies.id"), primary_key=True)
     role: Mapped[str] = mapped_column(String(40))
+    # Custom permission list chosen by the company admin; None means the role's defaults.
+    permissions: Mapped[list | None] = mapped_column(JSON)
     # Optional maker-checker: vouchers above this amount need approval for this user.
     approval_limit: Mapped[int | None] = mapped_column(Integer)
 
     user: Mapped[User] = relationship(back_populates="access")
+
+
+class UserSession(IdMixin, Base):
+    """A signed-in browser. Only a hash of the token is stored."""
+    __tablename__ = "user_sessions"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    client: Mapped[str | None] = mapped_column(String(200))

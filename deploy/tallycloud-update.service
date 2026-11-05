@@ -1,0 +1,10 @@
+[Unit]
+Description=Tally Cloud: pull from GitHub and restart (requested by a super admin)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# root's GitHub deploy key (~/.ssh/cloudtally_deploy) is used for git fetch
+Environment=HOME=/root
+ExecStart=/bin/bash __APP_DIR__/deploy/update.sh
+TimeoutStartSec=15min

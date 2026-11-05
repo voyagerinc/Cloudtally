@@ -1,7 +1,7 @@
 "use strict";
 const API = "/api/v1";
 const $ = (s) => document.querySelector(s);
-const state = { key: null, company: null, ledgers: [], vtypes: [], user: null };
+const state = { token: null, key: null, company: null, ledgers: [], vtypes: [], user: null };
 
 function store(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (_) {} }
 function load(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
@@ -11,8 +11,11 @@ function money(v) { const n = Number(v || 0); return n.toLocaleString("en-IN", {
 function when(v) { return v ? new Date(v).toLocaleString() : ""; }
 function today() { return new Date().toISOString().slice(0, 10); }
 
+// People sign in with a password (session token); integrations may use an API key.
+function authHeaders() { return state.token ? { Authorization: `Bearer ${state.token}` } : { "X-API-Key": state.key || "" }; }
+
 async function api(path, opts = {}) {
-  const headers = { "X-API-Key": state.key || "", ...(opts.body ? { "Content-Type": "application/json" } : {}) };
+  const headers = { ...authHeaders(), ...(opts.body ? { "Content-Type": "application/json" } : {}) };
   const res = await fetch(API + path, { ...opts, headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
   if (res.status === 401) { signOut(); throw new Error("Please sign in"); }
   const text = await res.text();
@@ -37,20 +40,88 @@ function table(el, cols, rows, onClick) {
 }
 
 // ------------------------------------------------------------------ session & tabs
-function signOut() { state.key = null; store("erp_key", null); $("#login").hidden = false; document.querySelector("main").hidden = true; $("header nav").hidden = true; }
+function signOut() {
+  if (state.token) fetch(API + "/auth/logout", { method: "POST", headers: authHeaders() }).catch(() => {});
+  state.token = state.key = state.user = null; store("erp_token", null); store("erp_key", null);
+  $("#login").hidden = false; document.querySelector("main").hidden = true; $("header nav").hidden = true;
+  $("#whoami").textContent = ""; $("#change-pw").hidden = true; $("#open-tally").hidden = true;
+  document.querySelectorAll("dialog[open]").forEach((d) => d.close());
+}
 $("#logout").onclick = signOut;
 $("#login-form").onsubmit = async (e) => {
-  e.preventDefault(); state.key = $("#apikey").value.trim();
+  e.preventDefault(); $("#login-error").textContent = "";
+  const btn = e.target.querySelector("button"); btn.disabled = true;
+  try {
+    const res = await fetch(API + "/auth/login", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: $("#login-user").value.trim(), password: $("#login-pass").value }) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(d.detail || res.statusText);
+    state.token = d.token; state.key = null; store("erp_token", d.token); store("erp_key", null);
+    $("#login-pass").value = "";
+    await start();
+  } catch (err) { $("#login-error").textContent = err.message; } finally { btn.disabled = false; }
+};
+$("#key-form").onsubmit = async (e) => {
+  e.preventDefault(); $("#login-error").textContent = ""; state.token = null; state.key = $("#apikey").value.trim();
   try { await start(); store("erp_key", state.key); } catch (err) { $("#login-error").textContent = err.message; }
 };
 
 async function start() {
   state.user = await api("/me");
-  $("#whoami").textContent = state.user.username;
+  $("#whoami").textContent = state.user.display_name || state.user.username;
+  $("#change-pw").hidden = !state.user.has_password || !state.token;
   $("#login").hidden = true; document.querySelector("main").hidden = false; $("header nav").hidden = false;
+  if (state.user.must_change_password && !(await askNewPassword(true))) return;
   $("#open-tally").hidden = !state.user.is_superadmin;
   await loadCompanies();
 }
+
+// ------------------------------------------------------------------ permissions of the signed-in user
+// The server checks every request; this only hides what the user may not use in the selected company.
+function myPerms() {
+  if (state.user?.is_superadmin) return null;   // everything
+  const a = (state.user?.companies || []).find((c) => c.company_id === state.company);
+  return new Set(a ? a.permissions : []);
+}
+function can(perm) {
+  const p = myPerms();
+  return p === null || p.has(perm) || (perm.startsWith("report.") && p.has("reports.read"));
+}
+function applyPerms() {
+  const reportOpts = [...$("#r-name").options];
+  reportOpts.forEach((o) => { o.disabled = o.hidden = !can(`report.${o.dataset.report}`); });
+  if ($("#r-name").selectedOptions[0]?.disabled) { const ok = reportOpts.find((o) => !o.disabled); if (ok) $("#r-name").value = ok.value; }
+  document.querySelectorAll("#tabs button").forEach((b) => {
+    b.hidden = b.dataset.perm === "report" ? !reportOpts.some((o) => !o.disabled) : !can(b.dataset.perm);
+  });
+  $("#r-csv").hidden = $("#errors-csv").hidden = !can("export");
+  $("#l-new").hidden = $("#ld-edit").hidden = !can("masters.write");
+}
+function tabAllowed(tab) { const b = document.querySelector(`#tabs button[data-tab="${tab}"]`); return !!b && !b.hidden; }
+function firstTab() { return [...document.querySelectorAll("#tabs button")].find((b) => !b.hidden)?.dataset.tab; }
+
+// ------------------------------------------------------------------ change password
+function askNewPassword(forced) {
+  return new Promise((resolve) => {
+    const d = $("#pw-dlg"), f = $("#pwf"), el = (n) => f.elements.namedItem(n);
+    f.reset(); $("#pw-msg").textContent = "";
+    $("#pw-note").textContent = forced ? "Your admin chose your first password. Choose your own to continue." : "";
+    $("#pw-cancel").textContent = forced ? "Sign out" : "Cancel";
+    d.oncancel = (e) => { if (forced) e.preventDefault(); };
+    $("#pw-cancel").onclick = () => { d.close(); if (forced) signOut(); resolve(false); };
+    f.onsubmit = async (e) => {
+      e.preventDefault(); $("#pw-msg").textContent = "";
+      if (el("new1").value !== el("new2").value) { $("#pw-msg").textContent = "The two new passwords differ"; return; }
+      try {
+        await api("/auth/password", { method: "POST", body: { current_password: el("current").value, new_password: el("new1").value } });
+        d.close(); state.user.must_change_password = false; resolve(true);
+        if (!forced) alert("Your password is changed. Other browsers where you were signed in are signed out.");
+      } catch (err) { $("#pw-msg").textContent = err.message; }
+    };
+    d.showModal(); el("current").focus();
+  });
+}
+$("#change-pw").onclick = () => askNewPassword(false);
 
 async function loadCompanies(select) {
   resetCheck();
@@ -58,12 +129,22 @@ async function loadCompanies(select) {
   $("#company").innerHTML = companies.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
   const want = select || load("erp_company");
   state.company = want && companies.some((c) => c.id === want) ? want : companies[0]?.id;
-  if (!state.company) { document.querySelectorAll(".tab").forEach((t) => (t.hidden = t.id !== "dashboard")); $("#health").innerHTML = `<p class="muted">No companies yet. Use <b>Open Tally company</b> to link one.</p>`; return; }
+  if (!state.company) {
+    document.querySelectorAll("#tabs button").forEach((b) => (b.hidden = true));
+    document.querySelectorAll(".tab").forEach((t) => (t.hidden = t.id !== "noaccess"));
+    $("#noaccess-msg").innerHTML = state.user.is_superadmin ? "No companies yet. Use <b>Open Tally company</b> to link one."
+      : "You have no access to any company yet. Ask your company admin.";
+    return;
+  }
   $("#company").value = state.company; store("erp_company", state.company);
+  applyPerms();
   await loadMasters();
   show(select ? "dashboard" : load("erp_tab") || "dashboard");
 }
-$("#company").onchange = async () => { resetCheck(); state.company = $("#company").value; store("erp_company", state.company); await loadMasters(); show(currentTab); };
+$("#company").onchange = async () => {
+  resetCheck(); state.company = $("#company").value; store("erp_company", state.company);
+  applyPerms(); await loadMasters(); show(currentTab);
+};
 
 // ------------------------------------------------------------------ open / link a Tally company
 $("#open-tally").onclick = () => { $("#td-msg").textContent = ""; $("#td-table").innerHTML = ""; $("#tally-dlg").showModal(); };
@@ -101,6 +182,8 @@ function resetCheck() { $("#run-sync").dataset.checked = ""; $("#sync-progress")
 let currentTab = "dashboard";
 const renderers = {};
 function show(tab) {
+  if (!tabAllowed(tab)) tab = firstTab();
+  if (!tab) { document.querySelectorAll(".tab").forEach((s) => (s.hidden = s.id !== "noaccess")); return; }
   currentTab = tab; store("erp_tab", tab);
   document.querySelectorAll(".tab").forEach((s) => (s.hidden = s.id !== tab));
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
@@ -111,6 +194,12 @@ document.querySelectorAll("#tabs button").forEach((b) => (b.onclick = () => show
 
 async function loadMasters() {
   itemsCache = null;
+  if (!can("masters.read")) {   // e.g. a reports-only user: nothing to look up
+    state.ledgers = []; state.vtypes = []; state.groups = {};
+    $("#ledger-names").innerHTML = $("#ve-type").innerHTML = $("#group-names").innerHTML = "";
+    $("#vf-type").innerHTML = `<option value="">All types</option>`;
+    return;
+  }
   [state.ledgers, state.vtypes] = await Promise.all([
     api(`/companies/${state.company}/masters/ledgers?limit=5000`), api(`/companies/${state.company}/masters/voucher-types`)]);
   $("#ledger-names").innerHTML = state.ledgers.map((l) => `<option value="${esc(l.name)}">`).join("");
@@ -276,7 +365,7 @@ $("#recon-form").onsubmit = async (e) => {
 };
 
 async function download(path, name) {
-  const res = await fetch(API + path, { headers: { "X-API-Key": state.key } });
+  const res = await fetch(API + path, { headers: authHeaders() });
   if (!res.ok) return alert((await res.json()).detail);
   const a = document.createElement("a"); a.href = URL.createObjectURL(await res.blob()); a.download = name; a.click();
 }
@@ -1020,8 +1109,188 @@ renderers.audit = async () => {
     (r) => alert(JSON.stringify({ before: r.before, after: r.after }, null, 2)));
 };
 
+
+// ------------------------------------------------------------------ users and permissions (company admin)
+let permCatalog = null;
+let editingUser = null;
+let chosenPerms = new Set();
+const catalog = async () => (permCatalog ||= await api("/permissions"));
+const rolePerms = (key) => new Set(permCatalog.roles.find((r) => r.key === key)?.permissions || []);
+const sameSet = (a, b) => a.size === b.size && [...a].every((x) => b.has(x));
+
+function permSummary(perms) {
+  const has = new Set(perms);
+  const parts = [];
+  for (const g of permCatalog.groups) {
+    if (g.name === "Reports") {
+      const n = g.permissions.filter((p) => p.key.startsWith("report.") && has.has(p.key)).length;
+      if (has.has("reports.read")) parts.push("All reports"); else if (n) parts.push(`${n} report${n === 1 ? "" : "s"}`);
+    } else if (g.permissions.some((p) => has.has(p.key))) parts.push(g.name);
+  }
+  return parts.join(", ") || "Nothing";
+}
+
+renderers.users = async () => {
+  await catalog();
+  const rows = await api(`/companies/${state.company}/users`);
+  $("#u-company").textContent = $("#company").selectedOptions[0]?.textContent || "";
+  const status = (u) => !u.is_active ? chip("switched_off") : u.locked ? chip("locked")
+    : u.must_change_password ? chip("password_pending") : chip("active");
+  table($("#utable"), [
+    { label: "User ID", key: "username" }, { label: "Name", key: "display_name" },
+    { label: "Role", get: (u) => (u.custom ? "Custom" : u.role_label) },
+    { label: "Can use", wrap: true, get: (u) => permSummary(u.permissions) },
+    { label: "Status", html: status },
+    { label: "Last sign-in", get: (u) => when(u.last_login_at) || "never" },
+    { label: "Other companies", num: true, get: (u) => u.other_companies || "" },
+  ], rows.map((u) => ({ ...u, _class: u.is_active ? "" : "muted" })), openUserForm);
+};
+
+function drawPerms() {
+  const self = editingUser && editingUser.id === state.user.id;
+  const all = chosenPerms.has("reports.read");
+  $("#uf-perms").innerHTML = permCatalog.groups.map((g) => `<fieldset><legend>${esc(g.name)}</legend>${g.permissions.map((p) => {
+    const sub = p.key.startsWith("report.");
+    const on = chosenPerms.has(p.key) || (sub && all);
+    // An admin can only hand out what they may do themselves; your own ticks are changed by another admin.
+    const off = self || !can(p.key) || (sub && all);
+    return `<label class="check ${sub ? "sub" : ""}"><input type="checkbox" data-perm="${esc(p.key)}" ${on ? "checked" : ""} ${off ? "disabled" : ""}> ${esc(p.label)}</label>`;
+  }).join("")}</fieldset>`).join("");
+  $("#uf-perms").querySelectorAll("input[data-perm]").forEach((cb) => (cb.onchange = () => {
+    cb.checked ? chosenPerms.add(cb.dataset.perm) : chosenPerms.delete(cb.dataset.perm);
+    if (cb.dataset.perm === "reports.read" && cb.checked)   // "All reports" replaces the single ones
+      [...chosenPerms].filter((k) => k.startsWith("report.")).forEach((k) => chosenPerms.delete(k));
+    const match = permCatalog.roles.find((r) => sameSet(new Set(r.permissions), chosenPerms));
+    $("#uf").elements.namedItem("role").value = match ? match.key : "custom";
+    drawPerms();
+  }));
+}
+
+async function openUserForm(u) {
+  await catalog();
+  editingUser = u || null;
+  const f = $("#uf"), el = (n) => f.elements.namedItem(n);
+  const self = !!u && u.id === state.user.id;
+  f.reset(); $("#uf-msg").textContent = ""; $("#uf-existing-row").hidden = true;
+  $("#uf-title").textContent = u ? `Alter user: ${u.username}` : "Add user";
+  el("username").value = u ? u.username : ""; el("username").disabled = !!u;
+  el("display_name").value = u?.display_name || "";
+  el("password").value = ""; el("password").disabled = self; $("#uf-gen").disabled = self;
+  $("#uf-pw-label").textContent = self ? "Password (use Change password at the top)" : u ? "New password (leave empty to keep)" : "First password *";
+  el("role").innerHTML = permCatalog.roles.map((r) => `<option value="${esc(r.key)}">${esc(r.label)}</option>`).join("")
+    + `<option value="custom">Custom</option>`;
+  el("role").value = u ? (u.custom ? "custom" : u.role) : "accountant";
+  el("role").disabled = self;
+  chosenPerms = new Set(u ? u.permissions : rolePerms("accountant"));
+  $("#uf-perm-note").textContent = self ? "These are your own permissions; another admin can change them."
+    : "Choosing a role ticks its permissions. Change any tick for a custom set.";
+  drawPerms();
+  $("#uf-actions").hidden = !u || self;
+  if (u) { $("#uf-active").textContent = u.is_active ? "Switch off user" : "Switch on user"; $("#uf-unlock").hidden = !u.locked; }
+  $("#user-dlg").showModal();
+  (u ? el("display_name") : el("username")).focus();
+}
+$("#u-new").onclick = () => openUserForm(null);
+$("#uf-cancel").onclick = () => $("#user-dlg").close();
+$("#uf").elements.namedItem("role").onchange = (e) => {
+  if (e.target.value !== "custom") { chosenPerms = rolePerms(e.target.value); drawPerms(); }
+};
+$("#uf-gen").onclick = () => {
+  const abc = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const r = crypto.getRandomValues(new Uint32Array(10));
+  $("#uf").elements.namedItem("password").value = [...r].map((n) => abc[n % abc.length]).join("");
+};
+
+$("#uf").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target, el = (n) => f.elements.namedItem(n);
+  const role = el("role").value, password = el("password").value;
+  const permissions = role === "custom" ? [...chosenPerms] : null;
+  const username = editingUser ? editingUser.username : el("username").value.trim();
+  $("#uf-msg").textContent = "";
+  try {
+    if (editingUser) {
+      const body = { display_name: el("display_name").value.trim() || null };
+      const wasRole = editingUser.custom ? "custom" : editingUser.role;
+      if (editingUser.id !== state.user.id && (role !== wasRole || !sameSet(chosenPerms, new Set(editingUser.permissions)))) {
+        body.role = role; body.permissions = permissions;
+      }
+      if (password) body.password = password;
+      await api(`/companies/${state.company}/users/${editingUser.id}`, { method: "PATCH", body });
+    } else {
+      await api(`/companies/${state.company}/users`, { method: "POST", body: {
+        username, display_name: el("display_name").value.trim() || null, password: password || null,
+        role, permissions, add_existing: el("add_existing").checked } });
+    }
+    $("#user-dlg").close();
+    if (password) alert(`Give ${username} this password:\n\n${password}\n\nThey choose their own at the first sign-in.`);
+    await renderers.users();
+  } catch (err) {
+    $("#uf-msg").textContent = err.message;
+    if (/already taken/.test(err.message)) $("#uf-existing-row").hidden = false;
+  }
+};
+
+async function patchUser(body, done) {
+  try { await api(`/companies/${state.company}/users/${editingUser.id}`, { method: "PATCH", body }); $("#user-dlg").close(); await renderers.users(); if (done) alert(done); }
+  catch (err) { $("#uf-msg").textContent = err.message; }
+}
+$("#uf-active").onclick = () => {
+  const on = !editingUser.is_active;
+  if (!on && !confirm(`Switch off ${editingUser.username}? They are signed out at once and cannot sign in until switched on again.`)) return;
+  patchUser({ is_active: on });
+};
+$("#uf-unlock").onclick = () => patchUser({ unlock: true }, `${editingUser.username} can sign in again.`);
+$("#uf-remove").onclick = async () => {
+  const name = $("#company").selectedOptions[0]?.textContent;
+  if (!confirm(`Remove ${editingUser.username} from ${name}? Their entries stay in the books and the audit trail.`)) return;
+  try { await api(`/companies/${state.company}/users/${editingUser.id}`, { method: "DELETE" }); $("#user-dlg").close(); await renderers.users(); }
+  catch (err) { $("#uf-msg").textContent = err.message; }
+};
+
+// ------------------------------------------------------------------ server: update from GitHub and restart (super admin)
+let serverTimer = null;
+const busy = (s) => s.request_pending || s.state === "running";
+function pollServer(ms) {
+  clearTimeout(serverTimer);
+  serverTimer = setTimeout(() => { if (currentTab === "server") renderers.server().catch(() => pollServer(3000)); }, ms);
+}
+renderers.server = async () => {
+  let s;
+  try { s = await api("/admin/system"); }
+  catch (err) {
+    // During a restart the server does not answer for a few seconds.
+    if (/not set up/.test(err.message)) { $("#sv-msg").textContent = err.message; return; }
+    $("#sv-msg").textContent = "Waiting for the server to come back…"; pollServer(3000); return;
+  }
+  const label = { ok: "done", failed: "failed", running: "running", never: "never run" }[s.state] || s.state;
+  $("#sv-cards").innerHTML = [
+    ["Running version", esc(s.commit || "unknown"), esc([s.subject, s.committed_at && when(s.committed_at)].filter(Boolean).join(" · "))],
+    ["Updates on GitHub", s.behind == null ? "?" : s.behind, s.behind == null ? "Check for updates to find out" : s.behind ? "ready to install" : "up to date"],
+    ["Last run", `${chip(s.state === "ok" ? "completed" : s.state === "running" ? "processing" : s.state)}`,
+      esc(`${s.action || ""} ${label}${s.finished_at ? " · " + when(s.finished_at) : ""}`)],
+  ].map(([k, v, sub]) => `<div class="card"><div class="k">${esc(k)}</div><div class="v">${v}</div><div class="small muted">${sub}</div></div>`).join("");
+  $("#sv-pending").innerHTML = s.pending?.length
+    ? `<h3>New on GitHub</h3><pre class="small">${esc(s.pending.join("\n"))}</pre>` : "";
+  $("#sv-log").textContent = s.log || "No run yet.";
+  const wait = busy(s);
+  ["#sv-check", "#sv-update", "#sv-restart"].forEach((id) => ($(id).disabled = wait));
+  $("#sv-msg").textContent = wait ? "Working… this page refreshes by itself." : s.message || "";
+  $("#sv-msg").className = s.state === "failed" && !wait ? "error" : "muted";
+  if (wait) pollServer(2000);
+};
+async function serverAction(action, question) {
+  if (question && !confirm(question)) return;
+  try { await api(`/admin/system/${action}`, { method: "POST" }); $("#sv-msg").textContent = "Asked the server…"; pollServer(1500); }
+  catch (err) { alert(err.message); }
+}
+$("#sv-check").onclick = () => serverAction("check");
+$("#sv-update").onclick = () => serverAction("update", "Pull the latest version from GitHub and restart Tally Cloud?\n\nEveryone is disconnected for a few seconds.");
+$("#sv-restart").onclick = () => serverAction("restart", "Restart Tally Cloud?\n\nEveryone is disconnected for a few seconds.");
+
 // ------------------------------------------------------------------ boot
 document.querySelector("main").hidden = true; $("header nav").hidden = true;
 $("#recon-from").value = `${new Date().getFullYear() - (new Date().getMonth() < 3 ? 1 : 0)}-04-01`; $("#recon-to").value = today();
-state.key = load("erp_key");
-if (state.key) start().catch(() => signOut()); else signOut();
+state.token = load("erp_token");
+state.key = state.token ? null : load("erp_key");
+if (state.token || state.key) start().catch(() => signOut()); else signOut();

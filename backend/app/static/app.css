@@ -97,3 +97,16 @@ table.tree tr.group td { font-weight: 600; }
 table.tree tr.leaf.click td:first-child { color: var(--accent); }
 table.tree .tw { display: inline-block; width: 16px; color: var(--muted); }
 table.tree tr.total td { border-top: 1px solid var(--line); }
+
+.stack { display: grid; gap: 10px; }
+.row.nowrap { flex-wrap: nowrap; } .row.nowrap input { flex: 1; }
+.perm-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.perm-groups fieldset { display: block; margin: 0; padding: 8px 12px; }
+.perm-groups legend { font-weight: 600; padding: 0 4px; }
+.perm-groups label.check { margin: 4px 0; }
+.perm-groups label.check.sub { padding-left: 18px; }
+button.danger { color: var(--bad); border-color: var(--bad); }
+tr.muted td { color: var(--muted); }
+.chip.active { background: var(--chip-ok); color: var(--ok); }
+.chip.password_pending { background: var(--chip-warn); color: var(--warn); }
+.chip.switched_off, .chip.locked { background: var(--chip-bad); color: var(--bad); }

@@ -207,7 +207,7 @@ def test_correlation_id_round_trips(books, admin):
 
 def test_ui_is_served():
     r = client.get("/")
-    assert r.status_code == 200 and "Tally Bidirectional ERP" in r.text
+    assert r.status_code == 200 and "Tally Cloud" in r.text
 
 
 def test_open_multiple_tally_companies_with_separate_books(admin, mock):

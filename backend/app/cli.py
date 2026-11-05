@@ -1,5 +1,6 @@
 """Operator CLI: python -m app.cli <command> --help"""
 import argparse
+import getpass
 import json
 import sys
 from datetime import date
@@ -9,7 +10,7 @@ from sqlalchemy import select
 from app.audit import Actor
 from app.connectors.tally import TallyClient, TallyError
 from app.core.db import SessionLocal
-from app.core.security import ROLES, hash_key, new_api_key
+from app.core.security import ROLES, check_password_rules, hash_key, hash_password, new_api_key
 from app.models import Company, TallyConnector, User, UserCompanyAccess
 from app.services.accounting import masters
 from app.services.sync import common, initial_import, reconcile
@@ -30,13 +31,28 @@ def init_db(_args) -> None:
     print("Database schema is up to date.")
 
 
+def _ask_password(username: str) -> str:
+    """Read a new password twice from the terminal (nothing is shown while typing)."""
+    while True:
+        pw = getpass.getpass(f"Password for {username}: ")
+        if reason := check_password_rules(pw, username):
+            print(reason)
+            continue
+        if getpass.getpass("Type it again: ") != pw:
+            print("The two passwords differ; try again.")
+            continue
+        return pw
+
+
 def create_user(args) -> None:
     with SessionLocal() as db:
         if db.scalar(select(User.id).where(User.username == args.username)):
             sys.exit(f"User {args.username} already exists")
-        key = new_api_key()
-        user = User(username=args.username, display_name=args.name, api_key_hash=hash_key(key),
-                    is_superadmin=args.superadmin)
+        password = None if args.api_key_only else _ask_password(args.username)
+        key = new_api_key() if args.api_key or args.api_key_only else None
+        user = User(username=args.username, display_name=args.name, is_superadmin=args.superadmin,
+                    password_hash=hash_password(password) if password else None,
+                    api_key_hash=hash_key(key) if key else None, created_by="cli")
         db.add(user)
         db.flush()
         if args.company:
@@ -45,7 +61,21 @@ def create_user(args) -> None:
                 sys.exit(f"Company {args.company} not found")
             db.add(UserCompanyAccess(user_id=user.id, company_id=company.id, role=args.role))
         db.commit()
-        print(f"Created {args.username}. API key (shown once):\n{key}")
+        print(f"Created {args.username}." + (" Sign in with this user ID and the password you typed." if password else ""))
+        if key:
+            print(f"API key for integrations (shown once):\n{key}")
+
+
+def set_password(args) -> None:
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.username == args.username))
+        if user is None:
+            sys.exit("No such user")
+        user.password_hash = hash_password(_ask_password(args.username))
+        user.must_change_password = False
+        user.failed_logins, user.locked_until, user.is_active = 0, None, True
+        db.commit()
+        print(f"Password of {args.username} changed; the user is unlocked and active.")
 
 
 def rotate_key(args) -> None:
@@ -127,13 +157,19 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init-db", help="apply database migrations").set_defaults(fn=init_db)
 
-    u = sub.add_parser("create-user", help="create a user and print its API key")
+    u = sub.add_parser("create-user", help="create a user who signs in with a password (asked for here)")
     u.add_argument("username")
     u.add_argument("--name")
     u.add_argument("--superadmin", action="store_true")
+    u.add_argument("--api-key", action="store_true", help="also issue an API key for integrations")
+    u.add_argument("--api-key-only", action="store_true", help="integration user: API key, no password")
     u.add_argument("--company", help="grant access to this company")
     u.add_argument("--role", default="accountant", choices=sorted(ROLES))
     u.set_defaults(fn=create_user)
+
+    sp = sub.add_parser("set-password", help="set a user's password (also unlocks and switches the user on)")
+    sp.add_argument("username")
+    sp.set_defaults(fn=set_password)
 
     r = sub.add_parser("rotate-key", help="issue a new API key")
     r.add_argument("username")

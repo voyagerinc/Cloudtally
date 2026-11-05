@@ -3,34 +3,44 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tally Bidirectional ERP</title>
+<title>Tally Cloud</title>
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
 <header>
-  <strong>Tally&nbsp;Bidirectional&nbsp;ERP</strong>
+  <strong>Tally&nbsp;Cloud</strong>
   <select id="company" aria-label="Company"></select>
   <button id="open-tally" class="secondary" title="List the companies open in Tally and open or link one">Open Tally company</button>
   <nav id="tabs">
-    <button data-tab="dashboard">Sync</button>
-    <button data-tab="vouchers">Vouchers</button>
-    <button data-tab="entry">New voucher</button>
-    <button data-tab="conflicts">Conflicts <span id="conflict-badge" class="badge" hidden></span></button>
-    <button data-tab="reports">Reports</button>
-    <button data-tab="masters">Ledgers</button>
-    <button data-tab="items">Stock items</button>
-    <button data-tab="settings">Connector</button>
-    <button data-tab="audit">Audit</button>
+    <button data-tab="dashboard" data-perm="sync.read">Sync</button>
+    <button data-tab="vouchers" data-perm="voucher.read">Vouchers</button>
+    <button data-tab="entry" data-perm="voucher.write">New voucher</button>
+    <button data-tab="conflicts" data-perm="sync.read">Conflicts <span id="conflict-badge" class="badge" hidden></span></button>
+    <button data-tab="reports" data-perm="report">Reports</button>
+    <button data-tab="masters" data-perm="masters.read">Ledgers</button>
+    <button data-tab="items" data-perm="masters.read">Stock items</button>
+    <button data-tab="settings" data-perm="sync.read">Connector</button>
+    <button data-tab="audit" data-perm="audit.read">Audit</button>
+    <button data-tab="users" data-perm="users.manage">Users</button>
+    <button data-tab="server" data-perm="superadmin">Server</button>
   </nav>
   <span id="whoami"></span>
+  <button id="change-pw" class="link" hidden>Change password</button>
   <button id="logout" class="link">Sign out</button>
 </header>
 
 <section id="login" class="panel narrow" hidden>
   <h2>Sign in</h2>
-  <p class="muted">Paste your API key. Create one with <code>python -m app.cli create-user &lt;name&gt; --superadmin</code>.</p>
-  <form id="login-form"><input id="apikey" type="password" placeholder="erp_…" required autocomplete="off"><button>Sign in</button></form>
-  <p id="login-error" class="error"></p>
+  <form id="login-form" class="stack">
+    <label>User ID<input id="login-user" autocomplete="username" required></label>
+    <label>Password<input id="login-pass" type="password" autocomplete="current-password" required></label>
+    <button>Sign in</button>
+  </form>
+  <p id="login-error" class="error" aria-live="polite"></p>
+  <details class="small muted"><summary>Sign in with an API key (integrations)</summary>
+    <form id="key-form" class="row"><input id="apikey" type="password" placeholder="erp_…" required autocomplete="off">
+      <button class="secondary">Use key</button></form>
+  </details>
 </section>
 
 <main>
@@ -105,11 +115,15 @@
   <h2>Reports</h2>
   <form id="rform" class="row filters">
     <select id="r-name">
-      <option value="trial-balance">Trial Balance</option><option value="profit-loss">Profit &amp; Loss</option>
-      <option value="balance-sheet">Balance Sheet</option><option value="day-book">Day Book</option>
-      <option value="stock-summary">Stock Summary</option><option value="outstanding">Receivables (ageing)</option>
-      <option value="outstanding-payable">Payables (ageing)</option><option value="register-Sales">Sales Register</option>
-      <option value="register-Purchase">Purchase Register</option>
+      <option value="trial-balance" data-report="trial-balance">Trial Balance</option>
+      <option value="profit-loss" data-report="profit-loss">Profit &amp; Loss</option>
+      <option value="balance-sheet" data-report="balance-sheet">Balance Sheet</option>
+      <option value="day-book" data-report="day-book">Day Book</option>
+      <option value="stock-summary" data-report="stock-summary">Stock Summary</option>
+      <option value="outstanding" data-report="receivables">Receivables (ageing)</option>
+      <option value="outstanding-payable" data-report="payables">Payables (ageing)</option>
+      <option value="register-Sales" data-report="sales-register">Sales Register</option>
+      <option value="register-Purchase" data-report="purchase-register">Purchase Register</option>
     </select>
     <input type="date" id="r-from"><input type="date" id="r-to"><button>Show</button>
     <a id="r-csv" class="button secondary" href="#">CSV</a>
@@ -235,7 +249,75 @@
   <h2>Audit trail</h2>
   <table id="atable"></table>
 </section>
+
+<section id="users" class="tab" hidden>
+  <div class="row between"><h2>Users of <span id="u-company"></span></h2>
+    <button type="button" id="u-new">Add user</button></div>
+  <p class="muted small">Each user signs in with their own user ID and password and sees only what you allow here.
+    A new user chooses their own password at the first sign-in.</p>
+  <table id="utable"></table>
+</section>
+
+<section id="server" class="tab" hidden>
+  <h2>Server</h2>
+  <p class="muted small">Update pulls the latest version from GitHub, updates the database and restarts the app.
+    Everyone is disconnected for a few seconds; a sync that is running stops and continues after the restart.
+    If the new version does not start, the server goes back to the previous one.</p>
+  <div id="sv-cards" class="cards"></div>
+  <div class="row filters">
+    <button type="button" id="sv-check" class="secondary">Check for updates</button>
+    <button type="button" id="sv-update">Update &amp; restart</button>
+    <button type="button" id="sv-restart" class="secondary">Restart only</button>
+    <span id="sv-msg" class="muted" aria-live="polite"></span>
+  </div>
+  <div id="sv-pending"></div>
+  <h3>Log of the last run</h3>
+  <pre id="sv-log" class="small"></pre>
+</section>
+
+<section id="noaccess" class="tab panel narrow" hidden>
+  <h2>Nothing to show</h2>
+  <p class="muted" id="noaccess-msg">You have no permissions in this company yet. Ask your company admin.</p>
+</section>
 </main>
+
+<dialog id="user-dlg" class="wide">
+  <form id="uf" novalidate>
+    <div class="row between"><h2 id="uf-title">Add user</h2>
+      <span><button>Save</button> <button type="button" id="uf-cancel" class="secondary">Cancel</button></span></div>
+    <p id="uf-msg" class="error" aria-live="polite"></p>
+    <div class="grid">
+      <label>User ID *<input name="username" required maxlength="50" autocomplete="off" spellcheck="false"></label>
+      <label>Name<input name="display_name" maxlength="200"></label>
+      <label><span id="uf-pw-label">First password *</span>
+        <span class="row nowrap"><input name="password" autocomplete="new-password" maxlength="200" spellcheck="false">
+          <button type="button" id="uf-gen" class="secondary">Generate</button></span></label>
+      <label>Role<select name="role"></select></label>
+    </div>
+    <label class="check" id="uf-existing-row" hidden><input type="checkbox" name="add_existing">
+      This user ID already exists: give that user access to this company</label>
+    <h3>Permissions</h3>
+    <p class="muted small" id="uf-perm-note">Choosing a role ticks its permissions. Change any tick for a custom set.</p>
+    <div id="uf-perms" class="perm-groups"></div>
+    <div id="uf-actions" class="row" hidden>
+      <button type="button" id="uf-active" class="secondary"></button>
+      <button type="button" id="uf-unlock" class="secondary" hidden>Unlock</button>
+      <button type="button" id="uf-remove" class="secondary danger">Remove from this company</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="pw-dlg">
+  <form id="pwf" class="stack">
+    <h2>Change password</h2>
+    <p id="pw-note" class="muted"></p>
+    <label>Current password<input name="current" type="password" autocomplete="current-password" required></label>
+    <label>New password (at least 8 characters)<input name="new1" type="password" autocomplete="new-password" required minlength="8"></label>
+    <label>New password again<input name="new2" type="password" autocomplete="new-password" required></label>
+    <p id="pw-msg" class="error" aria-live="polite"></p>
+    <div class="row"><button>Change password</button> <button type="button" id="pw-cancel" class="secondary">Cancel</button></div>
+  </form>
+</dialog>
 
 <dialog id="tally-dlg">
   <h2>Open a Tally company</h2>
