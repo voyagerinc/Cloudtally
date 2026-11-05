@@ -50,6 +50,20 @@ DB_EXTRAS_SQL = [
 ]
 
 
-def install_db_extras(conn: Connection) -> None:
-    for stmt in DB_EXTRAS_SQL:
-        conn.execute(text(stmt))
+# Licence events are history too (Cloud Licensing PRD §12): nobody rewrites or deletes them.
+LICENSING_EXTRAS_SQL = [
+    "DROP TRIGGER IF EXISTS trg_license_events_immutable ON license_events",
+    """
+    CREATE TRIGGER trg_license_events_immutable
+    BEFORE UPDATE OR DELETE ON license_events
+    FOR EACH ROW EXECUTE FUNCTION audit_events_immutable()
+    """,
+]
+
+
+def install_db_extras(conn: Connection, groups: tuple[str, ...] = ("core", "licensing")) -> None:
+    """groups: "core" (initial schema) and/or "licensing" (migration 0009 onwards)."""
+    for group, statements in (("core", DB_EXTRAS_SQL), ("licensing", LICENSING_EXTRAS_SQL)):
+        if group in groups:
+            for stmt in statements:
+                conn.execute(text(stmt))

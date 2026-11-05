@@ -17,6 +17,7 @@ from app.api.deps import DB, CurrentUser, actor_of, authorize
 from app.connectors.tally import TallyError
 from app.core.db import SessionLocal
 from app.core.security import Perm
+from app.licensing import enforce as licence
 from app.models import (
     Company, ImportBatch, OutboxStatus, ReconciliationRun, SyncAttempt, SyncConflict, SyncInbox, SyncOutbox,
     SyncProgress, TallyConnector, TallyMapping, Voucher, VoucherVersion,
@@ -566,6 +567,7 @@ def link_company(body: LinkIn, background: BackgroundTasks, db: DB, user: Curren
             raise HTTPException(502, f"{exc.code}: {exc.message}")
     if found is None:
         raise HTTPException(404, f"'{body.tally_company_name}' is not open in Tally")
+    licence.check_company_limit(db)
     existing = db.scalar(select(TallyConnector).where(TallyConnector.tally_company_guid == found["guid"]))
     if existing is not None:
         raise HTTPException(409, f"'{body.tally_company_name}' is already linked to ERP company {existing.company_id}")

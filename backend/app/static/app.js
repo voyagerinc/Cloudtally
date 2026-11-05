@@ -16,7 +16,8 @@ function authHeaders() { return state.token ? { Authorization: `Bearer ${state.t
 
 async function api(path, opts = {}) {
   const headers = { ...authHeaders(), ...(opts.body ? { "Content-Type": "application/json" } : {}) };
-  const res = await fetch(API + path, { ...opts, headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  const body = opts.form || (opts.body ? JSON.stringify(opts.body) : undefined);
+  const res = await fetch(API + path, { ...opts, headers, body });
   if (res.status === 401) { signOut(); throw new Error("Please sign in"); }
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
@@ -44,7 +45,7 @@ function signOut() {
   if (state.token) fetch(API + "/auth/logout", { method: "POST", headers: authHeaders() }).catch(() => {});
   state.token = state.key = state.user = null; store("erp_token", null); store("erp_key", null);
   $("#login").hidden = false; document.querySelector("main").hidden = true; $("header nav").hidden = true;
-  $("#whoami").textContent = ""; $("#change-pw").hidden = true; $("#open-tally").hidden = true;
+  $("#whoami").textContent = ""; $("#change-pw").hidden = true; $("#open-tally").hidden = true; $("#lic-banner").hidden = true;
   document.querySelectorAll("dialog[open]").forEach((d) => d.close());
 }
 $("#logout").onclick = signOut;
@@ -87,12 +88,19 @@ function can(perm) {
   const p = myPerms();
   return p === null || p.has(perm) || (perm.startsWith("report.") && p.has("reports.read"));
 }
+// Tabs that do not belong to a books company.
+const SPECIAL_TABS = {
+  "portal-admin": () => state.user?.is_superadmin && state.user.license_mode === "server",
+  "portal-customer": () => state.user?.license_mode === "server" && !!state.user.customer_id,
+  "licence-client": () => state.user?.is_superadmin && state.user.license_mode === "client",
+};
 function applyPerms() {
   const reportOpts = [...$("#r-name").options];
   reportOpts.forEach((o) => { o.disabled = o.hidden = !can(`report.${o.dataset.report}`); });
   if ($("#r-name").selectedOptions[0]?.disabled) { const ok = reportOpts.find((o) => !o.disabled); if (ok) $("#r-name").value = ok.value; }
   document.querySelectorAll("#tabs button").forEach((b) => {
-    b.hidden = b.dataset.perm === "report" ? !reportOpts.some((o) => !o.disabled) : !can(b.dataset.perm);
+    const special = SPECIAL_TABS[b.dataset.perm];
+    b.hidden = special ? !special() : b.dataset.perm === "report" ? !reportOpts.some((o) => !o.disabled) : !can(b.dataset.perm);
   });
   $("#r-csv").hidden = $("#errors-csv").hidden = !can("export");
   $("#l-new").hidden = $("#ld-edit").hidden = !can("masters.write");
@@ -130,20 +138,25 @@ async function loadCompanies(select) {
   const want = select || load("erp_company");
   state.company = want && companies.some((c) => c.id === want) ? want : companies[0]?.id;
   if (!state.company) {
-    document.querySelectorAll("#tabs button").forEach((b) => (b.hidden = true));
-    document.querySelectorAll(".tab").forEach((t) => (t.hidden = t.id !== "noaccess"));
+    // No books yet: only the licence tabs (a company admin of the portal may have no books at all).
+    document.querySelectorAll("#tabs button").forEach((b) => { const sp = SPECIAL_TABS[b.dataset.perm]; b.hidden = !(sp && sp()); });
+    $("#company").hidden = true;
     $("#noaccess-msg").innerHTML = state.user.is_superadmin ? "No companies yet. Use <b>Open Tally company</b> to link one."
       : "You have no access to any company yet. Ask your company admin.";
+    refreshBanner();
+    const tab = firstTab();
+    if (tab) show(load("erp_tab") || tab); else document.querySelectorAll(".tab").forEach((t) => (t.hidden = t.id !== "noaccess"));
     return;
   }
+  $("#company").hidden = false;
   $("#company").value = state.company; store("erp_company", state.company);
-  applyPerms();
+  applyPerms(); refreshBanner();
   await loadMasters();
   show(select ? "dashboard" : load("erp_tab") || "dashboard");
 }
 $("#company").onchange = async () => {
   resetCheck(); state.company = $("#company").value; store("erp_company", state.company);
-  applyPerms(); await loadMasters(); show(currentTab);
+  applyPerms(); refreshBanner(); await loadMasters(); show(currentTab);
 };
 
 // ------------------------------------------------------------------ open / link a Tally company
@@ -1288,9 +1301,338 @@ $("#sv-check").onclick = () => serverAction("check");
 $("#sv-update").onclick = () => serverAction("update", "Pull the latest version from GitHub and restart Tally Cloud?\n\nEveryone is disconnected for a few seconds.");
 $("#sv-restart").onclick = () => serverAction("restart", "Restart Tally Cloud?\n\nEveryone is disconnected for a few seconds.");
 
+// ------------------------------------------------------------------ licence: banner on every page
+async function refreshBanner() {
+  const b = $("#lic-banner");
+  if (!state.user || state.user.license_mode === "off") { b.hidden = true; return; }
+  try {
+    const l = await api(`/licence${state.company ? `?company_id=${state.company}` : ""}`);
+    const text = l.read_only ? l.reason : (l.warnings || []).join(" ");
+    b.hidden = !text; b.textContent = text; b.classList.toggle("bad", !!l.read_only);
+  } catch (_) { b.hidden = true; }
+}
+
+const fmtDate = (d) => (d ? new Date(d + (d.length === 10 ? "T00:00:00" : "")).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "");
+const size = (n) => (n > 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`);
+const MODULE_LABELS = { accounting: "Vouchers and ledgers", inventory: "Inventory", reports: "Reports", tally_sync: "Tally sync", export: "Export to CSV" };
+
+function licenceBox(l, admin) {
+  const days = l.days_left == null ? "never expires" : l.days_left < 0 ? `expired ${-l.days_left} day(s) ago` : `${l.days_left} day(s) left`;
+  const inst = l.installations.length ? `<table class="small"><thead><tr><th>Server</th><th>Version</th><th>Status</th><th>Activated</th><th>Last check-in</th>${admin ? "<th></th>" : ""}</tr></thead><tbody>${
+    l.installations.map((i) => `<tr><td>${esc(i.server_label || i.hostname || i.installation_id.slice(0, 10))}</td><td>${esc(i.product_version || "")}</td>
+      <td>${chip(i.status)}</td><td>${when(i.activated_at)}</td><td>${when(i.last_seen_at)}</td>${admin ? `<td>${
+        i.status === "active" ? `<button type="button" class="secondary small" data-inst="${i.id}" data-act="release">Release slot</button>` : ""}
+        ${i.status !== "blocked" ? `<button type="button" class="secondary small danger" data-inst="${i.id}" data-act="block">Block</button>`
+          : `<button type="button" class="secondary small" data-inst="${i.id}" data-act="unblock">Unblock</button>`}</td>` : ""}</tr>`).join("")}</tbody></table>`
+    : `<p class="muted small">Not activated on any server yet.</p>`;
+  const actions = admin ? `<div class="row">${[
+    ["renew", "Renew"], ["suspend", "Suspend"], ["resume", "Resume"], ["reissue_key", "New key"], ["cancel", "Cancel"], ["revoke", "Revoke"]]
+    .map(([a, t]) => `<button type="button" class="secondary small ${a === "revoke" ? "danger" : ""}" data-lic="${l.id}" data-act="${a}">${t}</button>`).join("")}
+    <button type="button" class="small" data-lic-edit="${l.id}">Change</button></div>` : "";
+  return `<div class="lic-box"><div class="row between"><h4>${esc(l.plan[0].toUpperCase() + l.plan.slice(1))} licence ${esc(l.key_hint)}</h4>${chip(l.effective_status)}</div>
+    <div class="grid small">
+      <div><span class="muted">Valid</span><br>${fmtDate(l.starts_at)} – ${l.expires_at ? fmtDate(l.expires_at) : "no end"} (${days})</div>
+      <div><span class="muted">Named users</span><br>${l.max_users}</div>
+      <div><span class="muted">Servers</span><br>${l.active_installations} of ${l.max_installations} in use</div>
+      <div><span class="muted">Tally companies</span><br>${l.max_companies ?? "any number"}</div>
+      <div><span class="muted">Versions</span><br>${esc(l.min_version || "any")} – ${esc(l.max_version || "any")}</div>
+      <div><span class="muted">Offline grace</span><br>${l.offline_grace_days} days</div>
+    </div>
+    <p class="small"><span class="muted">Modules:</span> ${l.modules.map((m) => esc(m.label)).join(", ") || "none"}</p>
+    ${inst}${actions}</div>`;
+}
+
+// ------------------------------------------------------------------ licence portal: super admin
+let custCache = [];
+renderers.customers = async () => {
+  const [d, rows] = await Promise.all([api("/admin/licensing/dashboard"),
+    api(`/admin/customers${$("#cust-q").value ? `?q=${encodeURIComponent($("#cust-q").value)}` : ""}`)]);
+  custCache = rows;
+  const st = d.licenses_by_status;
+  $("#lic-cards").innerHTML = [
+    ["Customers", d.customers, d.customers_suspended ? `${d.customers_suspended} suspended` : ""],
+    ["Active licences", st.active || 0, `${st.pending || 0} not yet activated`],
+    ["Expiring in 30 days", d.expiring_30_days.length, ""],
+    ["Expired / suspended", (st.expired || 0) + (st.suspended || 0), `${st.revoked || 0} revoked`],
+    ["Servers activated", d.installations_active, Object.entries(d.versions).map(([v, n]) => `v${v}: ${n}`).join(", ")],
+    ["Failed activations (7 days)", d.activation_failures_7_days, ""],
+    ["Downloads (30 days)", d.downloads_30_days, ""],
+  ].map(([k, v, sub]) => `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div><div class="small muted">${esc(sub)}</div></div>`).join("");
+  $("#lic-expiring").innerHTML = d.expiring_30_days.length ? `<h3>Expiring soon</h3><table>${d.expiring_30_days.map((e) =>
+    `<tr class="click" data-cust="${e.customer_id}"><td>${esc(e.customer)}</td><td>${fmtDate(e.expires_at)}</td><td class="num">${e.days_left} day(s)</td></tr>`).join("")}</table>` : "";
+  $("#lic-renewals").innerHTML = d.renewal_requests.length ? `<h3>Renewal requests</h3><table>${d.renewal_requests.map((e) =>
+    `<tr class="click" data-cust="${e.customer_id}"><td>${when(e.at)}</td><td>${esc(e.customer)}</td><td>${esc(e.by)}</td><td class="wrap">${esc(e.message || "")}</td></tr>`).join("")}</table>` : "";
+  document.querySelectorAll("#customers [data-cust]").forEach((tr) => (tr.onclick = () => openCustomer(tr.dataset.cust)));
+  table($("#cust-table"), [
+    { label: "Code", key: "code" }, { label: "Customer", key: "legal_name", wrap: true },
+    { label: "Licence", html: (c) => (c.license_status ? chip(c.license_status) : `<span class="muted">none</span>`) },
+    { label: "Plan", key: "plan" }, { label: "Expires", get: (c) => fmtDate(c.expires_at) },
+    { label: "Servers", num: true, key: "installations" },
+    { label: "Company admins", get: (c) => c.admins.map((a) => a.username).join(", ") },
+    { label: "Account", html: (c) => chip(c.status) },
+  ], rows, (c) => openCustomer(c.id));
+};
+$("#cust-q").onchange = () => renderers.customers();
+
+$("#cust-new").onclick = async () => {
+  const code = prompt("Customer code (short, capitals, e.g. VSPL). It cannot be changed later.");
+  if (!code) return;
+  const name = prompt("Legal name of the customer");
+  if (!name) return;
+  const email = prompt("Contact e-mail (for invitations and licence notices)", "") || null;
+  try { const c = await api("/admin/customers", { method: "POST", body: { code, legal_name: name, contact_email: email } }); await renderers.customers(); openCustomer(c.id); }
+  catch (err) { alert(err.message); }
+};
+
+let custOpen = null;
+async function openCustomer(id) {
+  const c = await api(`/admin/customers/${id}`);
+  custOpen = c;
+  const companies = await api("/companies");
+  $("#cd-title").textContent = `${c.legal_name} (${c.code})`; $("#cd-msg").textContent = "";
+  const hosted = new Set(c.hosted_companies.map((h) => h.id));
+  $("#cd-body").innerHTML = `
+    <div class="row between"><span>${chip(c.status)} <span class="muted small">customer since ${fmtDate(c.created_at?.slice(0, 10))}</span></span>
+      <span>${c.status === "active" ? `<button type="button" class="secondary danger" data-cstatus="suspended">Suspend customer</button>`
+        : `<button type="button" class="secondary" data-cstatus="active">Make active</button>`}
+        ${c.status !== "archived" ? `<button type="button" class="secondary" data-cstatus="archived">Archive</button>` : ""}</span></div>
+    <form id="cd-form" class="grid">
+      <label>Legal name<input name="legal_name" value="${esc(c.legal_name)}" required></label>
+      <label>Contact person<input name="contact_name" value="${esc(c.contact_name || "")}"></label>
+      <label>Contact e-mail<input name="contact_email" type="email" value="${esc(c.contact_email || "")}"></label>
+      <label>Phone<input name="contact_phone" value="${esc(c.contact_phone || "")}"></label>
+      <label>GSTIN<input name="gstin" value="${esc(c.gstin || "")}" class="upper"></label>
+      <label>Notes<input name="notes" value="${esc(c.notes || "")}"></label>
+      <div><button>Save details</button></div>
+    </form>
+    <h3>Company admins</h3>
+    <table class="small">${c.admins.length ? c.admins.map((a) => `<tr><td>${esc(a.username)}</td><td>${esc(a.display_name || "")}</td><td>${esc(a.email || "")}</td>
+      <td>${a.is_active ? (a.has_password ? chip("active") : chip("password_pending")) : chip("switched_off")}</td><td>${when(a.last_login_at) || "never signed in"}</td>
+      <td><button type="button" class="secondary small" data-invite="${a.id}">${a.has_password ? "Password reset link" : "New invitation link"}</button>
+        <button type="button" class="secondary small" data-admin-active="${a.id}" data-on="${a.is_active ? "0" : "1"}">${a.is_active ? "Switch off" : "Switch on"}</button></td></tr>`).join("")
+      : `<tr><td class="muted">No company admin yet.</td></tr>`}</table>
+    <button type="button" id="cd-add-admin" class="secondary">Add company admin</button>
+    <div id="cd-link"></div>
+    <div class="row between"><h3>Licences</h3><button type="button" id="cd-new-lic">New licence</button></div>
+    <div id="cd-key"></div>
+    ${c.license_list.map((l) => licenceBox(l, true)).join("") || `<p class="muted">No licence yet.</p>`}
+    <h3>Books hosted on this server</h3>
+    <p class="muted small">Tick the companies on this server that belong to ${esc(c.legal_name)}. They then follow its licence, and its company admins manage them.</p>
+    <div class="row wrap">${companies.map((co) => `<label class="check"><input type="checkbox" data-hosted="${co.id}" ${hosted.has(co.id) ? "checked" : ""}> ${esc(co.name)}</label>`).join("") || `<span class="muted">No companies on this server.</span>`}</div>
+    <button type="button" id="cd-hosted" class="secondary">Save hosted companies</button>
+    <h3>History</h3><table id="cd-events" class="small"></table>`;
+  if (!$("#cust-dlg").open) $("#cust-dlg").showModal();
+  wireCustomer(c);
+  api(`/admin/licensing/events?customer_id=${c.id}&limit=50`).then((ev) => table($("#cd-events"), [
+    { label: "When", get: (e) => when(e.created_at) }, { label: "Event", get: (e) => e.event_type.replace(/_/g, " ") },
+    { label: "Result", html: (e) => chip(e.result) }, { label: "By", key: "actor" },
+    { label: "Details", wrap: true, get: (e) => Object.entries(e.details || {}).filter(([, v]) => v != null).map(([k, v]) => `${k}: ${v}`).join("; ") }], ev)).catch(() => {});
+}
+$("#cd-close").onclick = () => { $("#cust-dlg").close(); renderers.customers().catch(() => {}); };
+
+function showLink(r, who) {
+  $("#cd-link").innerHTML = `<div class="lic-box"><p>${r.emailed ? `E-mailed to ${esc(who)}. ` : ""}Send this one-time link to ${esc(who)}
+    (valid ${r.expires_in_hours} hours). They set their own password with it; no password is sent.</p><div class="keyline">${esc(r.setup_link)}</div></div>`;
+}
+
+function wireCustomer(c) {
+  const msg = (e) => ($("#cd-msg").textContent = e.message);
+  const again = () => openCustomer(c.id).catch(msg);
+  $("#cd-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const body = Object.fromEntries([...new FormData(e.target)].map(([k, v]) => [k, v.trim() || null]));
+    try { await api(`/admin/customers/${c.id}`, { method: "PATCH", body }); await again(); } catch (err) { msg(err); }
+  };
+  document.querySelectorAll("#cd-body [data-cstatus]").forEach((b) => (b.onclick = async () => {
+    const s = b.dataset.cstatus;
+    if (s !== "active" && !confirm(`${s === "suspended" ? "Suspend" : "Archive"} ${c.legal_name}? Its company admins are signed out and its servers become read-only at their next check-in. No data is deleted.`)) return;
+    try { await api(`/admin/customers/${c.id}/status`, { method: "POST", body: { status: s } }); await again(); } catch (err) { msg(err); }
+  }));
+  $("#cd-add-admin").onclick = async () => {
+    const username = prompt("User ID for the company admin (e.g. their e-mail or name)");
+    if (!username) return;
+    const display_name = prompt("Name", "") || null;
+    const email = prompt("E-mail", c.contact_email || "") || null;
+    try { const r = await api(`/admin/customers/${c.id}/admins`, { method: "POST", body: { username, display_name, email } }); await again(); showLink(r, username); }
+    catch (err) { msg(err); }
+  };
+  document.querySelectorAll("#cd-body [data-invite]").forEach((b) => (b.onclick = async () => {
+    try { const r = await api(`/admin/users/${b.dataset.invite}/invite`, { method: "POST" }); showLink(r, b.closest("tr").cells[0].textContent); } catch (err) { msg(err); }
+  }));
+  document.querySelectorAll("#cd-body [data-admin-active]").forEach((b) => (b.onclick = async () => {
+    try { await api(`/admin/users/${b.dataset.adminActive}/active`, { method: "POST", body: { is_active: b.dataset.on === "1" } }); await again(); } catch (err) { msg(err); }
+  }));
+  $("#cd-new-lic").onclick = () => openLicenceForm(null, c);
+  document.querySelectorAll("#cd-body [data-lic-edit]").forEach((b) => (b.onclick = () => openLicenceForm(c.license_list.find((l) => l.id === b.dataset.licEdit), c)));
+  document.querySelectorAll("#cd-body [data-lic]").forEach((b) => (b.onclick = async () => {
+    const a = b.dataset.act, body = { action: a };
+    const ask = { suspend: "Suspend this licence? Its servers become read-only at their next check-in.",
+      revoke: "Revoke this licence for good? Its servers are released and it cannot be used again.",
+      cancel: "Cancel this licence?", reissue_key: "Make a new licence key? The old key stops working; servers already activated keep working." }[a];
+    if (ask && !confirm(ask)) return;
+    if (a === "renew") {
+      const until = prompt("Renew until (YYYY-MM-DD). Leave empty for one more plan period.", "");
+      if (until === null) return;
+      if (until) body.expires_at = until;
+    }
+    try {
+      const r = await api(`/admin/licenses/${b.dataset.lic}/action`, { method: "POST", body });
+      await again();
+      if (r.license_key) $("#cd-key").innerHTML = `<div class="lic-box"><p>${esc(r.note)}</p><div class="keyline">${esc(r.license_key)}</div></div>`;
+    } catch (err) { msg(err); }
+  }));
+  document.querySelectorAll("#cd-body [data-inst]").forEach((b) => (b.onclick = async () => {
+    const a = b.dataset.act;
+    if (a === "block" && !confirm("Block this server? It becomes read-only at its next check-in and may not activate again.")) return;
+    try { await api(`/admin/installations/${b.dataset.inst}/action`, { method: "POST", body: { action: a } }); await again(); } catch (err) { msg(err); }
+  }));
+  $("#cd-hosted").onclick = async () => {
+    const ids = [...document.querySelectorAll("#cd-body [data-hosted]:checked")].map((x) => x.dataset.hosted);
+    try { await api(`/admin/customers/${c.id}/companies`, { method: "PUT", body: { company_ids: ids } }); await again(); } catch (err) { msg(err); }
+  };
+}
+
+let licEditing = null;
+function openLicenceForm(l, c) {
+  licEditing = { lic: l, customer: c };
+  const f = $("#licf"), el = (n) => f.elements.namedItem(n);
+  f.reset(); $("#licf-msg").textContent = "";
+  $("#licf-title").textContent = l ? `Change licence ${l.key_hint}` : `New licence for ${c.legal_name}`;
+  const mods = new Set(l ? l.modules.map((m) => m.code) : Object.keys(MODULE_LABELS));
+  $("#licf-modules").innerHTML = Object.entries(MODULE_LABELS).map(([k, v]) =>
+    `<label class="check"><input type="checkbox" data-mod="${k}" ${mods.has(k) ? "checked" : ""}> ${esc(v)}</label>`).join("");
+  if (l) for (const k of ["plan", "starts_at", "expires_at", "max_users", "max_installations", "max_companies", "offline_grace_days", "heartbeat_hours", "min_version", "max_version", "notes"])
+    el(k).value = l[k] ?? "";
+  else el("starts_at").value = today();
+  $("#licf-dlg").showModal();
+}
+$("#licf-cancel").onclick = () => $("#licf-dlg").close();
+$("#licf").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target, el = (n) => f.elements.namedItem(n).value.trim();
+  const num = (n) => (el(n) ? Number(el(n)) : null);
+  const body = { plan: el("plan"), starts_at: el("starts_at") || null, max_users: num("max_users"), max_installations: num("max_installations"),
+    max_companies: num("max_companies"), offline_grace_days: num("offline_grace_days"), heartbeat_hours: num("heartbeat_hours"),
+    min_version: el("min_version") || null, max_version: el("max_version") || null, notes: el("notes") || null,
+    modules: [...document.querySelectorAll("#licf-modules [data-mod]:checked")].map((x) => x.dataset.mod) };
+  if (el("expires_at") || licEditing.lic) body.expires_at = el("expires_at") || null;
+  const { lic, customer } = licEditing;
+  try {
+    const r = lic ? await api(`/admin/licenses/${lic.id}`, { method: "PATCH", body })
+      : await api("/admin/licenses", { method: "POST", body: { ...body, customer_id: customer.id } });
+    $("#licf-dlg").close();
+    await openCustomer(customer.id);
+    if (r.license_key) $("#cd-key").innerHTML = `<div class="lic-box"><p>${esc(r.note)}</p><div class="keyline">${esc(r.license_key)}</div></div>`;
+  } catch (err) { $("#licf-msg").textContent = err.message; }
+};
+
+// ------------------------------------------------------------------ licence portal: releases
+renderers.releases = async () => {
+  const rows = await api("/admin/releases");
+  table($("#rel-table"), [
+    { label: "Version", key: "version" }, { label: "Platform", key: "platform" }, { label: "File", key: "file_name" },
+    { label: "Size", num: true, get: (r) => size(r.file_size) }, { label: "SHA-256", get: (r) => r.sha256.slice(0, 12) + "…" },
+    { label: "Signed", get: (r) => (r.signature ? "yes" : "no") }, { label: "Status", html: (r) => chip(r.status) },
+    { label: "Published", get: (r) => when(r.published_at) }, { label: "Downloads", num: true, key: "downloads" },
+    { label: "Notes", key: "release_notes", wrap: true },
+    { label: "", html: (r) => r.status === "published" ? `<button type="button" class="secondary small" data-rel="${r.id}" data-st="withdrawn">Withdraw</button>`
+      : `<button type="button" class="small" data-rel="${r.id}" data-st="published">Publish</button>` },
+  ], rows);
+  document.querySelectorAll("#rel-table [data-rel]").forEach((b) => (b.onclick = async () => {
+    if (b.dataset.st === "published" && !confirm("Publish this release? Company admins whose licence covers it can download it.")) return;
+    try { await api(`/admin/releases/${b.dataset.rel}/status`, { method: "POST", body: { status: b.dataset.st } }); await renderers.releases(); } catch (err) { alert(err.message); }
+  }));
+};
+$("#rel-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const btn = e.target.querySelector("button"); btn.disabled = true; $("#rel-msg").textContent = "Uploading…";
+  try { await api("/admin/releases", { method: "POST", form: new FormData(e.target) }); e.target.reset(); $("#rel-msg").textContent = "Uploaded as draft. Publish it when it is tested."; await renderers.releases(); }
+  catch (err) { $("#rel-msg").textContent = err.message; } finally { btn.disabled = false; }
+};
+
+// ------------------------------------------------------------------ licence portal: the customer's company admin
+renderers.mylicence = async () => {
+  const [p, dl] = await Promise.all([api("/portal/license"), api("/portal/downloads")]);
+  $("#ml-title").textContent = `Licence of ${p.customer.legal_name}`;
+  $("#ml-body").innerHTML = `
+    ${p.warnings.map((w) => `<p class="error">${esc(w)}</p>`).join("")}
+    ${p.licenses.map((l) => licenceBox(l, false)).join("") || `<p class="muted">There is no licence yet. Contact Voyager.</p>`}
+    ${p.hosted_companies.length ? `<p class="small muted">Books hosted on Tally Cloud: ${p.hosted_companies.map((h) => esc(h.name)).join(", ")}
+      ${p.hosted_users != null ? ` · ${p.hosted_users} named user(s) in use` : ""}</p>` : ""}
+    <h3>Downloads</h3>
+    ${dl.length ? `<table><thead><tr><th>Version</th><th>File</th><th class="num">Size</th><th>Released</th><th>What is new</th><th></th></tr></thead><tbody>${dl.map((r) =>
+      `<tr><td>${esc(r.version)}</td><td>${esc(r.file_name)}<div class="small muted">SHA-256 ${esc(r.sha256)}</div></td><td class="num">${size(r.file_size)}</td>
+        <td>${fmtDate(r.published_at?.slice(0, 10))}</td><td class="wrap">${esc(r.release_notes || "")}</td>
+        <td><button type="button" data-dl="${r.id}">Download</button></td></tr>`).join("")}</tbody></table>`
+      : `<p class="muted">No installer is available for your licence yet.</p>`}
+    <p class="small muted">Install on the Windows server or PC next to Tally, then enter your licence key on its Licence tab.</p>
+    ${p.downloads.length ? `<h3>Recent downloads</h3><table class="small">${p.downloads.map((d) => `<tr><td>${when(d.at)}</td><td>${esc(d.user)}</td><td>v${esc(d.version || "")}</td><td>${chip(d.result)}</td></tr>`).join("")}</table>` : ""}`;
+  document.querySelectorAll("#ml-body [data-dl]").forEach((b) => (b.onclick = async () => {
+    try { const r = await api(`/downloads/${b.dataset.dl}/link`, { method: "POST" }); window.location.href = r.url; } catch (err) { alert(err.message); }
+  }));
+  $("#ml-renew").onclick = async () => {
+    const message = prompt("Message for Voyager (optional): e.g. renew for one year, add 2 users");
+    if (message === null) return;
+    try { const r = await api("/licenses/renew", { method: "POST", body: { license_id: p.licenses[0]?.id || null, message } }); alert(r.message); }
+    catch (err) { alert(err.message); }
+  };
+};
+
+// ------------------------------------------------------------------ installation: this server's licence
+renderers.licence = async () => {
+  const l = await api("/licence");
+  const stateLabel = { active: "Active", grace: "Working offline", read_only: "Read-only", not_activated: "Not activated" }[l.state] || l.state;
+  $("#lc-cards").innerHTML = [
+    ["Status", chip(l.state) + ` ${esc(stateLabel)}`, l.reason || (l.warnings || []).join(" ")],
+    ["Licensed to", esc(l.customer || "—"), esc(l.plan ? `${l.plan} · ${l.expires_at ? "until " + fmtDate(l.expires_at) : "no end date"}` : "")],
+    ["Users", l.max_users != null ? `${l.users_used} of ${l.max_users}` : "—", "named users switched on"],
+    ["Tally companies", l.max_companies != null ? `${l.companies_used} of ${l.max_companies}` : String(l.companies_used ?? "—"), ""],
+    ["Last check-in", esc(when(l.last_check_at) || "never"), esc(l.server_url || "")],
+    ["This server", esc((l.installation_id || "").slice(0, 12)), `version ${esc(l.version)}${l.update_available ? ` · version ${esc(l.update_available.version)} is in the licence portal` : ""}`],
+  ].map(([k, v, sub]) => `<div class="card"><div class="k">${esc(k)}</div><div class="v">${v}</div><div class="small muted">${sub}</div></div>`).join("");
+  $("#lc-error").textContent = l.last_error ? `Last attempt: ${l.last_error}` : "";
+  $("#lc-form").hidden = !!l.activated; $("#lc-actions").hidden = !l.activated;
+  $("#lc-form").elements.namedItem("server_url").value = l.server_url || "";
+};
+$("#lc-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const el = (n) => e.target.elements.namedItem(n).value.trim();
+  const btn = e.target.querySelector("button"); btn.disabled = true;
+  try { await api("/licence/activate", { method: "POST", body: { license_key: el("license_key"), server_label: el("server_label") || null, server_url: el("server_url") || null } });
+    await renderers.licence(); refreshBanner(); alert("Activated."); }
+  catch (err) { $("#lc-error").textContent = err.message; } finally { btn.disabled = false; }
+};
+$("#lc-check").onclick = async () => { try { await api("/licence/check", { method: "POST" }); await renderers.licence(); refreshBanner(); } catch (err) { $("#lc-error").textContent = err.message; } };
+$("#lc-deactivate").onclick = async () => {
+  if (!confirm("Deactivate this server? Its licence slot is given back so you can activate another server. This server becomes read-only; no data is deleted.")) return;
+  try { await api("/licence/deactivate", { method: "POST" }); await renderers.licence(); refreshBanner(); } catch (err) { $("#lc-error").textContent = err.message; }
+};
+
+// ------------------------------------------------------------------ first sign-in of an invited company admin
+async function setupFromLink(token) {
+  $("#login").hidden = true; $("#setup").hidden = false;
+  try { const who = await (await fetch(`${API}/auth/setup/${encodeURIComponent(token)}`)).json();
+    if (!who.username) throw new Error(who.detail || "This link is not valid");
+    $("#setup-who").textContent = `User ID: ${who.username}${who.display_name ? ` (${who.display_name})` : ""}`;
+  } catch (err) { $("#setup-msg").textContent = err.message; $("#setup-form").hidden = true; return; }
+  $("#setup-form").onsubmit = async (e) => {
+    e.preventDefault(); $("#setup-msg").textContent = "";
+    if ($("#setup-pw1").value !== $("#setup-pw2").value) { $("#setup-msg").textContent = "The two passwords differ"; return; }
+    const res = await fetch(`${API}/auth/setup`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, password: $("#setup-pw1").value }) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) { $("#setup-msg").textContent = d.detail || res.statusText; return; }
+    history.replaceState(null, "", location.pathname);
+    $("#setup").hidden = true; $("#login").hidden = false;
+    $("#login-user").value = d.username; $("#login-pass").value = $("#setup-pw1").value;
+    $("#login-form").requestSubmit();
+  };
+}
+
 // ------------------------------------------------------------------ boot
 document.querySelector("main").hidden = true; $("header nav").hidden = true;
 $("#recon-from").value = `${new Date().getFullYear() - (new Date().getMonth() < 3 ? 1 : 0)}-04-01`; $("#recon-to").value = today();
 state.token = load("erp_token");
 state.key = state.token ? null : load("erp_key");
-if (state.token || state.key) start().catch(() => signOut()); else signOut();
+if (location.hash.startsWith("#setup=")) { signOut(); setupFromLink(location.hash.slice(7)); }
+else if (state.token || state.key) start().catch(() => signOut()); else signOut();

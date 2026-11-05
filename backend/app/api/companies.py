@@ -10,6 +10,7 @@ from app.models import Company, FinancialYear, User, UserCompanyAccess
 from app.schemas.admin import (
     AccessIn, CompanyIn, CompanyOut, FinancialYearIn, FinancialYearOut, PeriodLockIn, UserIn,
 )
+from app.licensing import enforce as licence
 from app.services.accounting import masters
 from app.services.accounting.masters import fy_bounds
 
@@ -20,6 +21,7 @@ router = APIRouter(tags=["companies & users"])
 def create_company(body: CompanyIn, db: DB, user: CurrentUser):
     if not user.is_superadmin:
         raise HTTPException(403, "Only a super admin can create companies")
+    licence.check_company_limit(db)
     company = masters.create_company(db, body.model_dump(), actor_of(user))
     db.commit()
     return company

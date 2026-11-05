@@ -553,7 +553,7 @@ def upgrade() -> None:
     op.create_index(op.f('ix_cost_allocations_entry_id'), 'cost_allocations', ['entry_id'], unique=False)
     # ### end Alembic commands ###
     # Append-only audit log and voucher history (PRD §11).
-    install_db_extras(op.get_bind())
+    install_db_extras(op.get_bind(), groups=("core",))
 
 
 def downgrade() -> None:

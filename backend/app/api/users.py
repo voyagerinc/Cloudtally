@@ -11,6 +11,7 @@ from app import audit
 from app.api.deps import DB, CurrentUser, actor_of, authorize
 from app.audit import Actor
 from app.core.config import settings
+from app.licensing import enforce as licence
 from app.core.security import (
     ALL_PERMS, PERM_GROUPS, REPORTS, ROLE_LABELS, ROLES, Perm, allows, check_password_rules, has_perm, hash_key,
     hash_password, new_session_token, perms_for, perms_of, verify_password,
@@ -60,6 +61,7 @@ def _find_user(db, username: str) -> User | None:
 # ------------------------------------------------------------------ sign-in
 
 @router.post("/auth/login")
+@router.post("/auth/company-admin/login", include_in_schema=False)   # name used in the licensing PRD
 def login(body: LoginIn, request: Request, db: DB):
     now = utcnow()
     user = _find_user(db, body.username)
@@ -125,7 +127,7 @@ def me(db: DB, user: CurrentUser):
             "is_superadmin": user.is_superadmin, "must_change_password": user.must_change_password,
             "has_password": bool(user.password_hash),
             "all_permissions": sorted(ALL_PERMS) if user.is_superadmin else None,
-            "companies": companies}
+            "companies": companies, "customer_id": user.customer_id, "license_mode": settings.license_mode}
 
 
 @router.get("/permissions")
@@ -214,6 +216,7 @@ def create_company_user(company_id: uuid.UUID, body: CompanyUserIn, db: DB, user
             raise HTTPException(409, f"{existing.username} already has access to {company.name}")
         if reason := _not_manageable(db, user, existing):
             raise HTTPException(403, reason)
+        licence.check_user_limit(db, company_id, existing if existing.is_active else None)
         target = existing
         target.is_active = True      # e.g. a user switched off when removed from their last company
     else:
@@ -223,6 +226,7 @@ def create_company_user(company_id: uuid.UUID, body: CompanyUserIn, db: DB, user
             raise HTTPException(422, "Give the user a first password")
         if reason := check_password_rules(body.password, username):
             raise HTTPException(422, reason)
+        licence.check_user_limit(db, company_id)
         target = User(username=username, display_name=body.display_name, password_hash=hash_password(body.password),
                       must_change_password=True, created_by=user.username)
         db.add(target)
@@ -272,6 +276,8 @@ def update_company_user(company_id: uuid.UUID, user_id: uuid.UUID, body: Company
     if "is_active" in fields and body.is_active is not None:
         if is_self and not body.is_active:
             raise HTTPException(403, "You cannot switch off your own user")
+        if body.is_active and not target.is_active:
+            licence.check_user_limit(db, company_id)
         target.is_active = body.is_active
         if not body.is_active:
             db.execute(delete(UserSession).where(UserSession.user_id == target.id))

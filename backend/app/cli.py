@@ -66,6 +66,27 @@ def create_user(args) -> None:
             print(f"API key for integrations (shown once):\n{key}")
 
 
+def license_keygen(args) -> None:
+    """Licence portal only: make the Ed25519 key pair that signs entitlements and installers."""
+    import os
+    from pathlib import Path
+    from app.licensing.core import generate_keypair
+    path = Path(args.out)
+    if path.exists() and not args.force:
+        sys.exit(f"{path} already exists. Replacing it makes every installed server's licence invalid; "
+                 "use --force only if the key was lost or leaked.")
+    pem, public = generate_keypair()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+    with os.fdopen(fd, "wb") as f:
+        f.write(pem)
+    print(f"Private key written to {path} (keep it secret; it never goes into git or an installer).")
+    print("Add to backend/.env on the licence portal:")
+    print(f"  ERP_LICENSE_SIGNING_KEY_FILE={path}")
+    print("Public key, for ERP_LICENSE_PUBLIC_KEY on every installation (the installer sets it):")
+    print(f"  {public}")
+
+
 def set_password(args) -> None:
     with SessionLocal() as db:
         user = db.scalar(select(User).where(User.username == args.username))
@@ -166,6 +187,11 @@ def main() -> None:
     u.add_argument("--company", help="grant access to this company")
     u.add_argument("--role", default="accountant", choices=sorted(ROLES))
     u.set_defaults(fn=create_user)
+
+    kg = sub.add_parser("license-keygen", help="licence portal: make the key pair that signs licences")
+    kg.add_argument("--out", default="/etc/tallycloud/license_signing.pem")
+    kg.add_argument("--force", action="store_true")
+    kg.set_defaults(fn=license_keygen)
 
     sp = sub.add_parser("set-password", help="set a user's password (also unlocks and switches the user on)")
     sp.add_argument("username")

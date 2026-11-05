@@ -127,6 +127,13 @@ Automatic sync is on (`ERP_AUTO_SYNC=true` in `backend/.env`). A newly linked la
 reads its whole voucher history, one slot of up to 1,000 vouchers after another, which keeps Tally busy;
 switch automatic sync off on the Sync tab during office hours until that first catch-up is done.
 
+## Licence portal
+
+This server is also the licence portal: customers, licences, activations and installer downloads
+(see [LICENSING.md](LICENSING.md)). The setup makes its signing key once, at
+`/etc/tallycloud/license_signing.pem`. **Back that file up**: if it is lost, every installed server must
+be activated again. To run without the portal, call the setup with `PORTAL=no`.
+
 ## Updating
 
 **From the web page:** sign in as a super admin and open the **Server** tab. *Check for updates* shows

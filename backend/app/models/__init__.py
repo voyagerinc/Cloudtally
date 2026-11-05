@@ -1,4 +1,7 @@
 from app.models.admin import Company, FinancialYear, User, UserCompanyAccess, UserSession
+from app.models.licensing import (
+    Customer, DownloadEvent, Installation, License, LicenseEvent, LicenseState, SoftwareRelease, UserInvite,
+)
 from app.models.masters import (
     CostCentre, Godown, Ledger, LedgerGroup, StockGroup, StockItem, TaxCode, Unit, VoucherType,
 )
@@ -12,7 +15,8 @@ from app.models.vouchers import (
 )
 
 __all__ = [
-    "Attachment", "AuditEvent", "BankAllocation", "BillAllocation", "Company", "CostAllocation", "CostCentre",
+    "Attachment", "AuditEvent", "Customer", "DownloadEvent", "Installation", "License", "LicenseEvent",
+    "LicenseState", "SoftwareRelease", "UserInvite", "BankAllocation", "BillAllocation", "Company", "CostAllocation", "CostCentre",
     "FinancialYear", "Godown", "ImportBatch", "Ledger", "LedgerGroup", "OutboxStatus", "ReconciliationRun",
     "StockGroup", "StockItem", "SyncAttempt", "SyncConflict", "SyncInbox", "SyncOutbox", "SyncProgress", "SyncStatus",
     "TallyConnector", "TallyMapping", "TaxCode", "Unit", "User", "UserCompanyAccess", "UserSession", "Voucher",

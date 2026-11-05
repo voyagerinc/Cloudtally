@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.db import SessionLocal
+from app.licensing import enforce as licence
 from app.models import SyncProgress, TallyConnector
 from app.models.base import utcnow
 from app.services.sync import progress
@@ -82,6 +83,8 @@ class AutoSync:
                 row = db.get(SyncProgress, company_id)
                 if row and progress.is_running(row.data):
                     continue   # a Sync now is already running for this company
+                if not licence.sync_allowed(db, company_id):
+                    continue   # licence read-only, or Tally sync not licensed
             run_company(SessionLocal, company_id, trigger="automatic sync")
             with SessionLocal() as db:
                 conn = db.get(TallyConnector, company_id)

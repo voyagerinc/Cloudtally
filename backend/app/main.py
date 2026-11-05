@@ -9,8 +9,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
-from app import audit
-from app.api import audit_log, companies, masters, reports, sync, system, users, vouchers
+from app import __version__, audit
+from app.api import audit_log, companies, licence, licensing, masters, reports, sync, system, users, vouchers
 from app.core.config import settings
 from app.core.db import engine
 from app.services.accounting.vouchers import VoucherError
@@ -21,22 +21,30 @@ STATIC = Path(__file__).resolve().parent / "static"
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Automatic sync runs inside the server while it is up (ERP_AUTO_SYNC, on by default)."""
+    from app.licensing.client import heartbeat
+    from app.licensing.service import expiry_notices
     from app.workers.auto_sync import auto_sync
     if settings.auto_sync:
         auto_sync.start()   # when off, it can still be switched on from the Sync tab
+    if settings.license_mode == "client":
+        heartbeat.start()   # daily licence check-in with the cloud
+    elif settings.license_mode == "server":
+        expiry_notices.start()
     yield
     auto_sync.stop()
+    heartbeat.stop()
+    expiry_notices.stop()
 
 
 app = FastAPI(
     lifespan=lifespan,
     title="Tally-Compatible Bidirectional ERP",
-    version="0.1.0",
+    version=__version__,
     description="PostgreSQL-based accounting platform with bidirectional TallyPrime synchronization.",
 )
 
 API = "/api/v1"
-for module in (users, companies, masters, vouchers, reports, sync, audit_log, system):
+for module in (users, companies, masters, vouchers, reports, sync, audit_log, system, licence, licensing):
     app.include_router(module.router, prefix=API)
 
 

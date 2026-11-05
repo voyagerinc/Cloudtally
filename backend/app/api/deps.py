@@ -10,6 +10,7 @@ from app.audit import Actor
 from app.core.config import settings
 from app.core.db import get_db
 from app.core.security import has_perm, hash_key, role_for, user_for_key
+from app.licensing import enforce as licence
 from app.models import Company, User, UserSession
 from app.models.base import utcnow
 
@@ -69,6 +70,7 @@ def authorize(db: Session, user: User, company_id: uuid.UUID, perm: str) -> Comp
         raise HTTPException(404, "Company not found")
     if not has_perm(db, user, company_id, perm):
         raise HTTPException(403, "You do not have permission for this. Ask your company admin.")
+    licence.check_perm(db, company_id, perm)     # licensed modules, read-only after expiry
     return company
 
 

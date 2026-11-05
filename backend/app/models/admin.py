@@ -20,6 +20,8 @@ class Company(IdMixin, TimestampMixin, Base):
     base_currency: Mapped[str] = mapped_column(String(3), default="INR")
     books_from: Mapped[date] = mapped_column(Date)
     timezone: Mapped[str] = mapped_column(String(64), default="Asia/Kolkata")
+    # Licensee whose licence covers these books when they are hosted on the cloud server (None: not licensed).
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("customers.id"), index=True)
 
     financial_years: Mapped[list["FinancialYear"]] = relationship(back_populates="company", order_by="FinancialYear.start_date")
 
@@ -54,6 +56,9 @@ class User(IdMixin, TimestampMixin, Base):
     is_superadmin: Mapped[bool] = mapped_column(Boolean, default=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[str | None] = mapped_column(String(100))
+    # Company admin of this licensee in the licence portal (download installers, see the licence).
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("customers.id"), index=True)
+    email: Mapped[str | None] = mapped_column(String(300))
 
     access: Mapped[list["UserCompanyAccess"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 

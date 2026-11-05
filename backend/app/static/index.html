@@ -23,6 +23,10 @@
     <button data-tab="audit" data-perm="audit.read">Audit</button>
     <button data-tab="users" data-perm="users.manage">Users</button>
     <button data-tab="server" data-perm="superadmin">Server</button>
+    <button data-tab="customers" data-perm="portal-admin">Customers</button>
+    <button data-tab="releases" data-perm="portal-admin">Releases</button>
+    <button data-tab="mylicence" data-perm="portal-customer">My licence</button>
+    <button data-tab="licence" data-perm="licence-client">Licence</button>
   </nav>
   <span id="whoami"></span>
   <button id="change-pw" class="link" hidden>Change password</button>
@@ -41,6 +45,19 @@
     <form id="key-form" class="row"><input id="apikey" type="password" placeholder="erp_…" required autocomplete="off">
       <button class="secondary">Use key</button></form>
   </details>
+</section>
+
+<div id="lic-banner" class="lic-banner" hidden role="status"></div>
+
+<section id="setup" class="panel narrow" hidden>
+  <h2>Set your password</h2>
+  <p class="muted" id="setup-who"></p>
+  <form id="setup-form" class="stack">
+    <label>New password (at least 8 characters)<input id="setup-pw1" type="password" autocomplete="new-password" required minlength="8"></label>
+    <label>New password again<input id="setup-pw2" type="password" autocomplete="new-password" required></label>
+    <button>Set password and sign in</button>
+  </form>
+  <p id="setup-msg" class="error" aria-live="polite"></p>
 </section>
 
 <main>
@@ -275,6 +292,56 @@
   <pre id="sv-log" class="small"></pre>
 </section>
 
+<section id="customers" class="tab" hidden>
+  <div class="row between"><h2>Customers and licences</h2>
+    <span><input id="cust-q" placeholder="Search customers"> <button type="button" id="cust-new">Add customer</button></span></div>
+  <div id="lic-cards" class="cards"></div>
+  <div id="lic-expiring"></div>
+  <div id="lic-renewals"></div>
+  <h3>Customers</h3>
+  <table id="cust-table"></table>
+</section>
+
+<section id="releases" class="tab" hidden>
+  <h2>Software releases</h2>
+  <p class="muted small">Upload the signed Windows installer. Company admins see a release in their portal once it is
+    published and their licence covers its version.</p>
+  <form id="rel-form" class="panel row">
+    <label>Version<input name="version" required placeholder="1.1.0" pattern="\d+(\.\d+){0,3}"></label>
+    <label>Installer<input name="file" type="file" required accept=".exe,.msi,.zip"></label>
+    <label class="grow">Release notes<input name="release_notes" maxlength="4000"></label>
+    <button>Upload</button> <span id="rel-msg" class="muted"></span>
+  </form>
+  <table id="rel-table"></table>
+</section>
+
+<section id="mylicence" class="tab" hidden>
+  <div class="row between"><h2 id="ml-title">My licence</h2>
+    <button type="button" id="ml-renew">Request renewal</button></div>
+  <div id="ml-body"></div>
+</section>
+
+<section id="licence" class="tab" hidden>
+  <h2>Licence of this server</h2>
+  <div id="lc-cards" class="cards"></div>
+  <p id="lc-error" class="error"></p>
+  <form id="lc-form" class="panel" hidden>
+    <h3>Activate</h3>
+    <p class="muted small">Enter the licence key Voyager gave you. This server then checks in with Tally Cloud once a
+      day; no business data is sent.</p>
+    <div class="grid">
+      <label>Licence key<input name="license_key" required placeholder="TCL-XXXX-XXXX-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false" class="upper"></label>
+      <label>Name of this server<input name="server_label" maxlength="200" placeholder="Head office server"></label>
+      <label>Licence service<input name="server_url" maxlength="300"></label>
+    </div>
+    <button>Activate</button>
+  </form>
+  <div class="row" id="lc-actions" hidden>
+    <button type="button" id="lc-check" class="secondary">Check now</button>
+    <button type="button" id="lc-deactivate" class="secondary danger">Deactivate (moving to another server)</button>
+  </div>
+</section>
+
 <section id="noaccess" class="tab panel narrow" hidden>
   <h2>Nothing to show</h2>
   <p class="muted" id="noaccess-msg">You have no permissions in this company yet. Ask your company admin.</p>
@@ -304,6 +371,36 @@
       <button type="button" id="uf-unlock" class="secondary" hidden>Unlock</button>
       <button type="button" id="uf-remove" class="secondary danger">Remove from this company</button>
     </div>
+  </form>
+</dialog>
+
+<dialog id="cust-dlg" class="wide">
+  <div class="row between"><h2 id="cd-title">Customer</h2>
+    <button type="button" id="cd-close" class="secondary">Close</button></div>
+  <p id="cd-msg" class="error" aria-live="polite"></p>
+  <div id="cd-body"></div>
+</dialog>
+
+<dialog id="licf-dlg">
+  <form id="licf" class="stack" novalidate>
+    <div class="row between"><h2 id="licf-title">New licence</h2>
+      <span><button>Save</button> <button type="button" id="licf-cancel" class="secondary">Cancel</button></span></div>
+    <p id="licf-msg" class="error" aria-live="polite"></p>
+    <div class="grid">
+      <label>Plan<select name="plan"><option value="trial">Trial (30 days)</option><option value="monthly">Monthly</option>
+        <option value="annual" selected>Annual</option><option value="perpetual">Perpetual</option></select></label>
+      <label>Starts<input name="starts_at" type="date"></label>
+      <label>Expires (empty: by plan)<input name="expires_at" type="date"></label>
+      <label>Named users<input name="max_users" type="number" min="1" value="5"></label>
+      <label>Servers (installations)<input name="max_installations" type="number" min="1" value="1"></label>
+      <label>Tally companies (empty: any)<input name="max_companies" type="number" min="1"></label>
+      <label>Offline grace (days)<input name="offline_grace_days" type="number" min="0" max="90" value="7"></label>
+      <label>Check-in every (hours)<input name="heartbeat_hours" type="number" min="1" max="168" value="24"></label>
+      <label>Lowest version<input name="min_version" placeholder="any"></label>
+      <label>Highest version<input name="max_version" placeholder="any"></label>
+    </div>
+    <fieldset><legend>Modules</legend><div id="licf-modules" class="row wrap"></div></fieldset>
+    <label>Notes<input name="notes" maxlength="2000"></label>
   </form>
 </dialog>
 

@@ -6,3 +6,4 @@ __pycache__/
 *.log
 backend/.env
 Tally_Bidirectional_ERP_PRD.docx
+Cloud_Licensing_Integration_PRD*.docx

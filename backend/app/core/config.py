@@ -33,6 +33,22 @@ class Settings(BaseSettings):
     # Folder shared with deploy/update.sh (set by deploy/server-setup.sh). Unset: no updates from the web.
     update_dir: str | None = None
 
+    # Cloud licensing (Cloud Licensing PRD). "off": no licence checks (development, tests).
+    # "server": this is the licence portal (tallycloud.voyager.co.in); books hosted here that belong to a
+    #           customer follow that customer's licence. "client": an installation on a customer's server.
+    license_mode: str = "off"
+    license_signing_key_file: str | None = None    # server: Ed25519 private key (PEM), never in git
+    license_public_key: str | None = None          # client: base64 public key that checks the cloud's signature
+    license_server_url: str = "https://tallycloud.voyager.co.in"
+    release_dir: str | None = None                 # server: where uploaded installers are kept
+    public_url: str = "https://tallycloud.voyager.co.in"   # for links in invitations
+    # Optional e-mail for invitations and licence notices; without it the portal shows the link to copy.
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_from: str | None = None
+
     # Voucher engine
     allow_negative_stock: bool = True
 

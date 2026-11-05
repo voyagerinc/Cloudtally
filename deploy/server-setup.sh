@@ -137,6 +137,25 @@ chmod -R g+rX,o-rwx "$APP_DIR"
 echo "==> Schema"
 (cd "$APP_DIR/backend" && sudo -u "$APP_USER" "$APP_DIR/.venv/bin/python" -m app.cli init-db)
 
+echo "==> Licence portal (customers, licences, activations, installer downloads)"
+# This server is the licence portal unless PORTAL=no. Its private signing key is made once, here, and
+# never leaves the server: replacing it would make every installed server's licence invalid.
+if [ "${PORTAL:-yes}" != no ]; then
+  KEY_DIR=/etc/tallycloud
+  KEY_FILE=$KEY_DIR/license_signing.pem
+  install -d -m 750 -o root -g "$APP_USER" "$KEY_DIR"
+  if [ ! -f "$KEY_FILE" ]; then
+    (cd "$APP_DIR/backend" && "$APP_DIR/.venv/bin/python" -m app.cli license-keygen --out "$KEY_FILE" >/dev/null)
+    echo "    new signing key: $KEY_FILE"
+  fi
+  chown root:"$APP_USER" "$KEY_FILE"; chmod 640 "$KEY_FILE"
+  install -d -m 750 -o "$APP_USER" -g "$APP_USER" /var/lib/tallycloud/releases
+  grep -q '^ERP_LICENSE_MODE=' "$ENV_FILE" || echo "ERP_LICENSE_MODE=server" >> "$ENV_FILE"
+  grep -q '^ERP_LICENSE_SIGNING_KEY_FILE=' "$ENV_FILE" || echo "ERP_LICENSE_SIGNING_KEY_FILE=$KEY_FILE" >> "$ENV_FILE"
+  grep -q '^ERP_RELEASE_DIR=' "$ENV_FILE" || echo "ERP_RELEASE_DIR=/var/lib/tallycloud/releases" >> "$ENV_FILE"
+  grep -q '^ERP_PUBLIC_URL=' "$ENV_FILE" || echo "ERP_PUBLIC_URL=https://$DOMAIN" >> "$ENV_FILE"
+fi
+
 echo "==> Updates from the web app (super admin: Server tab)"
 # The app may only drop a request file into inbox/; deploy/update.sh does the work as root.
 UPDATE_DIR=/var/lib/tallycloud-update
@@ -208,5 +227,7 @@ Done. Next:
   2. Connect each Tally PC with a tunnel (docs/DEPLOY.md, step 5). The port must be free here;
      add-tally-pc.sh refuses one that other software already uses:
        sudo bash $APP_DIR/deploy/add-tally-pc.sh "<public key from the Tally PC>" 9000
-  3. Open https://$DOMAIN and sign in.
+  3. Open https://$DOMAIN and sign in. Customers and Releases are on their own tabs.
+  4. Public key for installations (the Windows installer must carry it):
+       curl -s https://$DOMAIN/api/v1/licensing/public-key
 EOF

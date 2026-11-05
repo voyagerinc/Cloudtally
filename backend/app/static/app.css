@@ -110,3 +110,14 @@ tr.muted td { color: var(--muted); }
 .chip.active { background: var(--chip-ok); color: var(--ok); }
 .chip.password_pending { background: var(--chip-warn); color: var(--warn); }
 .chip.switched_off, .chip.locked { background: var(--chip-bad); color: var(--bad); }
+
+.lic-banner { margin: 0; padding: 8px 16px; background: var(--chip-warn); color: var(--warn); border-bottom: 1px solid var(--line); }
+.lic-banner.bad { background: var(--chip-bad); color: var(--bad); }
+.grow { flex: 1; min-width: 200px; }
+.upper { text-transform: uppercase; }
+.lic-box { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 10px 0; background: var(--panel); }
+.lic-box h4 { margin: 0 0 6px; }
+.keyline { font: 600 16px ui-monospace, Consolas, monospace; padding: 8px; background: var(--bg); border-radius: 6px; user-select: all; word-break: break-all; }
+.chip.active, .chip.published, .chip.ok { background: var(--chip-ok); color: var(--ok); }
+.chip.expired, .chip.suspended, .chip.revoked, .chip.blocked, .chip.withdrawn, .chip.denied, .chip.read_only, .chip.not_activated { background: var(--chip-bad); color: var(--bad); }
+.chip.grace, .chip.cancelled, .chip.deactivated, .chip.archived { background: var(--chip-warn); color: var(--warn); }
