@@ -6,8 +6,11 @@
 # Run it from the cloned repository, e.g. /root/projects/tallycloud. Safe to run again:
 # it keeps an existing database password and .env, and only adds what is missing.
 #
-# What it installs: PostgreSQL, Python venv, the app as a systemd service on 127.0.0.1:8000,
-# nginx in front with a Let's Encrypt certificate, a firewall (SSH + HTTPS only), and a locked-down
+# Shares the server with other software: it never touches other nginx sites, never turns the
+# firewall on (if it is off) and picks a free local port for the app. Optional: APP_PORT=8010.
+#
+# What it installs: PostgreSQL, Python venv, the app as a systemd service on 127.0.0.1 (port 8000 or
+# the next free one), an nginx site with a Let's Encrypt certificate, and a locked-down
 # "tallytunnel" account that Tally PCs use to open their reverse tunnel (see docs/DEPLOY.md).
 set -euo pipefail
 
@@ -19,6 +22,31 @@ TUNNEL_USER=tallytunnel
 ENV_FILE="$APP_DIR/backend/.env"
 
 [ "$(id -u)" = 0 ] || { echo "Run as root (sudo)."; exit 1; }
+
+listening() { ss -Hltn "sport = :$1" | grep -q .; }
+owner() { ss -Hltnp "sport = :$1" | grep -o 'users:(("[^"]*' | head -1 | cut -d'"' -f2; }
+
+echo "==> Checking what already runs here"
+for p in 80 443; do
+  o=$(owner $p)
+  if [ -n "$o" ] && [ "$o" != nginx ]; then
+    echo "!! Port $p is used by '$o', not nginx. This script puts Tally Cloud behind nginx on 80/443."
+    echo "   Nothing was changed. Send this message to whoever set up '$o'."
+    exit 1
+  fi
+done
+SERVICE=/etc/systemd/system/tallycloud.service
+if [ -z "${APP_PORT:-}" ] && [ -f "$SERVICE" ]; then
+  APP_PORT=$(grep -o -- '--port [0-9]*' "$SERVICE" | cut -d' ' -f2)   # keep the port of an earlier run
+  systemctl stop tallycloud || true
+fi
+if [ -z "${APP_PORT:-}" ]; then
+  APP_PORT=8000
+  while listening $APP_PORT; do APP_PORT=$((APP_PORT + 1)); done
+elif listening "$APP_PORT"; then
+  echo "!! APP_PORT $APP_PORT is already in use by '$(owner "$APP_PORT")'."; exit 1
+fi
+echo "    app port: 127.0.0.1:$APP_PORT"
 
 echo "==> Packages"
 apt-get update -q
@@ -54,9 +82,11 @@ else
   fi
   sudo -u postgres psql -tAc "select 1 from pg_database where datname='tally_erp'" | grep -q 1 \
     || sudo -u postgres createdb -O erp tally_erp
+  # The local PostgreSQL may not be on 5432 (e.g. when another one, perhaps in Docker, holds it).
+  PG_PORT=$(sudo -u postgres psql -tAc "show port" | tr -d '[:space:]')
   cat > "$ENV_FILE" <<EOF
 # Created by deploy/server-setup.sh. Never commit this file.
-ERP_DATABASE_URL=postgresql+psycopg://erp:$DB_PASS@127.0.0.1:5432/tally_erp
+ERP_DATABASE_URL=postgresql+psycopg://erp:$DB_PASS@127.0.0.1:$PG_PORT/tally_erp
 # Sync with every linked Tally automatically while it is reachable (Sync tab can switch it off).
 ERP_AUTO_SYNC=true
 ERP_TALLY_TIMEOUT=90
@@ -76,23 +106,35 @@ echo "==> Schema"
 (cd "$APP_DIR/backend" && sudo -u "$APP_USER" "$APP_DIR/.venv/bin/python" -m app.cli init-db)
 
 echo "==> Service"
-sed -e "s#__APP_DIR__#$APP_DIR#g" -e "s#__APP_USER__#$APP_USER#g" "$APP_DIR/deploy/tallycloud.service" \
-  > /etc/systemd/system/tallycloud.service
+sed -e "s#__APP_DIR__#$APP_DIR#g" -e "s#__APP_USER__#$APP_USER#g" -e "s#__APP_PORT__#$APP_PORT#g" \
+  "$APP_DIR/deploy/tallycloud.service" > "$SERVICE"
 systemctl daemon-reload
 systemctl enable tallycloud
 systemctl restart tallycloud
 
 echo "==> nginx"
-sed -e "s#__DOMAIN__#$DOMAIN#g" "$APP_DIR/deploy/nginx-tallycloud.conf" > /etc/nginx/sites-available/tallycloud
-ln -sf /etc/nginx/sites-available/tallycloud /etc/nginx/sites-enabled/tallycloud
-rm -f /etc/nginx/sites-enabled/default
+# Only adds its own site (matched by server_name); the other sites on this server are left as they are.
+SITE=/etc/nginx/sites-available/tallycloud
+if [ -f "$SITE" ] && grep -q 'managed by Certbot' "$SITE"; then
+  sed -i "s#proxy_pass http://127.0.0.1:[0-9]*;#proxy_pass http://127.0.0.1:$APP_PORT;#" "$SITE"   # keep certbot's HTTPS part
+else
+  sed -e "s#__DOMAIN__#$DOMAIN#g" -e "s#__APP_PORT__#$APP_PORT#g" "$APP_DIR/deploy/nginx-tallycloud.conf" > "$SITE"
+fi
+ln -sf "$SITE" /etc/nginx/sites-enabled/tallycloud
+systemctl enable --now nginx
 nginx -t
 systemctl reload nginx
 
-echo "==> Firewall (SSH and web only; Tally is never exposed)"
-ufw allow OpenSSH >/dev/null
-ufw allow 'Nginx Full' >/dev/null
-ufw --force enable >/dev/null
+echo "==> Firewall"
+# Tally is never exposed: the tunnel ends on 127.0.0.1. Turning ufw on here could cut off the other
+# software on this server, so rules are only added when it is already on.
+if ufw status | grep -q "Status: active"; then
+  ufw allow OpenSSH >/dev/null
+  ufw allow 'Nginx Full' >/dev/null
+  echo "    ufw is on: allowed SSH, HTTP and HTTPS"
+else
+  echo "    ufw is off; left off (other software here may need its ports). Nothing extra is exposed."
+fi
 
 echo "==> HTTPS certificate"
 if certbot certificates 2>/dev/null | grep -q "Domains: $DOMAIN"; then
@@ -103,14 +145,15 @@ else
 fi
 
 sleep 2
-if curl -fsS http://127.0.0.1:8000/health >/dev/null; then echo "==> App is running"; else
+if curl -fsS "http://127.0.0.1:$APP_PORT/health" >/dev/null; then echo "==> App is running"; else
   echo "!! The app did not answer; see: journalctl -u tallycloud -n 50"; fi
 cat <<EOF
 
 Done. Next:
   1. Create the first user (prints the sign-in key once):
        cd $APP_DIR/backend && sudo -u $APP_USER $APP_DIR/.venv/bin/python -m app.cli create-user admin --superadmin
-  2. Connect each Tally PC with a tunnel (docs/DEPLOY.md, step 5):
+  2. Connect each Tally PC with a tunnel (docs/DEPLOY.md, step 5). The port must be free here;
+     add-tally-pc.sh refuses one that other software already uses:
        sudo bash $APP_DIR/deploy/add-tally-pc.sh "<public key from the Tally PC>" 9000
   3. Open https://$DOMAIN and sign in.
 EOF

@@ -56,13 +56,30 @@ git clone git@github.com:voyagerinc/Cloudtally.git .
 
 ## 4. Install
 
+The server may already run other software. First see which ports are taken:
+
+```bash
+sudo ss -ltnp | awk 'NR>1 {print $4, $6}' | sort -u
+```
+
+The script shares the server safely:
+
+- **Ports 80/443** must be free or held by nginx. If another web server (Apache, Caddy, Traefik,
+  a Docker proxy) holds them, the script stops before changing anything.
+- **nginx**: it adds only its own site for `tallycloud.voyager.co.in`. Other sites are left as they are.
+- **App port**: it uses 127.0.0.1:8000, or the next free port. Set your own with `APP_PORT=8010 sudo -E bash …`.
+- **PostgreSQL**: it adds a separate `erp` role and `tally_erp` database to the server's PostgreSQL,
+  on whatever port that PostgreSQL uses.
+- **Firewall**: if ufw is already on, it allows SSH, HTTP and HTTPS. If ufw is off, it leaves it off,
+  so the other software keeps its ports.
+
 ```bash
 sudo bash /root/projects/tallycloud/deploy/server-setup.sh tallycloud.voyager.co.in <your-email>
 ```
 
 This installs PostgreSQL (with a generated password in `backend/.env`, readable only by the app),
-the app as the `tallycloud` systemd service, nginx with an HTTPS certificate, and the firewall
-(only SSH and HTTPS open). Then create the first sign-in key:
+the app as the `tallycloud` systemd service, and its nginx site with an HTTPS certificate. Then
+create the first sign-in key:
 
 ```bash
 cd /root/projects/tallycloud/backend
@@ -82,7 +99,9 @@ powershell -ExecutionPolicy Bypass -File setup-tally-tunnel.ps1
 ```
 
 It prints one line starting with `sudo bash /root/projects/tallycloud/deploy/add-tally-pc.sh "ssh-ed25519 …" 9000`.
-Run that line on the VPS. Then, on the VPS:
+Run that line on the VPS. If other software on the VPS already uses port 9000 (Portainer often does),
+`add-tally-pc.sh` refuses it. Then use a free port such as 9100 everywhere: `-RemotePort 9100` on the PC,
+`… 9100` on the VPS, and port 9100 in the app's connector. Then, on the VPS:
 
 ```bash
 curl -s http://127.0.0.1:9000        # <RESPONSE>TallyPrime Server is Running</RESPONSE>
