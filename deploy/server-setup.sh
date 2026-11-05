@@ -82,8 +82,6 @@ else
   fi
   sudo -u postgres psql -tAc "select 1 from pg_database where datname='tally_erp'" | grep -q 1 \
     || sudo -u postgres createdb -O erp tally_erp
-  # The local PostgreSQL may not be on 5432 (e.g. when another one, perhaps in Docker, holds it).
-  PG_PORT=$(sudo -u postgres psql -tAc "show port" | tr -d '[:space:]')
   cat > "$ENV_FILE" <<EOF
 # Created by deploy/server-setup.sh. Never commit this file.
 ERP_DATABASE_URL=postgresql+psycopg://erp:$DB_PASS@127.0.0.1:$PG_PORT/tally_erp
@@ -92,6 +90,19 @@ ERP_AUTO_SYNC=true
 ERP_TALLY_TIMEOUT=90
 EOF
 fi
+# The local PostgreSQL may not be on 5432 (another version or one in Docker may hold it), so ask it,
+# and correct the port in an existing .env too.
+PG_PORT=$(sudo -u postgres psql -tAc "show port" | tr -d '[:space:]')
+PG_LISTEN=$(sudo -u postgres psql -tAc "show listen_addresses" | tr -d '[:space:]')
+case ",$PG_LISTEN," in
+  *,localhost,*|*,127.0.0.1,*|*,\*,*|*,0.0.0.0,*) ;;
+  *) echo "!! PostgreSQL does not accept connections on 127.0.0.1 (listen_addresses = '$PG_LISTEN')."
+     echo "   Add localhost to listen_addresses in $(sudo -u postgres psql -tAc 'show config_file'),"
+     echo "   run: systemctl restart postgresql, then run this script again."
+     exit 1;;
+esac
+sed -i -E "s#(ERP_DATABASE_URL=postgresql\+psycopg://erp:[^@]*@127\.0\.0\.1:)[0-9]+/#\1$PG_PORT/#" "$ENV_FILE"
+echo "    PostgreSQL on 127.0.0.1:$PG_PORT, database tally_erp"
 chown root:"$APP_USER" "$ENV_FILE"
 chmod 640 "$ENV_FILE"
 
@@ -114,13 +125,20 @@ systemctl restart tallycloud
 
 echo "==> nginx"
 # Only adds its own site (matched by server_name); the other sites on this server are left as they are.
-SITE=/etc/nginx/sites-available/tallycloud
+# Debian's nginx loads sites-enabled/; the nginx.org package loads conf.d/*.conf. Use whichever this
+# server's nginx.conf includes.
+if grep -Eq '^[^#]*include[^;]*sites-enabled' /etc/nginx/nginx.conf; then
+  SITE=/etc/nginx/sites-available/tallycloud; ENABLE="/etc/nginx/sites-enabled/tallycloud"
+else
+  SITE=/etc/nginx/conf.d/tallycloud.conf; ENABLE=""
+fi
 if [ -f "$SITE" ] && grep -q 'managed by Certbot' "$SITE"; then
   sed -i "s#proxy_pass http://127.0.0.1:[0-9]*;#proxy_pass http://127.0.0.1:$APP_PORT;#" "$SITE"   # keep certbot's HTTPS part
 else
   sed -e "s#__DOMAIN__#$DOMAIN#g" -e "s#__APP_PORT__#$APP_PORT#g" "$APP_DIR/deploy/nginx-tallycloud.conf" > "$SITE"
 fi
-ln -sf "$SITE" /etc/nginx/sites-enabled/tallycloud
+[ -z "$ENABLE" ] || ln -sf "$SITE" "$ENABLE"
+echo "    site: $SITE"
 systemctl enable --now nginx
 nginx -t
 systemctl reload nginx
