@@ -57,20 +57,22 @@ PERM_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
                  (Perm.MASTERS_WRITE, "Create and alter ledgers and stock items")]),
     ("Reports", [(Perm.REPORTS_READ, "All reports")] + [(Perm.report(k), v) for k, v in REPORTS.items()]
                 + [(Perm.EXPORT, "Export to CSV")]),
-    ("Tally sync", [(Perm.SYNC_READ, "View sync status"), (Perm.SYNC_MANAGE, "Run sync and change the Tally connector"),
-                    (Perm.CONFLICT_RESOLVE, "Resolve conflicts")]),
+    # Running sync and changing the Tally connection stay with the company admin (manager): no tick for it.
+    ("Tally sync", [(Perm.SYNC_READ, "View sync status"), (Perm.CONFLICT_RESOLVE, "Resolve conflicts")]),
     ("Administration", [(Perm.USERS_MANAGE, "Manage users and permissions"),
                         (Perm.COMPANY_MANAGE, "Company settings"), (Perm.PERIOD_LOCK, "Lock periods"),
                         (Perm.AUDIT_READ, "View the audit trail")]),
 ]
-ALL_PERMS: set[str] = {p for _, perms in PERM_GROUPS for p, _ in perms} | {Perm.INTEGRATION}
+ALL_PERMS: set[str] = {p for _, perms in PERM_GROUPS for p, _ in perms} | {Perm.INTEGRATION, Perm.SYNC_MANAGE}
+# Only the company admin (manager) role runs Tally sync and changes the Tally connection.
+MANAGER_ONLY = {Perm.SYNC_MANAGE}
 
 _READ = {Perm.MASTERS_READ, Perm.VOUCHER_READ, Perm.REPORTS_READ}
 ROLES: dict[str, set[str]] = {
     "owner": {v for k, v in vars(Perm).items() if k.isupper()},
     "accounts_admin": _READ | {
         Perm.MASTERS_WRITE, Perm.VOUCHER_WRITE, Perm.VOUCHER_POST, Perm.VOUCHER_APPROVE, Perm.VOUCHER_DELETE,
-        Perm.PERIOD_LOCK, Perm.EXPORT, Perm.AUDIT_READ, Perm.SYNC_READ, Perm.SYNC_MANAGE, Perm.CONFLICT_RESOLVE,
+        Perm.PERIOD_LOCK, Perm.EXPORT, Perm.AUDIT_READ, Perm.SYNC_READ, Perm.CONFLICT_RESOLVE,
     },
     "accountant": _READ | {Perm.VOUCHER_WRITE, Perm.VOUCHER_POST, Perm.EXPORT, Perm.SYNC_READ},
     "sales_purchase": _READ | {Perm.VOUCHER_WRITE},
@@ -154,9 +156,8 @@ def role_for(db: Session, user: User, company_id: uuid.UUID) -> str | None:
 
 def perms_of(access: UserCompanyAccess) -> set[str]:
     """A custom permission list replaces the role's defaults."""
-    if access.permissions is not None:
-        return set(access.permissions) & ALL_PERMS
-    return set(ROLES.get(access.role, set()))
+    perms = set(access.permissions) & ALL_PERMS if access.permissions is not None else set(ROLES.get(access.role, set()))
+    return perms if access.role == "owner" else perms - MANAGER_ONLY
 
 
 def perms_for(db: Session, user: User, company_id: uuid.UUID) -> set[str]:

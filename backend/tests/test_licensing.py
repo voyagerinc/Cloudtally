@@ -293,3 +293,85 @@ def test_installation_activates_works_offline_then_goes_read_only(db, admin, por
     monkeypatch.setattr(settings, "license_mode", "server")
     assert activate(lic["license_key"], "inst-new-server-000001").status_code == 200
     assert db.query(Company).count() == 1 and db.query(User).count() >= 1
+
+
+def test_customer_in_one_step_with_users_and_admin(db, admin, portal):
+    body = {"code": "VSPL", "legal_name": "Vikas Spinners Pvt Ltd", "contact_email": "it@vspl.example",
+            "license": {"plan": "annual", "max_users": 5, "max_installations": 2},
+            "admin": {"username": "vspl-manager", "display_name": "Ramesh"}}
+    r = api.post(f"{V1}/admin/customers", headers=admin, json=body)
+    assert r.status_code == 201, r.text
+    c = r.json()
+    assert c["license_key"].startswith("TCL-") and "#setup=" in c["setup_link"] and c["admin_username"] == "vspl-manager"
+    detail = api.get(f"{V1}/admin/customers/{c['id']}", headers=admin).json()
+    assert detail["license_list"][0]["max_users"] == 5 and detail["license_list"][0]["max_installations"] == 2
+    assert detail["admins"][0]["email"] == "it@vspl.example"
+
+    # All or nothing: a taken admin ID creates no customer at all.
+    r = api.post(f"{V1}/admin/customers", headers=admin, json={**body, "code": "OTHER", "legal_name": "Other"})
+    assert r.status_code == 409
+    assert [x["code"] for x in api.get(f"{V1}/admin/customers", headers=admin).json()] == ["VSPL"]
+
+    # The admin chooses their own user ID and password with the link, then signs in to the portal.
+    token = c["setup_link"].split("#setup=")[1]
+    r = api.post(f"{V1}/auth/setup", json={"token": token, "password": "Ramesh-pass9", "username": "ramesh.vspl"})
+    assert r.status_code == 200 and r.json()["username"] == "ramesh.vspl"
+    h = api.post(f"{V1}/auth/login", json={"username": "ramesh.vspl", "password": "Ramesh-pass9"})
+    assert h.status_code == 200
+    p = api.get(f"{V1}/portal/license", headers={"Authorization": f"Bearer {h.json()['token']}"}).json()
+    assert p["customer"]["code"] == "VSPL" and p["licenses"][0]["max_users"] == 5
+
+
+def test_new_installation_first_run_creates_the_manager(db, admin, portal, monkeypatch):
+    lic = licence(admin, customer(admin), max_users=5)
+
+    def via_portal(base_url, path, body):
+        monkeypatch.setattr(settings, "license_mode", "server")
+        try:
+            r = api.post(V1 + path, json=body)
+        finally:
+            monkeypatch.setattr(settings, "license_mode", "client")
+        if r.status_code >= 400:
+            raise lic_client.LicenceError(r.json()["detail"])
+        return r.json()
+
+    monkeypatch.setattr(lic_client, "_post", via_portal)
+    monkeypatch.setattr(settings, "license_mode", "client")
+    enforce.forget_cached()
+    db.query(User).delete()           # a brand-new installation: nobody yet
+    db.commit()
+    assert api.get(f"{V1}/licence/first-run").json()["needed"]
+    bad = api.post(f"{V1}/licence/first-run", json={"license_key": "TCL-NOPE", "username": "manager", "password": "Manager-pass9"})
+    assert bad.status_code == 422 and not db.query(User).count()
+    r = api.post(f"{V1}/licence/first-run", json={"license_key": lic["license_key"], "server_label": "HO PC",
+                                                  "username": "manager", "password": "Manager-pass9"})
+    assert r.status_code == 201, r.text
+    assert not api.get(f"{V1}/licence/first-run").json()["needed"]
+    again = api.post(f"{V1}/licence/first-run", json={"license_key": lic["license_key"], "username": "intruder",
+                                                      "password": "Intruder-pass9"})
+    assert again.status_code == 409
+    t = api.post(f"{V1}/auth/login", json={"username": "manager", "password": "Manager-pass9"}).json()["token"]
+    s = api.get(f"{V1}/licence", headers={"Authorization": f"Bearer {t}"}).json()
+    assert s["state"] == "active" and s["activated"]
+
+
+def test_only_the_manager_runs_tally_sync(db, admin):
+    from app.core.security import hash_password
+    from app.models import UserCompanyAccess
+    cid = api.post(f"{V1}/companies", headers=admin, json={"name": "Sync Co", "books_from": "2026-04-01"}).json()["id"]
+    heads = {}
+    for name, role, perms in [("manager", "owner", None), ("accadmin", "accounts_admin", None),
+                              ("custom", "custom", ["sync.read", "sync.manage"])]:
+        u = User(username=name, password_hash=hash_password("Some-pass99"))
+        db.add(u)
+        db.flush()
+        db.add(UserCompanyAccess(user_id=u.id, company_id=cid, role=role, permissions=perms))
+        db.commit()
+        tok = api.post(f"{V1}/auth/login", json={"username": name, "password": "Some-pass99"}).json()["token"]
+        heads[name] = {"Authorization": f"Bearer {tok}"}
+    assert api.post(f"{V1}/sync/run?company_id={cid}", headers=heads["accadmin"]).status_code == 403
+    assert api.post(f"{V1}/sync/run?company_id={cid}", headers=heads["custom"]).status_code == 403
+    assert api.post(f"{V1}/sync/run?company_id={cid}", headers=heads["manager"]).status_code != 403
+    assert api.get(f"{V1}/sync/dashboard?company_id={cid}", headers=heads["accadmin"]).status_code == 200
+    catalog = api.get(f"{V1}/permissions", headers=heads["manager"]).json()
+    assert "sync.manage" not in {p["key"] for g in catalog["groups"] for p in g["permissions"]}

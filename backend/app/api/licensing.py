@@ -169,6 +169,7 @@ def deactivate(body: InstallationIn, request: Request, db: DB):
 class SetupIn(BaseModel):
     token: str = Field(max_length=100)
     password: str = Field(max_length=200)
+    username: str | None = Field(None, max_length=50)    # the admin may pick their own user ID here
 
 
 @router.get("/auth/setup/{token}")
@@ -184,6 +185,18 @@ def setup_password(body: SetupIn, request: Request, db: DB):
     service.setup_limit.check(f"setup:{_ip(request)}")
     inv = service.invite_for(db, body.token)
     u = db.get(User, inv.user_id)
+    from app.api.users import USERNAME, _find_user
+    wanted = (body.username or "").strip()
+    if wanted and wanted.lower() != u.username.lower():
+        if not USERNAME.match(wanted):
+            raise HTTPException(422, "User ID: 3 to 50 letters, digits or . _ - @, starting with a letter or digit")
+        if _find_user(db, wanted):
+            raise HTTPException(409, "This user ID is already taken; choose another")
+        audit.record(db, actor_of(u), "user.rename", "user", u.id, before={"username": u.username},
+                     after={"username": wanted})
+        u.username = wanted
+    elif wanted:
+        u.username = wanted                     # same ID, maybe other capitals
     if reason := check_password_rules(body.password, u.username):
         raise HTTPException(422, reason)
     u.password_hash, u.must_change_password, u.is_active = hash_password(body.password), False, True
@@ -360,6 +373,28 @@ def request_renewal(body: RenewIn, request: Request, db: DB, user: CurrentUser):
 
 # ================================================================== super admin: customers
 
+class LicenseIn(BaseModel):
+    plan: Literal["trial", "monthly", "annual", "perpetual"] | None = None
+    starts_at: date | None = None
+    expires_at: date | None = None
+    max_users: int | None = Field(None, ge=1, le=10000)
+    max_installations: int | None = Field(None, ge=1, le=1000)
+    max_companies: int | None = Field(None, ge=1, le=10000)
+    modules: list[str] | None = None
+    offline_grace_days: int | None = Field(None, ge=0, le=90)
+    heartbeat_hours: int | None = Field(None, ge=1, le=168)
+    min_version: str | None = Field(None, max_length=30)
+    max_version: str | None = Field(None, max_length=30)
+    notes: str | None = None
+
+    @field_validator("modules")
+    @classmethod
+    def _modules(cls, v):
+        if v is not None and (bad := set(v) - set(MODULES)):
+            raise ValueError(f"unknown modules: {', '.join(sorted(bad))}")
+        return v
+
+
 CODE = re.compile(r"^[A-Z0-9][A-Z0-9-]{1,29}$")
 
 
@@ -422,19 +457,41 @@ def get_customer(customer_id: uuid.UUID, db: DB, user: CurrentUser):
     return {**_customer_out(db, c), "license_list": [_license_out(db, lic, admin=True) for lic in c.licenses]}
 
 
+class AdminIn(BaseModel):
+    username: str
+    display_name: str | None = Field(None, max_length=200)
+    email: str | None = Field(None, max_length=300)
+
+
+class NewCustomerIn(CustomerIn):
+    """A customer in one step: details, its licence (number of users) and its company admin (manager)."""
+    license: LicenseIn | None = None
+    admin: AdminIn | None = None
+
+
 @router.post("/admin/customers", status_code=201)
-def create_customer(body: CustomerIn, db: DB, user: CurrentUser):
+def create_customer(body: NewCustomerIn, db: DB, user: CurrentUser):
     _superadmin(user)
     if not body.code or not body.legal_name:
         raise HTTPException(422, "Give a customer code and the legal name")
     if db.scalar(select(Customer.id).where(Customer.code == body.code)):
         raise HTTPException(409, f"Customer code {body.code} is already used")
-    c = Customer(**body.model_dump(), status="active")
+    details = body.model_dump(exclude={"license", "admin"})
+    c = Customer(**details, status="active")
     db.add(c)
     db.flush()
-    audit.record(db, actor_of(user), "customer.create", "customer", c.id, after=body.model_dump())
+    audit.record(db, actor_of(user), "customer.create", "customer", c.id, after=details)
+    # All or nothing: a taken admin ID or a bad licence leaves no half-made customer behind.
+    lic, key = _new_license(db, user, c, body.license) if body.license else (None, None)
+    admin, link = _new_admin(db, user, c, body.admin) if body.admin else (None, None)
     db.commit()
-    return _customer_out(db, c)
+    out = _customer_out(db, c)
+    if lic is not None:
+        out.update(license_key=key, license_id=lic.id)
+    if admin is not None:
+        out.update(admin_username=admin.username, setup_link=link, emailed=_mail_invite(c, admin, link),
+                   expires_in_hours=service.INVITE_HOURS)
+    return out
 
 
 @router.patch("/admin/customers/{customer_id}")
@@ -478,20 +535,9 @@ def customer_status(customer_id: uuid.UUID, body: StatusIn, db: DB, user: Curren
     return _customer_out(db, c)
 
 
-class AdminIn(BaseModel):
-    username: str
-    display_name: str | None = Field(None, max_length=200)
-    email: str | None = Field(None, max_length=300)
-
-
-@router.post("/admin/customers/{customer_id}/admins", status_code=201)
-def create_customer_admin(customer_id: uuid.UUID, body: AdminIn, db: DB, user: CurrentUser):
-    """A company admin for the licence portal. They set their own password with a one-time link."""
-    _superadmin(user)
+def _new_admin(db, user: User, c: Customer, body: AdminIn) -> tuple[User, str]:
+    """The customer's company admin (manager), with a one-time link to set their password. Not committed."""
     from app.api.users import USERNAME, _find_user
-    c = db.get(Customer, customer_id)
-    if c is None:
-        raise HTTPException(404, "Customer not found")
     username = body.username.strip()
     if not USERNAME.match(username):
         raise HTTPException(422, "User ID: 3 to 50 letters, digits or . _ - @, starting with a letter or digit")
@@ -506,11 +552,27 @@ def create_customer_admin(customer_id: uuid.UUID, body: AdminIn, db: DB, user: C
         db.add(UserCompanyAccess(user_id=u.id, company_id=co.id, role="owner"))
     link = service.new_invite(db, u, user.username)
     audit.record(db, actor_of(user), "customer.admin_create", "user", u.id, after={"customer": c.code, "username": username})
-    db.commit()
-    mailed = service.send_mail(u.email, "Your Tally Cloud account",
+    return u, link
+
+
+def _mail_invite(c: Customer, u: User, link: str) -> bool:
+    return service.send_mail(u.email, "Your Tally Cloud account",
                                f"Hello {u.display_name or u.username},\n\nAn account was made for you at Tally Cloud "
                                f"({c.legal_name}). User ID: {u.username}\n\nSet your password with this link (valid "
-                               f"{service.INVITE_HOURS} hours, one use):\n{link}\n")
+                               f"{service.INVITE_HOURS} hours, one use). You may also choose your own user ID "
+                               f"there:\n{link}\n")
+
+
+@router.post("/admin/customers/{customer_id}/admins", status_code=201)
+def create_customer_admin(customer_id: uuid.UUID, body: AdminIn, db: DB, user: CurrentUser):
+    """A company admin for the licence portal. They set their own password with a one-time link."""
+    _superadmin(user)
+    c = db.get(Customer, customer_id)
+    if c is None:
+        raise HTTPException(404, "Customer not found")
+    u, link = _new_admin(db, user, c, body)
+    db.commit()
+    mailed = _mail_invite(c, u, link)
     return {"id": u.id, "username": u.username, "setup_link": link, "emailed": mailed,
             "expires_in_hours": service.INVITE_HOURS}
 
@@ -579,38 +641,12 @@ def set_hosted_companies(customer_id: uuid.UUID, body: HostedIn, db: DB, user: C
 
 # ================================================================== super admin: licences
 
-class LicenseIn(BaseModel):
-    plan: Literal["trial", "monthly", "annual", "perpetual"] | None = None
-    starts_at: date | None = None
-    expires_at: date | None = None
-    max_users: int | None = Field(None, ge=1, le=10000)
-    max_installations: int | None = Field(None, ge=1, le=1000)
-    max_companies: int | None = Field(None, ge=1, le=10000)
-    modules: list[str] | None = None
-    offline_grace_days: int | None = Field(None, ge=0, le=90)
-    heartbeat_hours: int | None = Field(None, ge=1, le=168)
-    min_version: str | None = Field(None, max_length=30)
-    max_version: str | None = Field(None, max_length=30)
-    notes: str | None = None
-
-    @field_validator("modules")
-    @classmethod
-    def _modules(cls, v):
-        if v is not None and (bad := set(v) - set(MODULES)):
-            raise ValueError(f"unknown modules: {', '.join(sorted(bad))}")
-        return v
-
-
 class NewLicenseIn(LicenseIn):
     customer_id: uuid.UUID
 
 
-@router.post("/admin/licenses", status_code=201)
-def create_license(body: NewLicenseIn, db: DB, user: CurrentUser):
-    _superadmin(user)
-    c = db.get(Customer, body.customer_id)
-    if c is None:
-        raise HTTPException(404, "Customer not found")
+def _new_license(db, user: User, c: Customer, body: LicenseIn) -> tuple[License, str]:
+    """A licence with its key (shown once). Not committed."""
     plan = body.plan or "annual"
     start = body.starts_at or utcnow().date()
     expires = body.expires_at if "expires_at" in body.model_fields_set else service.default_expiry(plan, start)
@@ -619,7 +655,7 @@ def create_license(body: NewLicenseIn, db: DB, user: CurrentUser):
     if expires and expires < start:
         raise HTTPException(422, "The expiry date is before the start date")
     key = new_license_key()
-    data = body.model_dump(exclude={"customer_id", "plan", "starts_at", "expires_at"}, exclude_none=True)
+    data = body.model_dump(include=set(LicenseIn.model_fields) - {"plan", "starts_at", "expires_at"}, exclude_none=True)
     data.setdefault("modules", list(MODULES))
     lic = License(customer_id=c.id, plan=plan, starts_at=start, expires_at=expires, key_hash=hash_license_key(key),
                   key_hint=key[-4:], status="pending", created_by=user.username, **data)
@@ -628,6 +664,16 @@ def create_license(body: NewLicenseIn, db: DB, user: CurrentUser):
     service.event(db, "license_create", lic=lic, actor=user.username, plan=plan,
                   expires_at=expires.isoformat() if expires else None)
     audit.record(db, actor_of(user), "license.create", "license", lic.id, after={"customer": c.code, "plan": plan})
+    return lic, key
+
+
+@router.post("/admin/licenses", status_code=201)
+def create_license(body: NewLicenseIn, db: DB, user: CurrentUser):
+    _superadmin(user)
+    c = db.get(Customer, body.customer_id)
+    if c is None:
+        raise HTTPException(404, "Customer not found")
+    lic, key = _new_license(db, user, c, body)
     db.commit()
     db.refresh(lic)
     return {**_license_out(db, lic, admin=True), "license_key": key,
@@ -878,4 +924,5 @@ def public_key():
     _server_only()
     from app.licensing.core import public_key_b64
     return {"public_key": public_key_b64(), "algorithm": "Ed25519"}
+
 

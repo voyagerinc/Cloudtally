@@ -1,15 +1,16 @@
 """This software's own licence: shown to every user (banner), managed by the super admin (Licence tab)."""
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app import __version__, audit
 from app.api.deps import DB, CurrentUser, actor_of
 from app.core.config import settings
-from app.licensing import client
+from app.core.security import check_password_rules, hash_password
+from app.licensing import client, service
 from app.licensing.enforce import entitlement_for, seats_in_use
-from app.models import Company
+from app.models import Company, User
 
 router = APIRouter(prefix="/licence", tags=["licence"])
 
@@ -78,3 +79,55 @@ def deactivate(db: DB, user: CurrentUser):
     audit.record(db, actor_of(user), "licence.deactivate", "licence", None)
     db.commit()
     return licence_status(db, user)
+
+
+# ------------------------------------------------------------------ first start of a new installation
+
+def _first_run_needed(db) -> bool:
+    return settings.license_mode == "client" and not db.query(User).filter(User.password_hash.is_not(None)).count()
+
+
+@router.get("/first-run")
+def first_run_status(db: DB):
+    """Asked by the page before anyone can sign in: is this a new installation without a manager yet?"""
+    needed = _first_run_needed(db)
+    return {"needed": needed, "server_url": settings.license_server_url if needed else None}
+
+
+class FirstRunIn(BaseModel):
+    license_key: str = Field(max_length=60)
+    server_label: str | None = Field(None, max_length=200)
+    server_url: str | None = Field(None, max_length=300)
+    username: str = Field(max_length=50)
+    display_name: str | None = Field(None, max_length=200)
+    password: str = Field(max_length=200)
+
+
+@router.post("/first-run", status_code=201)
+def first_run(body: FirstRunIn, request: Request, db: DB):
+    """Activates this server with the licence key and creates its manager (the customer's company admin).
+
+    Only possible while the installation has no user yet, and only with a valid licence key."""
+    if not _first_run_needed(db):
+        raise HTTPException(409, "This server is already set up. Sign in instead.")
+    service.setup_limit.check(f"first-run:{request.client.host if request.client else ''}")
+    from app.api.users import USERNAME
+    username = body.username.strip()
+    if not USERNAME.match(username):
+        raise HTTPException(422, "User ID: 3 to 50 letters, digits or . _ - @, starting with a letter or digit")
+    if reason := check_password_rules(body.password, username):
+        raise HTTPException(422, reason)
+    if not settings.license_public_key:
+        raise HTTPException(422, "ERP_LICENSE_PUBLIC_KEY is not set on this server (the installer sets it)")
+    try:
+        client.activate(db, body.license_key, body.server_label, body.server_url)
+    except client.LicenceError as exc:
+        raise HTTPException(422, str(exc))
+    manager = User(username=username, display_name=body.display_name, password_hash=hash_password(body.password),
+                   is_superadmin=True, created_by="first-run")
+    db.add(manager)
+    db.flush()
+    audit.record(db, actor_of(manager), "licence.first_run", "user", manager.id,
+                 after={"username": username, "server_label": body.server_label})
+    db.commit()
+    return {"username": username}

@@ -28,24 +28,33 @@ were already checked.
 
 ## How it works
 
-1. **Super admin** (Customers tab) adds a customer, then a **company admin**. The admin gets a
-   one-time link (72 hours) and sets their own password; no password is sent by e-mail.
-2. **Super admin** creates a licence with plan (trial, monthly, annual, perpetual), dates,
-   users at the same time, servers, Tally companies, modules, version range, offline grace (7 days) and check-in
-   interval (24 hours). The key (`TCL-XXXX-…`) is shown **once**. Only its hash is stored.
-3. **Company admin** signs in and sees only their own customer: licence, servers, warnings and the
-   installers their licence covers. They can download them and ask for renewal.
-4. On the installed server, the super admin enters the key on the **Licence** tab. The server sends
-   the key, a random installation id made at first start (not hardware based), its name and version.
-   The cloud checks the customer, status, dates, version and server limit. It then returns an
-   **Ed25519-signed entitlement** and a secret for this installation. Later check-ins use that secret,
-   not the key.
-5. The installation checks in every 24 hours. Licence changes (renewal, suspension, modules, limits)
-   arrive with the next check-in. If the cloud can't be reached, everything keeps working for the
-   grace period, with a warning. After that the server goes read-only until it connects again. A
-   clock set back does not extend the grace period.
-6. **Moving server:** Licence → Deactivate on the old server gives its slot back. If the old server
-   is gone, the super admin uses **Release slot**. **Block** stops a server from ever activating again.
+1. **Super admin → Customers → Add customer.** One form holds the customer's details, the licence
+   (**number of users working at the same time**, plan, dates, servers, Tally companies) and the
+   **customer admin's user ID** (the manager). Saving shows the **licence key** (once) and the admin's
+   **one-time link** (72 hours). Nothing is half-created: if the admin's user ID is taken, no customer is
+   made.
+2. **The customer admin** opens the link and chooses their own user ID (prefilled, changeable) and
+   password. No password is ever sent.
+3. **The customer admin signs in to the portal** (tallycloud.voyager.co.in → My licence). They see only
+   their own licence, servers and warnings, and **download** the installers their licence covers.
+4. **They install the software on their server or computer** and open its local address. The first
+   time, a **setup page** asks for the licence key and creates the **manager** of that server (user ID
+   and password). The server activates against the cloud: it sends the key, a random installation id
+   made at first start (not hardware based), its name and version. It gets back an Ed25519-signed
+   entitlement and its own secret for later check-ins. The setup page works only once, while no user
+   exists, and only with a valid key.
+5. **The manager** links the Tally company and creates the other users on the Users tab, with their
+   own IDs and passwords. **Everyone else signs in at the same local address** and works with the data.
+   **Only the manager (company admin role) runs Tally sync and changes the Tally connection.** Other
+   users can be allowed to view the sync status.
+6. **Users at the same time:** a licence for 5 users lets 5 people work at once; any number of user IDs
+   can exist. A seat frees on sign-out or 15 minutes after a browser was last active. The manager can
+   sign someone out to free a seat at once.
+7. The server checks in every 24 hours. Licence changes (renewal, suspension, users, modules) arrive
+   with the next check-in. If the cloud can't be reached, everything keeps working for 7 days, with a
+   warning. After that it is read-only until it connects again. A clock set back does not extend this.
+8. **Moving server:** Licence → Deactivate on the old server gives its slot back. If the old server is
+   gone, the super admin uses **Release slot**. **Block** stops a server from ever activating again.
 
 ## What each PRD requirement maps to
 

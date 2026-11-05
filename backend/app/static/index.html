@@ -53,11 +53,30 @@
   <h2>Set your password</h2>
   <p class="muted" id="setup-who"></p>
   <form id="setup-form" class="stack">
+    <label>Your user ID (you may change it)<input id="setup-user" autocomplete="username" required maxlength="50" spellcheck="false"></label>
     <label>New password (at least 8 characters)<input id="setup-pw1" type="password" autocomplete="new-password" required minlength="8"></label>
     <label>New password again<input id="setup-pw2" type="password" autocomplete="new-password" required></label>
     <button>Set password and sign in</button>
   </form>
   <p id="setup-msg" class="error" aria-live="polite"></p>
+</section>
+
+<section id="firstrun" class="panel narrow" hidden>
+  <h2>Set up Tally Cloud on this server</h2>
+  <p class="muted">Enter the licence key from your Tally Cloud portal and create the <b>manager</b> of this
+    server. The manager links Tally, runs Tally sync and creates the other users.</p>
+  <form id="fr-form" class="stack">
+    <label>Licence key<input name="license_key" required class="upper" autocomplete="off" spellcheck="false" placeholder="TCL-XXXX-XXXX-XXXX-XXXX-XXXX"></label>
+    <label>Name of this server or PC<input name="server_label" maxlength="200" placeholder="Head office server"></label>
+    <label>Manager user ID<input name="username" required maxlength="50" autocomplete="username" spellcheck="false"></label>
+    <label>Manager name<input name="display_name" maxlength="200"></label>
+    <label>Password (at least 8 characters)<input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+    <label>Password again<input name="password2" type="password" required autocomplete="new-password"></label>
+    <details class="small muted"><summary>Licence service</summary>
+      <label>Address<input name="server_url" maxlength="300"></label></details>
+    <button>Activate and create manager</button>
+  </form>
+  <p id="fr-msg" class="error" aria-live="polite"></p>
 </section>
 
 <main>
@@ -381,6 +400,40 @@
     <button type="button" id="cd-close" class="secondary">Close</button></div>
   <p id="cd-msg" class="error" aria-live="polite"></p>
   <div id="cd-body"></div>
+</dialog>
+
+<dialog id="newcust-dlg" class="wide">
+  <form id="ncf" novalidate>
+    <div class="row between"><h2>Add customer</h2>
+      <span><button>Create customer</button> <button type="button" id="ncf-cancel" class="secondary">Cancel</button></span></div>
+    <p id="ncf-msg" class="error" aria-live="polite"></p>
+    <div class="details">
+      <section><h3>Customer</h3>
+        <label>Customer code * (cannot be changed later)<input name="code" required maxlength="30" class="upper" placeholder="VSPL"></label>
+        <label>Legal name *<input name="legal_name" required maxlength="300"></label>
+        <label>Contact person<input name="contact_name" maxlength="200"></label>
+        <label>Contact e-mail<input name="contact_email" type="email" maxlength="300"></label>
+        <label>Phone<input name="contact_phone" maxlength="50"></label>
+        <label>GSTIN<input name="gstin" maxlength="20" class="upper"></label>
+      </section>
+      <section><h3>Licence</h3>
+        <label>Number of users (working at the same time) *<input name="max_users" type="number" min="1" value="5" required></label>
+        <label>Plan<select name="plan"><option value="trial">Trial (30 days)</option><option value="monthly">Monthly</option>
+          <option value="annual" selected>Annual</option><option value="perpetual">Perpetual</option></select></label>
+        <label>Starts<input name="starts_at" type="date"></label>
+        <label>Expires (empty: by plan)<input name="expires_at" type="date"></label>
+        <label>Servers / computers it may be installed on<input name="max_installations" type="number" min="1" value="1"></label>
+        <label>Tally companies (empty: any number)<input name="max_companies" type="number" min="1"></label>
+      </section>
+      <section><h3>Customer admin (manager)</h3>
+        <label>User ID *<input name="admin_username" required maxlength="50" spellcheck="false" autocomplete="off"></label>
+        <label>Name<input name="admin_name" maxlength="200"></label>
+        <label>E-mail<input name="admin_email" type="email" maxlength="300"></label>
+        <p class="muted small">The admin gets a one-time link to choose their own password (and may change the user ID
+          there). They then sign in to this portal, download the software and install it on their server.</p>
+      </section>
+    </div>
+  </form>
 </dialog>
 
 <dialog id="licf-dlg">

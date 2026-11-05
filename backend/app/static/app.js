@@ -1209,7 +1209,8 @@ async function openUserForm(u) {
   el("role").disabled = self;
   chosenPerms = new Set(u ? u.permissions : rolePerms("accountant"));
   $("#uf-perm-note").textContent = self ? "These are your own permissions; another admin can change them."
-    : "Choosing a role ticks its permissions. Change any tick for a custom set.";
+    : "Choosing a role ticks its permissions. Change any tick for a custom set. Running Tally sync and changing the "
+      + "Tally connection are for the company admin (manager) only.";
   drawPerms();
   $("#uf-actions").hidden = !u || self;
   if (u) { $("#uf-active").textContent = u.is_active ? "Switch off user" : "Switch on user"; $("#uf-unlock").hidden = !u.locked; $("#uf-signout").hidden = !u.online; }
@@ -1392,14 +1393,35 @@ renderers.customers = async () => {
 };
 $("#cust-q").onchange = () => renderers.customers();
 
-$("#cust-new").onclick = async () => {
-  const code = prompt("Customer code (short, capitals, e.g. VSPL). It cannot be changed later.");
-  if (!code) return;
-  const name = prompt("Legal name of the customer");
-  if (!name) return;
-  const email = prompt("Contact e-mail (for invitations and licence notices)", "") || null;
-  try { const c = await api("/admin/customers", { method: "POST", body: { code, legal_name: name, contact_email: email } }); await renderers.customers(); openCustomer(c.id); }
-  catch (err) { alert(err.message); }
+$("#cust-new").onclick = () => {
+  const f = $("#ncf"); f.reset(); $("#ncf-msg").textContent = "";
+  f.elements.namedItem("starts_at").value = today();
+  $("#newcust-dlg").showModal(); f.elements.namedItem("code").focus();
+};
+$("#ncf-cancel").onclick = () => $("#newcust-dlg").close();
+$("#ncf").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target, v = (n) => f.elements.namedItem(n).value.trim() || null;
+  const num = (n) => (v(n) ? Number(v(n)) : null);
+  if (!v("code") || !v("legal_name") || !v("admin_username") || !num("max_users")) {
+    $("#ncf-msg").textContent = "Fill in the customer code, legal name, number of users and the admin's user ID."; return;
+  }
+  const license = { plan: v("plan"), starts_at: v("starts_at"), max_users: num("max_users"),
+    max_installations: num("max_installations"), max_companies: num("max_companies") };
+  if (v("expires_at")) license.expires_at = v("expires_at");
+  const body = { code: v("code"), legal_name: v("legal_name"), contact_name: v("contact_name"), contact_email: v("contact_email"),
+    contact_phone: v("contact_phone"), gstin: v("gstin"), license,
+    admin: { username: v("admin_username"), display_name: v("admin_name"), email: v("admin_email") || v("contact_email") } };
+  const btn = f.querySelector("button"); btn.disabled = true;
+  try {
+    const c = await api("/admin/customers", { method: "POST", body });
+    $("#newcust-dlg").close();
+    await renderers.customers();
+    await openCustomer(c.id);
+    $("#cd-key").innerHTML = `<div class="lic-box"><p><b>Licence key</b> (shown only now): give it to ${esc(c.admin_username)}.
+      They enter it when installing the software.</p><div class="keyline">${esc(c.license_key)}</div></div>`;
+    showLink(c, c.admin_username);
+  } catch (err) { $("#ncf-msg").textContent = err.message; } finally { btn.disabled = false; }
 };
 
 let custOpen = null;
@@ -1631,13 +1653,14 @@ async function setupFromLink(token) {
   $("#login").hidden = true; $("#setup").hidden = false;
   try { const who = await (await fetch(`${API}/auth/setup/${encodeURIComponent(token)}`)).json();
     if (!who.username) throw new Error(who.detail || "This link is not valid");
-    $("#setup-who").textContent = `User ID: ${who.username}${who.display_name ? ` (${who.display_name})` : ""}`;
+    $("#setup-who").textContent = who.display_name ? `Welcome, ${who.display_name}.` : "Welcome.";
+    $("#setup-user").value = who.username;
   } catch (err) { $("#setup-msg").textContent = err.message; $("#setup-form").hidden = true; return; }
   $("#setup-form").onsubmit = async (e) => {
     e.preventDefault(); $("#setup-msg").textContent = "";
     if ($("#setup-pw1").value !== $("#setup-pw2").value) { $("#setup-msg").textContent = "The two passwords differ"; return; }
     const res = await fetch(`${API}/auth/setup`, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, password: $("#setup-pw1").value }) });
+      body: JSON.stringify({ token, password: $("#setup-pw1").value, username: $("#setup-user").value.trim() }) });
     const d = await res.json().catch(() => ({}));
     if (!res.ok) { $("#setup-msg").textContent = d.detail || res.statusText; return; }
     history.replaceState(null, "", location.pathname);
@@ -1652,5 +1675,32 @@ document.querySelector("main").hidden = true; $("header nav").hidden = true;
 $("#recon-from").value = `${new Date().getFullYear() - (new Date().getMonth() < 3 ? 1 : 0)}-04-01`; $("#recon-to").value = today();
 state.token = load("erp_token");
 state.key = state.token ? null : load("erp_key");
+async function firstRunCheck() {
+  try {
+    const r = await (await fetch(`${API}/licence/first-run`)).json();
+    if (!r.needed) return;
+    $("#login").hidden = true; $("#firstrun").hidden = false;
+    $("#fr-form").elements.namedItem("server_url").value = r.server_url || "";
+  } catch (_) { /* not a new installation */ }
+}
+$("#fr-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target, v = (n) => f.elements.namedItem(n).value.trim();
+  $("#fr-msg").textContent = "";
+  if (f.elements.namedItem("password").value !== f.elements.namedItem("password2").value) { $("#fr-msg").textContent = "The two passwords differ"; return; }
+  const btn = f.querySelector("button"); btn.disabled = true; btn.textContent = "Activating…";
+  try {
+    const res = await fetch(`${API}/licence/first-run`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ license_key: v("license_key"), server_label: v("server_label") || null, server_url: v("server_url") || null,
+        username: v("username"), display_name: v("display_name") || null, password: f.elements.namedItem("password").value }) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(d.detail || res.statusText);
+    $("#firstrun").hidden = true; $("#login").hidden = false;
+    $("#login-user").value = d.username; $("#login-pass").value = f.elements.namedItem("password").value;
+    $("#login-form").requestSubmit();
+  } catch (err) { $("#fr-msg").textContent = err.message; } finally { btn.disabled = false; btn.textContent = "Activate and create manager"; }
+};
+
 if (location.hash.startsWith("#setup=")) { signOut(); setupFromLink(location.hash.slice(7)); }
-else if (state.token || state.key) start().catch(() => signOut()); else signOut();
+else if (state.token || state.key) start().catch(() => { signOut(); firstRunCheck(); });
+else { signOut(); firstRunCheck(); }
