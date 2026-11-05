@@ -272,6 +272,7 @@
     <button type="button" id="u-new">Add user</button></div>
   <p class="muted small">Each user signs in with their own user ID and password and sees only what you allow here.
     A new user chooses their own password at the first sign-in.</p>
+  <p class="small" id="u-seats"></p>
   <table id="utable"></table>
 </section>
 
@@ -369,6 +370,7 @@
     <div id="uf-actions" class="row" hidden>
       <button type="button" id="uf-active" class="secondary"></button>
       <button type="button" id="uf-unlock" class="secondary" hidden>Unlock</button>
+      <button type="button" id="uf-signout" class="secondary" hidden>Sign out now (frees a licence seat)</button>
       <button type="button" id="uf-remove" class="secondary danger">Remove from this company</button>
     </div>
   </form>
@@ -391,7 +393,7 @@
         <option value="annual" selected>Annual</option><option value="perpetual">Perpetual</option></select></label>
       <label>Starts<input name="starts_at" type="date"></label>
       <label>Expires (empty: by plan)<input name="expires_at" type="date"></label>
-      <label>Named users<input name="max_users" type="number" min="1" value="5"></label>
+      <label>Users at the same time<input name="max_users" type="number" min="1" value="5"></label>
       <label>Servers (installations)<input name="max_installations" type="number" min="1" value="1"></label>
       <label>Tally companies (empty: any)<input name="max_companies" type="number" min="1"></label>
       <label>Offline grace (days)<input name="offline_grace_days" type="number" min="0" max="90" value="7"></label>

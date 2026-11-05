@@ -8,6 +8,7 @@ Where the licence comes from depends on ERP_LICENSE_MODE:
 import threading
 import time
 import uuid
+from datetime import timedelta
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -16,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.licensing.core import FULL, MODULES, WRITE_PERMS, Entitlement, entitlement_from_license, \
     entitlement_from_token, effective_status, module_of, utc, verify
-from app.models import Company, Customer, License, LicenseState, User, UserCompanyAccess
+from app.models import Company, Customer, License, LicenseState, User, UserCompanyAccess, UserSession
 from app.models.base import utcnow
 
 _cache: dict = {"at": 0.0, "ent": None}
@@ -98,30 +99,52 @@ def _customer_of(db: Session, company_id: uuid.UUID | None) -> uuid.UUID | None:
     return company.customer_id if company else None
 
 
-def named_users(db: Session, company_id: uuid.UUID | None) -> int:
-    """People counted against the licence: switched-on users who sign in with a password."""
-    stmt = select(func.count(func.distinct(User.id))).where(User.is_active.is_(True), User.password_hash.is_not(None))
-    customer_id = _customer_of(db, company_id)
+def seat_cutoff():
+    """A signed-in user holds a seat while their browser was active within the last few minutes."""
+    return utcnow() - timedelta(minutes=settings.seat_idle_minutes)
+
+
+def live_users(db: Session, customer_id: uuid.UUID | None = None, *, exclude: uuid.UUID | None = None) -> int:
+    """People working at this moment (the licence counts users at the same time, not user IDs).
+
+    One person in two browsers is one seat. Super admins and API-key integrations take no seat.
+    customer_id: on the licence portal, only people working in that customer's hosted books."""
+    now = utcnow()
+    stmt = (select(func.count(func.distinct(UserSession.user_id))).join(User, User.id == UserSession.user_id)
+            .where(UserSession.last_seen_at >= seat_cutoff(), UserSession.expires_at > now,
+                   User.is_active.is_(True), User.is_superadmin.is_(False)))
     if customer_id is not None:
-        stmt = stmt.join(UserCompanyAccess, UserCompanyAccess.user_id == User.id).join(
-            Company, Company.id == UserCompanyAccess.company_id).where(Company.customer_id == customer_id)
+        stmt = stmt.where(UserSession.user_id.in_(
+            select(UserCompanyAccess.user_id).join(Company, Company.id == UserCompanyAccess.company_id)
+            .where(Company.customer_id == customer_id)))
+    if exclude is not None:
+        stmt = stmt.where(UserSession.user_id != exclude)
     return db.scalar(stmt) or 0
 
 
-def check_user_limit(db: Session, company_id: uuid.UUID | None, user: User | None = None) -> None:
-    """Before switching on or adding a user (`user`: an existing one, who may already be counted)."""
-    ent = entitlement_for(db, company_id)
-    if ent.max_users is None:
+def seats_in_use(db: Session, company_id: uuid.UUID | None) -> int:
+    return live_users(db, _customer_of(db, company_id))
+
+
+def check_seat(db: Session, user: User) -> None:
+    """At sign-in: refuse when the licence's users-at-the-same-time are all taken by other people."""
+    if user.is_superadmin:
         return
-    used = named_users(db, company_id)
-    already = False
-    if user is not None and user.is_active and user.password_hash:
-        customer_id = _customer_of(db, company_id)
-        already = customer_id is None or any(
-            (c := db.get(Company, a.company_id)) is not None and c.customer_id == customer_id for a in user.access)
-    if not already and used >= ent.max_users:
-        raise HTTPException(403, f"Your licence allows {ent.max_users} users and {used} are in use. "
-                                 "Switch a user off, or contact Voyager for more users.")
+    if settings.license_mode == "client":
+        limits = [(installation_entitlement(db), None)]
+    elif settings.license_mode == "server":
+        customers = {c.customer_id for a in user.access if (c := db.get(Company, a.company_id)) and c.customer_id}
+        limits = [(customer_entitlement(db, cid), cid) for cid in customers]
+    else:
+        return
+    for ent, customer_id in limits:
+        if ent.max_users is None:
+            continue
+        used = live_users(db, customer_id, exclude=user.id)
+        if used >= ent.max_users:
+            raise HTTPException(403, f"All {ent.max_users} licensed users are working right now. Ask someone to "
+                                     "sign out (or your company admin to sign someone out), then try again. "
+                                     "For more users at the same time, contact Voyager.")
 
 
 def check_company_limit(db: Session, customer_id: uuid.UUID | None = None) -> None:

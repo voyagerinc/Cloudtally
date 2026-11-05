@@ -9,10 +9,10 @@ were already checked.
 | Question | Decision |
 |---|---|
 | Customer installation target | **Windows**, next to Tally (no SSH tunnel needed on the LAN) |
-| User limit | **Named users**: switched-on users who sign in with a password |
+| User limit | **Users at the same time.** A licence for 5 users lets 5 people work at once. Any number of user IDs can exist. A 6th person can sign in when someone signs out, or 15 minutes after a browser was last active. One person in two browsers takes one seat. Super admins and API-key integrations take no seat. A company admin can sign someone out to free a seat at once. |
 | After expiry, suspension or 7 days offline | **Read-only**: sign in, view, reports, export and backup work; no new or changed vouchers or masters, and no Tally sync. Data is never deleted. |
 | Hosted Tally Cloud | **Continues.** tallycloud.voyager.co.in is the licence portal, and books hosted there that belong to a customer follow that customer's licence. The owner's own books are not limited. |
-| Licensed per | Customer, with limits on named users, servers (installations), Tally companies, modules and versions |
+| Licensed per | Customer, with limits on users at the same time, servers (installations), Tally companies, modules and versions |
 | Updates | The company admin downloads releases the licence covers; publishing is the super admin's decision |
 
 "Company" in the PRD means the licensee. In the code it is a **customer** (`customers`), because
@@ -30,8 +30,8 @@ were already checked.
 
 1. **Super admin** (Customers tab) adds a customer, then a **company admin**. The admin gets a
    one-time link (72 hours) and sets their own password; no password is sent by e-mail.
-2. **Super admin** creates a licence with plan (trial, monthly, annual, perpetual), dates, named
-   users, servers, Tally companies, modules, version range, offline grace (7 days) and check-in
+2. **Super admin** creates a licence with plan (trial, monthly, annual, perpetual), dates,
+   users at the same time, servers, Tally companies, modules, version range, offline grace (7 days) and check-in
    interval (24 hours). The key (`TCL-XXXX-…`) is shown **once**. Only its hash is stored.
 3. **Company admin** signs in and sees only their own customer: licence, servers, warnings and the
    installers their licence covers. They can download them and ask for renewal.
@@ -56,7 +56,7 @@ were already checked.
 | FR-05 customer portal | `GET /portal/license`, *My licence* tab |
 | FR-06 download authorisation | `POST /downloads/{id}/link`: a 5-minute link, then `GET /downloads/{id}`; every attempt is logged in `download_events` |
 | FR-08, 09 activation, installation identity, rehost | `POST /licenses/activate`, `/deactivate`, release, block |
-| FR-10 entitlements | `app/licensing/enforce.py`: modules, read-only, named users, Tally companies, versions |
+| FR-10 entitlements | `app/licensing/enforce.py`: modules, read-only, users at the same time (checked at sign-in, and again when an idle browser comes back), Tally companies, versions |
 | FR-11, 12 heartbeat, offline grace | `POST /licenses/heartbeat`, `app/licensing/client.py` (hourly wake-up, check-in when due) |
 | FR-13 central actions | activate, suspend, resume, revoke, cancel, renew, new key, release or block a server |
 | FR-14 expiry | Warnings at 30/15/7/1 days (banner, portal, e-mail if SMTP is set), then read-only |

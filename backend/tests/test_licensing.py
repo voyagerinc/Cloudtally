@@ -168,10 +168,54 @@ def test_hosted_books_follow_the_customer_licence(db, admin, portal):
     assert r.status_code == 403 and "Reports" in r.json()["detail"]          # module not licensed
     assert api.get(f"{V1}/companies/{books['id']}/vouchers", headers=ha).status_code == 200
 
-    # One named user (the admin) is the limit.
+    # One user at the same time: any number of user IDs, but only one person working at once.
     r = api.post(f"{V1}/companies/{books['id']}/users", headers=ha,
                  json={"username": "clerk", "password": "Clerk-pass9", "role": "accountant"})
-    assert r.status_code == 403 and "allows 1 users" in r.json()["detail"]
+    assert r.status_code == 201, r.text
+    clerk = r.json()["id"]
+    db.get(User, clerk).must_change_password = False
+    db.commit()
+    r = api.post(f"{V1}/auth/login", json={"username": "clerk", "password": "Clerk-pass9"})
+    assert r.status_code == 403 and "All 1 licensed users are working" in r.json()["detail"]
+    assert api.get(f"{V1}/licence?company_id={books['id']}", headers=ha).json()["users_used"] == 1
+    users = {u["username"]: u for u in api.get(f"{V1}/companies/{books['id']}/users", headers=ha).json()}
+    assert users["acme-admin"]["online"] and not users["clerk"]["online"]
+    # The admin signing in again in a second browser still holds just one seat.
+    assert api.post(f"{V1}/auth/login", json={"username": "acme-admin", "password": "acme-admin-Pass9"}).status_code == 200
+    # A browser idle for 15 minutes gives its seat back.
+    from app.models import UserSession
+    for s in db.query(UserSession).all():
+        s.last_seen_at = utcnow() - timedelta(minutes=16)
+    db.commit()
+    rc = api.post(f"{V1}/auth/login", json={"username": "clerk", "password": "Clerk-pass9"})
+    assert rc.status_code == 200
+    ch = {"Authorization": f"Bearer {rc.json()['token']}"}
+    assert api.post(f"{V1}/auth/ping", headers=ch).status_code == 204
+    # Now the clerk holds the seat; the company admin frees it by signing the clerk out.
+    r = api.post(f"{V1}/auth/login", json={"username": "acme-admin", "password": "acme-admin-Pass9"})
+    assert r.status_code == 403
+    for s in db.query(UserSession).all():
+        db.refresh(s)
+        if str(s.user_id) != clerk:
+            s.last_seen_at = utcnow()          # the admin's older browser is still open and active
+    db.commit()
+    assert api.post(f"{V1}/companies/{books['id']}/users/{clerk}/sign-out", headers=ha).status_code == 200
+    assert api.get(f"{V1}/me", headers=ch).status_code == 401
+
+    # Back from lunch: an idle browser must get a seat again, and cannot while someone else holds it.
+    for s in db.query(UserSession).all():
+        db.refresh(s)
+        s.last_seen_at = utcnow() - timedelta(minutes=16)      # the admin went idle: the seat is free
+    db.commit()
+    r = api.post(f"{V1}/auth/login", json={"username": "clerk", "password": "Clerk-pass9"})
+    assert r.status_code == 200
+    ch = {"Authorization": f"Bearer {r.json()['token']}"}
+    for s in db.query(UserSession).all():
+        db.refresh(s)
+        s.last_seen_at = utcnow() - timedelta(minutes=20) if str(s.user_id) == clerk else utcnow()
+    db.commit()
+    r = api.get(f"{V1}/me", headers=ch)
+    assert r.status_code == 409 and "seat went to someone else" in r.json()["detail"]
 
     # Expired: read-only. Viewing still works, changes do not.
     api.patch(f"{V1}/admin/licenses/{lic['id']}", headers=admin,

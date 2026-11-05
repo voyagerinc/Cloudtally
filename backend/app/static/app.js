@@ -19,6 +19,10 @@ async function api(path, opts = {}) {
   const body = opts.form || (opts.body ? JSON.stringify(opts.body) : undefined);
   const res = await fetch(API + path, { ...opts, headers, body });
   if (res.status === 401) { signOut(); throw new Error("Please sign in"); }
+  if (res.status === 409 && state.token) {   // away too long and the licence seat was taken
+    const d = await res.clone().json().catch(() => ({}));
+    if (/licence seat/.test(d.detail || "")) { signOut(); $("#login-error").textContent = d.detail; throw new Error(d.detail); }
+  }
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
   if (!res.ok) {
@@ -43,6 +47,7 @@ function table(el, cols, rows, onClick) {
 // ------------------------------------------------------------------ session & tabs
 function signOut() {
   if (state.token) fetch(API + "/auth/logout", { method: "POST", headers: authHeaders() }).catch(() => {});
+  clearInterval(pingTimer);
   state.token = state.key = state.user = null; store("erp_token", null); store("erp_key", null);
   $("#login").hidden = false; document.querySelector("main").hidden = true; $("header nav").hidden = true;
   $("#whoami").textContent = ""; $("#change-pw").hidden = true; $("#open-tally").hidden = true; $("#lic-banner").hidden = true;
@@ -67,8 +72,11 @@ $("#key-form").onsubmit = async (e) => {
   try { await start(); store("erp_key", state.key); } catch (err) { $("#login-error").textContent = err.message; }
 };
 
+let pingTimer = null;
 async function start() {
   state.user = await api("/me");
+  clearInterval(pingTimer);
+  if (state.token) pingTimer = setInterval(() => { if (state.token) api("/auth/ping", { method: "POST" }).catch(() => {}); }, 120000);
   $("#whoami").textContent = state.user.display_name || state.user.username;
   $("#change-pw").hidden = !state.user.has_password || !state.token;
   $("#login").hidden = true; document.querySelector("main").hidden = false; $("header nav").hidden = false;
@@ -1145,8 +1153,12 @@ function permSummary(perms) {
 
 renderers.users = async () => {
   await catalog();
-  const rows = await api(`/companies/${state.company}/users`);
+  const [rows, lic] = await Promise.all([api(`/companies/${state.company}/users`),
+    api(`/licence?company_id=${state.company}`).catch(() => ({}))]);
   $("#u-company").textContent = $("#company").selectedOptions[0]?.textContent || "";
+  $("#u-seats").textContent = lic.max_users != null
+    ? `Licence: ${lic.max_users} users at the same time · ${lic.users_used} working now. You can make as many user IDs as you need; `
+      + "when all seats are taken, the next person can sign in once someone signs out." : "";
   const status = (u) => !u.is_active ? chip("switched_off") : u.locked ? chip("locked")
     : u.must_change_password ? chip("password_pending") : chip("active");
   table($("#utable"), [
@@ -1154,6 +1166,7 @@ renderers.users = async () => {
     { label: "Role", get: (u) => (u.custom ? "Custom" : u.role_label) },
     { label: "Can use", wrap: true, get: (u) => permSummary(u.permissions) },
     { label: "Status", html: status },
+    { label: "Working now", html: (u) => (u.online ? `${chip("active")} <span class="small muted">${when(u.active_at)}</span>` : "") },
     { label: "Last sign-in", get: (u) => when(u.last_login_at) || "never" },
     { label: "Other companies", num: true, get: (u) => u.other_companies || "" },
   ], rows.map((u) => ({ ...u, _class: u.is_active ? "" : "muted" })), openUserForm);
@@ -1199,7 +1212,7 @@ async function openUserForm(u) {
     : "Choosing a role ticks its permissions. Change any tick for a custom set.";
   drawPerms();
   $("#uf-actions").hidden = !u || self;
-  if (u) { $("#uf-active").textContent = u.is_active ? "Switch off user" : "Switch on user"; $("#uf-unlock").hidden = !u.locked; }
+  if (u) { $("#uf-active").textContent = u.is_active ? "Switch off user" : "Switch on user"; $("#uf-unlock").hidden = !u.locked; $("#uf-signout").hidden = !u.online; }
   $("#user-dlg").showModal();
   (u ? el("display_name") : el("username")).focus();
 }
@@ -1254,6 +1267,11 @@ $("#uf-active").onclick = () => {
   patchUser({ is_active: on });
 };
 $("#uf-unlock").onclick = () => patchUser({ unlock: true }, `${editingUser.username} can sign in again.`);
+$("#uf-signout").onclick = async () => {
+  if (!confirm(`Sign ${editingUser.username} out now? Unsaved work in their browser is lost; their licence seat is free at once.`)) return;
+  try { await api(`/companies/${state.company}/users/${editingUser.id}/sign-out`, { method: "POST" }); $("#user-dlg").close(); await renderers.users(); }
+  catch (err) { $("#uf-msg").textContent = err.message; }
+};
 $("#uf-remove").onclick = async () => {
   const name = $("#company").selectedOptions[0]?.textContent;
   if (!confirm(`Remove ${editingUser.username} from ${name}? Their entries stay in the books and the audit trail.`)) return;
@@ -1332,7 +1350,7 @@ function licenceBox(l, admin) {
   return `<div class="lic-box"><div class="row between"><h4>${esc(l.plan[0].toUpperCase() + l.plan.slice(1))} licence ${esc(l.key_hint)}</h4>${chip(l.effective_status)}</div>
     <div class="grid small">
       <div><span class="muted">Valid</span><br>${fmtDate(l.starts_at)} – ${l.expires_at ? fmtDate(l.expires_at) : "no end"} (${days})</div>
-      <div><span class="muted">Named users</span><br>${l.max_users}</div>
+      <div><span class="muted">Users at the same time</span><br>${l.max_users}</div>
       <div><span class="muted">Servers</span><br>${l.active_installations} of ${l.max_installations} in use</div>
       <div><span class="muted">Tally companies</span><br>${l.max_companies ?? "any number"}</div>
       <div><span class="muted">Versions</span><br>${esc(l.min_version || "any")} – ${esc(l.max_version || "any")}</div>
@@ -1558,7 +1576,7 @@ renderers.mylicence = async () => {
     ${p.warnings.map((w) => `<p class="error">${esc(w)}</p>`).join("")}
     ${p.licenses.map((l) => licenceBox(l, false)).join("") || `<p class="muted">There is no licence yet. Contact Voyager.</p>`}
     ${p.hosted_companies.length ? `<p class="small muted">Books hosted on Tally Cloud: ${p.hosted_companies.map((h) => esc(h.name)).join(", ")}
-      ${p.hosted_users != null ? ` · ${p.hosted_users} named user(s) in use` : ""}</p>` : ""}
+      ${p.hosted_users != null ? ` · ${p.hosted_users} user(s) working now` : ""}</p>` : ""}
     <h3>Downloads</h3>
     ${dl.length ? `<table><thead><tr><th>Version</th><th>File</th><th class="num">Size</th><th>Released</th><th>What is new</th><th></th></tr></thead><tbody>${dl.map((r) =>
       `<tr><td>${esc(r.version)}</td><td>${esc(r.file_name)}<div class="small muted">SHA-256 ${esc(r.sha256)}</div></td><td class="num">${size(r.file_size)}</td>
@@ -1585,7 +1603,7 @@ renderers.licence = async () => {
   $("#lc-cards").innerHTML = [
     ["Status", chip(l.state) + ` ${esc(stateLabel)}`, l.reason || (l.warnings || []).join(" ")],
     ["Licensed to", esc(l.customer || "—"), esc(l.plan ? `${l.plan} · ${l.expires_at ? "until " + fmtDate(l.expires_at) : "no end date"}` : "")],
-    ["Users", l.max_users != null ? `${l.users_used} of ${l.max_users}` : "—", "named users switched on"],
+    ["Users working now", l.max_users != null ? `${l.users_used} of ${l.max_users}` : "—", "users at the same time"],
     ["Tally companies", l.max_companies != null ? `${l.companies_used} of ${l.max_companies}` : String(l.companies_used ?? "—"), ""],
     ["Last check-in", esc(when(l.last_check_at) || "never"), esc(l.server_url || "")],
     ["This server", esc((l.installation_id || "").slice(0, 12)), `version ${esc(l.version)}${l.update_available ? ` · version ${esc(l.update_available.version)} is in the licence portal` : ""}`],

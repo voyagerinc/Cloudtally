@@ -8,7 +8,7 @@ from app import __version__, audit
 from app.api.deps import DB, CurrentUser, actor_of
 from app.core.config import settings
 from app.licensing import client
-from app.licensing.enforce import entitlement_for, named_users
+from app.licensing.enforce import entitlement_for, seats_in_use
 from app.models import Company
 
 router = APIRouter(prefix="/licence", tags=["licence"])
@@ -20,7 +20,7 @@ def licence_status(db: DB, user: CurrentUser, company_id: uuid.UUID | None = Non
         company_id = None
     ent = entitlement_for(db, company_id)
     out = {"mode": settings.license_mode, "version": __version__, **ent.public(),
-           "users_used": named_users(db, company_id) if ent.max_users is not None else None}
+           "users_used": seats_in_use(db, company_id) if ent.max_users is not None else None}
     if settings.license_mode == "client" and user.is_superadmin:
         st = client.state(db)
         out.update(installation_id=st.installation_id, server_url=st.server_url or settings.license_server_url,

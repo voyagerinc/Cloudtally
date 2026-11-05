@@ -1,7 +1,7 @@
 """Sign-in with user ID and password, and company users managed by their company admin."""
 import re
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -11,11 +11,11 @@ from app import audit
 from app.api.deps import DB, CurrentUser, actor_of, authorize
 from app.audit import Actor
 from app.core.config import settings
-from app.licensing import enforce as licence
 from app.core.security import (
     ALL_PERMS, PERM_GROUPS, REPORTS, ROLE_LABELS, ROLES, Perm, allows, check_password_rules, has_perm, hash_key,
     hash_password, new_session_token, perms_for, perms_of, verify_password,
 )
+from app.licensing import enforce as licence
 from app.models import Company, User, UserCompanyAccess, UserSession
 from app.models.base import utcnow
 
@@ -81,6 +81,7 @@ def login(body: LoginIn, request: Request, db: DB):
                      after={"client": request.client.host if request.client else None})
         db.commit()
         raise wrong
+    licence.check_seat(db, user)       # users at the same time, as the licence allows
     token = new_session_token()
     user.failed_logins, user.locked_until, user.last_login_at = 0, None, now
     db.add(UserSession(user_id=user.id, token_hash=hash_key(token), created_at=now, last_seen_at=now,
@@ -117,6 +118,11 @@ def change_password(body: PasswordIn, request: Request, db: DB, user: CurrentUse
     audit.record(db, actor_of(user), "user.password_change", "user", user.id)
     db.commit()
     return {"ok": True}
+
+
+@router.post("/auth/ping", status_code=204)
+def ping(user: CurrentUser):
+    """Sent by the open page every 2 minutes: the user is still working and keeps their licence seat."""
 
 
 @router.get("/me")
@@ -175,9 +181,18 @@ def _permissions(db, actor: User, company_id: uuid.UUID, role: str, permissions:
     return sorted(wanted)
 
 
-def _out(u: User, access: UserCompanyAccess) -> dict:
+def _online(db, u: User) -> datetime | None:
+    """When this user was last active in a signed-in browser, if that holds a licence seat now."""
+    return db.scalar(select(func.max(UserSession.last_seen_at)).where(
+        UserSession.user_id == u.id, UserSession.last_seen_at >= licence.seat_cutoff(),
+        UserSession.expires_at > utcnow()))
+
+
+def _out(u: User, access: UserCompanyAccess, db=None) -> dict:
     now = utcnow()
+    online = _online(db, u) if db is not None else None
     return {
+        "online": online is not None, "active_at": online,
         "id": u.id, "username": u.username, "display_name": u.display_name,
         "role": access.role, "role_label": ROLE_LABELS.get(access.role, access.role),
         "custom": access.permissions is not None, "permissions": sorted(perms_of(access)),
@@ -200,7 +215,7 @@ def list_company_users(company_id: uuid.UUID, db: DB, user: CurrentUser):
     authorize(db, user, company_id, Perm.USERS_MANAGE)
     rows = db.scalars(select(UserCompanyAccess).join(User).where(UserCompanyAccess.company_id == company_id)
                       .order_by(func.lower(User.username)))
-    return [_out(a.user, a) for a in rows]
+    return [_out(a.user, a, db) for a in rows]
 
 
 @router.post("/companies/{company_id}/users", status_code=201)
@@ -216,7 +231,6 @@ def create_company_user(company_id: uuid.UUID, body: CompanyUserIn, db: DB, user
             raise HTTPException(409, f"{existing.username} already has access to {company.name}")
         if reason := _not_manageable(db, user, existing):
             raise HTTPException(403, reason)
-        licence.check_user_limit(db, company_id, existing if existing.is_active else None)
         target = existing
         target.is_active = True      # e.g. a user switched off when removed from their last company
     else:
@@ -226,7 +240,6 @@ def create_company_user(company_id: uuid.UUID, body: CompanyUserIn, db: DB, user
             raise HTTPException(422, "Give the user a first password")
         if reason := check_password_rules(body.password, username):
             raise HTTPException(422, reason)
-        licence.check_user_limit(db, company_id)
         target = User(username=username, display_name=body.display_name, password_hash=hash_password(body.password),
                       must_change_password=True, created_by=user.username)
         db.add(target)
@@ -276,8 +289,6 @@ def update_company_user(company_id: uuid.UUID, user_id: uuid.UUID, body: Company
     if "is_active" in fields and body.is_active is not None:
         if is_self and not body.is_active:
             raise HTTPException(403, "You cannot switch off your own user")
-        if body.is_active and not target.is_active:
-            licence.check_user_limit(db, company_id)
         target.is_active = body.is_active
         if not body.is_active:
             db.execute(delete(UserSession).where(UserSession.user_id == target.id))
@@ -290,6 +301,19 @@ def update_company_user(company_id: uuid.UUID, user_id: uuid.UUID, body: Company
                  before={k: before[k] for k in changed}, after=changed | ({"password": "reset"} if body.password else {}))
     db.commit()
     return after
+
+
+@router.post("/companies/{company_id}/users/{user_id}/sign-out")
+def sign_out_user(company_id: uuid.UUID, user_id: uuid.UUID, db: DB, user: CurrentUser):
+    """Frees the user's licence seat at once, e.g. someone left without signing out."""
+    authorize(db, user, company_id, Perm.USERS_MANAGE)
+    target, access = _access(db, company_id, user_id)
+    if target.id == user.id:
+        raise HTTPException(422, "Use Sign out at the top to sign yourself out")
+    n = db.execute(delete(UserSession).where(UserSession.user_id == target.id)).rowcount
+    audit.record(db, actor_of(user), "user.sign_out", "user", target.id, company_id=company_id, after={"sessions": n})
+    db.commit()
+    return _out(target, access, db)
 
 
 @router.delete("/companies/{company_id}/users/{user_id}", status_code=204)

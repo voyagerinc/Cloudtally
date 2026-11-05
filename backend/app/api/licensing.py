@@ -28,7 +28,7 @@ from app.licensing import service
 from app.licensing.core import (
     MODULES, effective_status, hash_license_key, new_license_key, sign_bytes, version_allowed,
 )
-from app.licensing.enforce import customer_entitlement, named_users
+from app.licensing.enforce import customer_entitlement, live_users
 from app.models import (
     Company, Customer, DownloadEvent, Installation, License, LicenseEvent, SoftwareRelease, User,
     UserCompanyAccess, UserSession,
@@ -252,7 +252,7 @@ def portal_license(db: DB, user: CurrentUser, customer_id: uuid.UUID | None = No
         "licenses": [_license_out(db, lic) for lic in customer.licenses if lic.status != "cancelled"],
         "warnings": ent.warnings + ([ent.reason] if ent.read_only else []),
         "hosted_companies": [{"id": c.id, "name": c.name} for c in hosted],
-        "hosted_users": named_users(db, hosted[0].id) if hosted else None,
+        "hosted_users": live_users(db, customer.id) if hosted else None,
         "downloads": [{"version": d.version, "result": d.result, "at": d.created_at, "user": d.username}
                       for d in db.scalars(select(DownloadEvent).where(DownloadEvent.customer_id == customer.id)
                                           .order_by(DownloadEvent.id.desc()).limit(20))],

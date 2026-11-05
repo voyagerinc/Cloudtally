@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     tally_timeout: float = 60.0
     session_idle_hours: float = 12.0       # a signed-in browser is signed out after this long without use
     session_max_days: float = 30.0         # ... and after this long in any case
+    seat_idle_minutes: int = 15            # a licence seat is freed this long after the browser was last active
     login_max_failures: int = 5            # wrong passwords in a row before the user ID is locked
     login_lock_minutes: int = 15
     # Folder shared with deploy/update.sh (set by deploy/server-setup.sh). Unset: no updates from the web.

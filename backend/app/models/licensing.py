@@ -42,7 +42,7 @@ class License(IdMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(20), default="pending")
     starts_at: Mapped[date] = mapped_column(Date)
     expires_at: Mapped[date | None] = mapped_column(Date)               # None: perpetual
-    max_users: Mapped[int] = mapped_column(Integer, default=5)          # named users
+    max_users: Mapped[int] = mapped_column(Integer, default=5)          # users working at the same time
     max_installations: Mapped[int] = mapped_column(Integer, default=1)
     max_companies: Mapped[int | None] = mapped_column(Integer)          # Tally companies; None: no limit
     modules: Mapped[list] = mapped_column(JSON, default=list)

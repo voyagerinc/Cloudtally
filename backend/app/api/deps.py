@@ -29,7 +29,15 @@ def session_for(db: Session, token: str) -> UserSession | None:
         db.delete(s)
         db.commit()
         return None
-    if now - s.last_seen_at > timedelta(minutes=5):     # keep the session alive without a write per request
+    if now - s.last_seen_at > timedelta(minutes=1):     # keeps the session (and its licence seat) alive
+        if now - s.last_seen_at > timedelta(minutes=settings.seat_idle_minutes):
+            # Idle long enough to have given its licence seat away: take a seat again, if one is free.
+            user = db.get(User, s.user_id)
+            if user is not None:
+                try:
+                    licence.check_seat(db, user)
+                except HTTPException as exc:
+                    raise HTTPException(409, f"You were away and your licence seat went to someone else. {exc.detail}")
         s.last_seen_at = now
         db.commit()
     return s
