@@ -68,13 +68,14 @@ The script shares the server safely:
   a Docker proxy) holds them, the script stops before changing anything.
 - **nginx**: it adds only its own site for `tallycloud.voyager.co.in`. Other sites are left as they are.
 - **App port**: it uses 127.0.0.1:8000, or the next free port. Set your own with `APP_PORT=8010 sudo -E bash …`.
-- **PostgreSQL**: it adds a separate `erp` role and `tally_erp` database to the server's PostgreSQL,
-  on whatever port that PostgreSQL uses.
+- **PostgreSQL**: with `DB_PORT=6060` it creates a PostgreSQL cluster of its own (`tallycloud`) on that
+  port, apart from the other software's databases. Later runs find that cluster by name. Without
+  `DB_PORT`, it adds an `erp` role and a `tally_erp` database to the server's main PostgreSQL.
 - **Firewall**: if ufw is already on, it allows SSH, HTTP and HTTPS. If ufw is off, it leaves it off,
   so the other software keeps its ports.
 
 ```bash
-sudo bash /root/projects/tallycloud/deploy/server-setup.sh tallycloud.voyager.co.in <your-email>
+sudo DB_PORT=6060 bash /root/projects/tallycloud/deploy/server-setup.sh tallycloud.voyager.co.in <your-email>
 ```
 
 This installs PostgreSQL (with a generated password in `backend/.env`, readable only by the app),

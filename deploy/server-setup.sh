@@ -7,7 +7,8 @@
 # it keeps an existing database password and .env, and only adds what is missing.
 #
 # Shares the server with other software: it never touches other nginx sites, never turns the
-# firewall on (if it is off) and picks a free local port for the app. Optional: APP_PORT=8010.
+# firewall on (if it is off) and picks a free local port for the app. Optional: APP_PORT=8010,
+# and DB_PORT=6060 for a separate PostgreSQL of its own.
 #
 # What it installs: PostgreSQL, Python venv, the app as a systemd service on 127.0.0.1 (port 8000 or
 # the next free one), an nginx site with a Let's Encrypt certificate, and a locked-down
@@ -70,18 +71,43 @@ while [ "$d" != "/" ]; do
 done
 
 echo "==> Database"
+# DB_PORT=6060 gives Tally Cloud its own PostgreSQL cluster ("tallycloud") on that port, apart from the
+# databases of the other software here. Later runs find that cluster again by its name.
+# Without DB_PORT (and no such cluster) it uses the server's main PostgreSQL.
 systemctl enable --now postgresql
-if [ -f "$ENV_FILE" ] && grep -q '^ERP_DATABASE_URL=' "$ENV_FILE"; then
-  echo "    keeping the existing $ENV_FILE"
-else
-  DB_PASS=$(openssl rand -hex 24)
-  if sudo -u postgres psql -tAc "select 1 from pg_roles where rolname='erp'" | grep -q 1; then
-    sudo -u postgres psql -qc "alter role erp with login password '$DB_PASS'"
-  else
-    sudo -u postgres psql -qc "create role erp with login password '$DB_PASS'"
+[ -n "${DB_PORT:-}" ] || DB_PORT=$(pg_lsclusters -h | awk '$2 == "tallycloud" {print $3}')
+if [ -n "$DB_PORT" ]; then
+  case "$DB_PORT" in *[!0-9]*) echo "!! DB_PORT must be a number"; exit 1;; esac
+  CLUSTER=$(pg_lsclusters -h | awk -v p="$DB_PORT" '$3 == p {print $1 "/" $2}')
+  if [ -z "$CLUSTER" ]; then
+    if listening "$DB_PORT"; then echo "!! Port $DB_PORT is already used by '$(owner "$DB_PORT")'."; exit 1; fi
+    PG_VER=$(ls /usr/lib/postgresql | sort -V | tail -1)
+    pg_createcluster "$PG_VER" tallycloud -p "$DB_PORT" --start-conf=auto
+    CLUSTER="$PG_VER/tallycloud"
   fi
-  sudo -u postgres psql -tAc "select 1 from pg_database where datname='tally_erp'" | grep -q 1 \
-    || sudo -u postgres createdb -O erp tally_erp
+  systemctl enable --now "postgresql@${CLUSTER%/*}-${CLUSTER#*/}"
+  PSQL=(sudo -u postgres psql -p "$DB_PORT"); CREATEDB=(sudo -u postgres createdb -p "$DB_PORT")
+else
+  PSQL=(sudo -u postgres psql); CREATEDB=(sudo -u postgres createdb)
+fi
+PG_PORT=$("${PSQL[@]}" -tAc "show port" | tr -d '[:space:]')
+PG_LISTEN=$("${PSQL[@]}" -tAc "show listen_addresses" | tr -d '[:space:]')
+case ",$PG_LISTEN," in
+  *,localhost,*|*,127.0.0.1,*|*,\*,*|*,0.0.0.0,*) ;;
+  *) echo "!! PostgreSQL on port $PG_PORT does not accept connections on 127.0.0.1 (listen_addresses = '$PG_LISTEN')."
+     echo "   Add localhost to listen_addresses in $("${PSQL[@]}" -tAc 'show config_file'),"
+     echo "   restart that PostgreSQL, then run this script again."
+     exit 1;;
+esac
+
+# Keep the password of an existing .env; the role and database are created where they are missing.
+DB_PASS=""
+[ -f "$ENV_FILE" ] && DB_PASS=$(sed -n 's#^ERP_DATABASE_URL=postgresql+psycopg://erp:\([^@]*\)@.*#\1#p' "$ENV_FILE")
+if [ -z "$DB_PASS" ]; then
+  DB_PASS=$(openssl rand -hex 24)
+  if "${PSQL[@]}" -tAc "select 1 from pg_roles where rolname='erp'" | grep -q 1; then
+    "${PSQL[@]}" -qc "alter role erp with login password '$DB_PASS'"
+  fi
   cat > "$ENV_FILE" <<EOF
 # Created by deploy/server-setup.sh. Never commit this file.
 ERP_DATABASE_URL=postgresql+psycopg://erp:$DB_PASS@127.0.0.1:$PG_PORT/tally_erp
@@ -89,18 +115,13 @@ ERP_DATABASE_URL=postgresql+psycopg://erp:$DB_PASS@127.0.0.1:$PG_PORT/tally_erp
 ERP_AUTO_SYNC=true
 ERP_TALLY_TIMEOUT=90
 EOF
+else
+  echo "    keeping the existing $ENV_FILE"
 fi
-# The local PostgreSQL may not be on 5432 (another version or one in Docker may hold it), so ask it,
-# and correct the port in an existing .env too.
-PG_PORT=$(sudo -u postgres psql -tAc "show port" | tr -d '[:space:]')
-PG_LISTEN=$(sudo -u postgres psql -tAc "show listen_addresses" | tr -d '[:space:]')
-case ",$PG_LISTEN," in
-  *,localhost,*|*,127.0.0.1,*|*,\*,*|*,0.0.0.0,*) ;;
-  *) echo "!! PostgreSQL does not accept connections on 127.0.0.1 (listen_addresses = '$PG_LISTEN')."
-     echo "   Add localhost to listen_addresses in $(sudo -u postgres psql -tAc 'show config_file'),"
-     echo "   run: systemctl restart postgresql, then run this script again."
-     exit 1;;
-esac
+"${PSQL[@]}" -tAc "select 1 from pg_roles where rolname='erp'" | grep -q 1 \
+  || "${PSQL[@]}" -qc "create role erp with login password '$DB_PASS'"
+"${PSQL[@]}" -tAc "select 1 from pg_database where datname='tally_erp'" | grep -q 1 \
+  || "${CREATEDB[@]}" -O erp tally_erp
 sed -i -E "s#(ERP_DATABASE_URL=postgresql\+psycopg://erp:[^@]*@127\.0\.0\.1:)[0-9]+/#\1$PG_PORT/#" "$ENV_FILE"
 echo "    PostgreSQL on 127.0.0.1:$PG_PORT, database tally_erp"
 chown root:"$APP_USER" "$ENV_FILE"
