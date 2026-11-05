@@ -943,6 +943,23 @@ def upload_release(db: DB, user: CurrentUser, version: str = Form(..., max_lengt
     return _store_release(db, actor_of(user), version, platform, release_notes, file, publish=False)
 
 
+@router.post("/admin/releases/build-current", status_code=201)
+def build_current_release(db: DB, user: CurrentUser):
+    """Packs and publishes the version this portal runs, when it is not released yet."""
+    _superadmin(user)
+    from app import __version__
+    from app.licensing.package import ensure_current_release
+    _release_dir()
+    try:
+        rel = ensure_current_release(db, force=True, actor=actor_of(user))
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc))
+    if rel is None:
+        raise HTTPException(409, f"Version {__version__} is already released. A new installer comes with the next "
+                                 "version (deploy a newer version, or push a version tag to GitHub).")
+    return _release_out(rel)
+
+
 @router.post("/admin/releases/from-github", status_code=201)
 def upload_release_from_github(request: Request, db: DB, version: str = Form(..., max_length=30),
                                platform: str = Form("windows", max_length=20),

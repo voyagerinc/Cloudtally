@@ -127,6 +127,14 @@ Every update is a release with a **higher version number**. The version lives in
      restarts. If the new version does not start, it puts the previous one back. Log:
      `C:\TallyCloud\logs\update.log`.
 
+### The portal's own installer (no upload needed)
+
+The portal always offers an installer for the version it runs. When it starts with a version that has
+no release yet (its first start, or after **System admin → Deploy & restart** brings a new version), it
+packs its own code, signs the package and **publishes** it. The Releases tab's **Build installer now**
+does the same on demand. Packages never contain `.env` files, keys, environments or caches. If a
+newer version already came in from GitHub, the portal does not add its older one.
+
 ### One-time setup of the automatic release
 
 1. On the portal server, make the release token. It writes only a hash to `.env`:

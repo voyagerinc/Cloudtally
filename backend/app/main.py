@@ -1,5 +1,6 @@
 """FastAPI application: uvicorn app.main:app --reload"""
 import logging
+import threading
 from contextlib import asynccontextmanager
 import uuid
 from pathlib import Path
@@ -18,6 +19,17 @@ from app.services.accounting.vouchers import VoucherError
 log = logging.getLogger("api")
 STATIC = Path(__file__).resolve().parent / "static"
 
+def _publish_own_installer() -> None:
+    """Customers always find an installer for the version this portal runs."""
+    from app.core.db import SessionLocal
+    from app.licensing.package import ensure_current_release
+    try:
+        with SessionLocal() as db:
+            ensure_current_release(db)
+    except Exception:
+        log.exception("could not build the installer package")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Automatic sync runs inside the server while it is up (ERP_AUTO_SYNC, on by default)."""
@@ -30,6 +42,7 @@ async def lifespan(_app: FastAPI):
         heartbeat.start()   # daily licence check-in with the cloud
     elif settings.license_mode == "server":
         expiry_notices.start()
+        threading.Thread(target=_publish_own_installer, name="installer", daemon=True).start()
     yield
     auto_sync.stop()
     heartbeat.stop()

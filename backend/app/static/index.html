@@ -332,6 +332,9 @@
     download it from their portal, and activated servers install it from their Licence tab. Every update needs a
     new, higher version. You can still upload a package by hand below.</p>
   <p class="small" id="rel-latest"></p>
+  <p><button type="button" id="rel-build">Build installer now</button>
+    <span class="muted small">Packs, signs and publishes the version this portal runs. The portal also does this by
+      itself after every deploy of a new version.</span></p>
   <form id="rel-form" class="panel row">
     <label>Version<input name="version" required placeholder="1.1.0" pattern="\d+(\.\d+){0,3}"></label>
     <label>Installer<input name="file" type="file" required accept=".exe,.msi,.zip"></label>

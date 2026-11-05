@@ -1593,6 +1593,12 @@ renderers.releases = async () => {
     try { await api(`/admin/releases/${b.dataset.rel}/status`, { method: "POST", body: { status: b.dataset.st } }); await renderers.releases(); } catch (err) { alert(err.message); }
   }));
 };
+$("#rel-build").onclick = async () => {
+  if (!confirm("Build the installer for the version this portal runs and publish it to customers?")) return;
+  $("#rel-msg").textContent = "Building…";
+  try { const r = await api("/admin/releases/build-current", { method: "POST" }); $("#rel-msg").textContent = `Version ${r.version} is published.`; await renderers.releases(); }
+  catch (err) { $("#rel-msg").textContent = err.message; }
+};
 $("#rel-form").onsubmit = async (e) => {
   e.preventDefault();
   const btn = e.target.querySelector("button"); btn.disabled = true; $("#rel-msg").textContent = "Uploading…";
@@ -1614,7 +1620,8 @@ renderers.mylicence = async () => {
       `<tr><td>${esc(r.version)}</td><td>${esc(r.file_name)}<div class="small muted">SHA-256 ${esc(r.sha256)}</div></td><td class="num">${size(r.file_size)}</td>
         <td>${fmtDate(r.published_at?.slice(0, 10))}</td><td class="wrap">${esc(r.release_notes || "")}</td>
         <td><button type="button" data-dl="${r.id}">Download</button></td></tr>`).join("")}</tbody></table>`
-      : `<p class="muted">No installer is available for your licence yet.</p>`}
+      : `<p class="muted">No installer is available for your licence yet. Voyager publishes one shortly; if it
+        does not appear, click Request renewal above and ask for the installer.</p>`}
     <p class="small muted">Install on the Windows server or PC next to Tally, then enter your licence key on its Licence tab.</p>
     ${p.downloads.length ? `<h3>Recent downloads</h3><table class="small">${p.downloads.map((d) => `<tr><td>${when(d.at)}</td><td>${esc(d.user)}</td><td>v${esc(d.version || "")}</td><td>${chip(d.result)}</td></tr>`).join("")}</table>` : ""}`;
   document.querySelectorAll("#ml-body [data-dl]").forEach((b) => (b.onclick = async () => {

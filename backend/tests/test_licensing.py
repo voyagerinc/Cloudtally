@@ -29,6 +29,9 @@ def portal(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "release_dir", str(tmp_path / "releases"))
     core._private_key.cache_clear()
     enforce.forget_cached()
+    from app.licensing import service
+    for limit in (service.activation_limit, service.setup_limit):   # per-minute limits: each test starts afresh
+        limit.hits.clear()
     yield public
     core._private_key.cache_clear()
     enforce.forget_cached()
@@ -529,3 +532,39 @@ def test_github_actions_uploads_with_the_release_token_only(db, admin, portal, m
     assert {(x["version"], x["status"]) for x in rels} == {("1.0.0", "draft"), ("1.0.1", "published")}
     # The token opens nothing else.
     assert api.get(f"{V1}/admin/customers", headers={"X-Release-Token": token}).status_code == 401
+
+
+def test_portal_publishes_its_own_installer_for_customers(db, admin, portal, tmp_path):
+    import zipfile
+    from app import __version__
+    from app.licensing import package
+
+    # The package never carries secrets or local clutter.
+    root = tmp_path / "src"
+    for rel, text in {"backend/app/main.py": "app", "backend/.env": "ERP_DATABASE_URL=secret", ".env.local": "x",
+                      "backend/app/x.pyc": "b", ".git/config": "g", ".venv/lib.py": "v", "deploy/windows/install-server.ps1": "ps",
+                      "keys/license_signing.pem": "KEY", "Spec.docx": "d"}.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    with zipfile.ZipFile(io.BytesIO(package.build("2.3.4", root, public_key="PUB"))) as z:
+        names = set(z.namelist())
+        assert z.read("VERSION").decode().strip() == "2.3.4" and z.read("license_public_key.txt").decode().strip() == "PUB"
+    assert names == {"VERSION", "install.cmd", "README.txt", "license_public_key.txt",
+                     "app/backend/app/main.py", "app/deploy/windows/install-server.ps1"}
+
+    # A customer sees "no installer" until the portal publishes its own version; then it is there.
+    cid = customer(admin)
+    licence(admin, cid)
+    h = company_admin(admin, cid, "acme-admin")
+    assert api.get(f"{V1}/portal/downloads", headers=h).json() == []
+    rel = package.ensure_current_release(db)
+    assert rel is not None and rel.status == "published" and rel.signature and rel.version == __version__
+    assert package.ensure_current_release(db) is None                      # only once per version
+    got = api.get(f"{V1}/portal/downloads", headers=h).json()
+    assert [r["version"] for r in got] == [__version__]
+    link = api.post(f"{V1}/downloads/{got[0]['id']}/link", headers=h).json()["url"]
+    with zipfile.ZipFile(io.BytesIO(api.get(link).content)) as z:
+        assert z.read("VERSION").decode().strip() == __version__
+        assert "app/backend/requirements.txt" in z.namelist() and not any(n.endswith("/.env") for n in z.namelist())
+    r = api.post(f"{V1}/admin/releases/build-current", headers=admin)
+    assert r.status_code == 409 and "already released" in r.json()["detail"]
