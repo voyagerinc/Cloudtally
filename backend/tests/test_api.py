@@ -295,3 +295,12 @@ def test_next_financial_year_opens_by_itself(db, books, admin):
     r = voucher(books, admin, date="2040-01-01", number="NY-2")
     assert r.status_code == 422 and r.json()["code"] == "period_locked" and "5 years" in r.json()["detail"]
     assert voucher(books, admin, date="2026-03-31", number="NY-3").json()["code"] == "period_locked"  # before books
+
+
+def test_long_hsn_descriptions_from_tally_are_kept(db, books):
+    """Tally allows long HSN/SAC descriptions; they once broke the stock item import (varchar 300)."""
+    from app.models import StockItem
+    text_ = "Ethernet patch panel, 24 port, rack mount, " * 20      # about 900 characters
+    db.add(StockItem(company_id=books, name="Patch Panel 24", unit="Nos", hsn_description=text_))
+    db.commit()
+    assert len(db.query(StockItem).filter_by(company_id=books, name="Patch Panel 24").one().hsn_description) == len(text_)

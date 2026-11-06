@@ -190,8 +190,8 @@ def _validate_and_build(db: Session, company: Company, data: dict, r: _Resolver,
     # Like Tally. Vouchers that post to the books need balanced ledger entries, or only stock lines
     # (stock and manufacturing journals). Non-accounting vouchers (orders, material in/out, gate passes)
     # never post, so a single ledger line naming the party is fine and nothing has to balance.
-    # An order or memo with nothing on it yet (Tally saves those) touches neither books nor stock.
-    if not entries_in and not inventory_in and (vt.affects_accounts or vt.affects_stock):
+    # An order, memo or gate pass with nothing on it (Tally saves those) touches neither books nor stock.
+    if not entries_in and not inventory_in and vt.affects_accounts:
         raise VoucherError("validation_failure", "A voucher needs ledger entries or stock lines")
     if vt.affects_accounts and len(entries_in) == 1:
         raise VoucherError("validation_failure", "A voucher needs at least two ledger entries, or only stock lines")

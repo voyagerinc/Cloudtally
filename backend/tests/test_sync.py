@@ -764,6 +764,10 @@ def test_backlog_scan_shrinks_and_auto_sync_keeps_going(db, company, tc, mock, m
 def test_empty_order_is_accepted_but_an_empty_payment_is_not(db, company):
     order = {"voucher_type": "Purchase Order", "date": "2026-04-17", "party_ledger": "Bharat Supplies", "entries": []}
     assert engine.create_voucher(db, company, order, USER, action="post", source="tally").status == VoucherStatus.POSTED
+    # A blank gate pass (Material Out, Tally keeps it) touches neither books nor stock.
+    gate_pass = {"voucher_type": "Material Out", "number": "NRGP-8", "date": "2026-04-17",
+                 "party_ledger": "Bharat Supplies", "entries": []}
+    assert engine.create_voucher(db, company, gate_pass, USER, action="post", source="tally").status == VoucherStatus.POSTED
     with pytest.raises(engine.VoucherError, match="needs ledger entries or stock lines"):
         engine.create_voucher(db, company, {"voucher_type": "Payment", "date": "2026-04-17", "entries": []}, USER, action="post")
 

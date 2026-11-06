@@ -298,6 +298,18 @@
 
 <section id="server" class="tab" hidden>
   <h2>System admin</h2>
+  <div id="sv-client" hidden>
+    <p class="muted small"><b>Update from licence server</b> fetches the newest version your licence covers from
+      Tally Cloud, checks that Voyager signed it, installs it and restarts. Settings and data stay as they are;
+      if the new version does not start, the previous one comes back by itself. Everyone is disconnected for a
+      minute or two.</p>
+    <div id="svc-cards" class="cards"></div>
+    <div class="row filters">
+      <button type="button" id="svc-update">Update from licence server</button>
+      <span id="svc-msg" class="muted" aria-live="polite"></span>
+    </div>
+  </div>
+  <div id="sv-github">
   <p class="muted small"><b>Deploy &amp; restart</b> pulls the latest code from GitHub, installs Python packages,
     updates the database and restarts the app.
     Everyone is disconnected for a few seconds; a sync that is running stops and continues after the restart.
@@ -312,6 +324,7 @@
   <div id="sv-pending"></div>
   <h3>Log of the last run</h3>
   <pre id="sv-log" class="small"></pre>
+  </div>
 </section>
 
 <section id="customers" class="tab" hidden>

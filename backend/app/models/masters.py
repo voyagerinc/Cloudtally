@@ -2,7 +2,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.core.db import Base
@@ -61,7 +61,7 @@ class Ledger(IdMixin, TimestampMixin, Base):
     gst_duty_head: Mapped[str | None] = mapped_column(String(20))     # IGST/CGST/SGST/Cess
     bank_account_no: Mapped[str | None] = mapped_column(String(40))
     bank_ifsc: Mapped[str | None] = mapped_column(String(20))
-    mailing_name: Mapped[str | None] = mapped_column(String(300))
+    mailing_name: Mapped[str | None] = mapped_column(Text)
     address: Mapped[str | None] = mapped_column(String(1000))          # lines joined with newlines
     pincode: Mapped[str | None] = mapped_column(String(100))         # free text in Tally (seen: "930, Kathmandu, Nepal")
     country: Mapped[str | None] = mapped_column(String(60))
@@ -159,7 +159,7 @@ class StockGroup(IdMixin, Base):
     parent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stock_groups.id"))
     # GST/HSN set on the group; items marked "As per Company/Stock Group" inherit them
     hsn_code: Mapped[str | None] = mapped_column(String(20))
-    hsn_description: Mapped[str | None] = mapped_column(String(300))
+    hsn_description: Mapped[str | None] = mapped_column(Text)
     gst_rate: Mapped[Decimal | None] = mapped_column(Rate)
     gst_rates: Mapped[dict | None] = mapped_column(JSON)
     taxability: Mapped[str | None] = mapped_column(String(30))
@@ -191,7 +191,7 @@ class StockItem(IdMixin, TimestampMixin, Base):
     # GST
     gst_applicable: Mapped[str | None] = mapped_column(String(30))
     supply_type: Mapped[str | None] = mapped_column(String(20))         # Goods / Services / Capital Goods
-    hsn_description: Mapped[str | None] = mapped_column(String(300))
+    hsn_description: Mapped[str | None] = mapped_column(Text)
     gst_rates: Mapped[dict | None] = mapped_column(JSON)                # {"IGST": 18, "CGST": 9, ...}
     taxability: Mapped[str | None] = mapped_column(String(30))
     itc_eligible: Mapped[bool | None] = mapped_column(Boolean)
@@ -219,7 +219,7 @@ class TaxCode(IdMixin, Base):
 
     company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id"), index=True)
     hsn_sac: Mapped[str] = mapped_column(String(20), index=True)
-    description: Mapped[str | None] = mapped_column(String(300))
+    description: Mapped[str | None] = mapped_column(Text)
     rate: Mapped[Decimal] = mapped_column(Rate)
     cess_rate: Mapped[Decimal] = mapped_column(Rate, default=ZERO)
     effective_from: Mapped[date] = mapped_column(Date)

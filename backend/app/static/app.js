@@ -1298,7 +1298,40 @@ function pollServer(ms) {
   clearTimeout(serverTimer);
   serverTimer = setTimeout(() => { if (currentTab === "server") renderers.server().catch(() => pollServer(3000)); }, ms);
 }
+// A customer's server updates from the licence server; the cloud deploys from GitHub.
+async function clientUpdateView() {
+  const l = await api("/licence");
+  const u = l.update_available;
+  $("#svc-cards").innerHTML = [
+    ["Running version", esc(l.version), esc(l.customer ? `licensed to ${l.customer}` : "")],
+    ["On the licence server", u ? esc(u.version) : "—", u ? (u.verified ? "downloaded and checked" : "ready to download")
+      : "press Update to check"],
+    ["Last licence check", esc(when(l.last_check_at) || "never"), esc(l.server_url || "")],
+  ].map(([k, v, sub]) => `<div class="card"><div class="k">${esc(k)}</div><div class="v">${v}</div><div class="small muted">${sub}</div></div>`).join("");
+  $("#svc-update").disabled = !l.activated;
+  if (!l.activated) $("#svc-msg").textContent = "Activate this server on the Licence tab first.";
+  else if (!l.can_install_updates) $("#svc-msg").textContent = "This server was not set up with the Windows installer, so updates are installed by hand.";
+}
+$("#svc-update").onclick = async (e) => {
+  const btn = e.target, msg = $("#svc-msg");
+  btn.disabled = true; msg.className = "muted"; msg.textContent = "Asking the licence server…";
+  try {
+    const r = await api("/licence/update/download", { method: "POST" });
+    if (!r.update) { msg.textContent = r.message; return; }
+    await clientUpdateView();
+    if (!confirm(`Version ${r.update.version} is downloaded and checked (signed by Voyager).\n\n${r.update.release_notes || ""}\n\n`
+      + "Install it now? Tally Cloud restarts and everyone is disconnected for a minute or two.")) { msg.textContent = r.message; return; }
+    const i = await api("/licence/update/install", { method: "POST" });
+    msg.textContent = i.message;
+    waitForRestart(r.update.version, msg);
+  } catch (err) { msg.className = "error"; msg.textContent = err.message; }
+  finally { btn.disabled = false; }
+};
+
 renderers.server = async () => {
+  const client = state.user?.license_mode === "client";
+  $("#sv-client").hidden = !client; $("#sv-github").hidden = client;
+  if (client) return clientUpdateView();
   let s;
   try { s = await api("/admin/system"); }
   catch (err) {
@@ -1691,8 +1724,8 @@ async function getUpdate() {
   catch (err) { $("#lc-error").textContent = err.message; }
 }
 $("#lc-get-update").onclick = () => getUpdate();
-function waitForRestart(version) {
-  $("#lc-error").textContent = `Installing ${version}… this page reloads when Tally Cloud is back.`;
+function waitForRestart(version, out = $("#lc-error")) {
+  out.textContent = `Installing ${version}… this page reloads when Tally Cloud is back.`;
   const started = Date.now();
   const poll = async () => {
     try {
@@ -1700,7 +1733,7 @@ function waitForRestart(version) {
       if (l.version === version) { location.reload(); return; }
     } catch (_) { /* restarting */ }
     if (Date.now() - started < 10 * 60000) setTimeout(poll, 5000);
-    else $("#lc-error").textContent = "The update is taking long. Reload this page; the Licence tab shows the version that runs.";
+    else out.textContent = "The update is taking long. Reload this page; the Licence tab shows the version that runs.";
   };
   setTimeout(poll, 10000);
 }
