@@ -97,7 +97,8 @@
     <button id="job-filter" class="secondary">Filter</button>
   </div>
   <table id="jobs"></table>
-  <h3>Inbound (Tally → ERP)</h3>
+  <div class="row between"><h3>Inbound (Tally → ERP)</h3>
+    <button type="button" id="inbox-retry" class="secondary">Reprocess all failed</button></div>
   <table id="inbox"></table>
   <h3>Reconciliation</h3>
   <form id="recon-form" class="row filters"><input type="date" id="recon-from" required><input type="date" id="recon-to" required>

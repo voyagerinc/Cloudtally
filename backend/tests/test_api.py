@@ -282,3 +282,16 @@ def test_old_tally_data_does_not_block_unrelated_edits(db, books, admin):
     row.pan, row.gstin = "AGOPS1077K1", "06ABCDE1234F1Z5"   # as imported from Tally: bad PAN, mismatching GSTIN
     db.commit()
     assert client.patch(f"{url}/{led['id']}", json={"mobile": "9999999999"}, headers=admin).status_code == 200
+
+
+def test_next_financial_year_opens_by_itself(db, books, admin):
+    """Like Tally: books from 1 Apr 2026, a voucher in May 2027 opens 2027-28; a typo in 2040 does not."""
+    from app.models import FinancialYear
+    r = voucher(books, admin, date="2027-05-10", number="NY-1")
+    assert r.status_code == 201, r.text
+    years = sorted((fy.start_date.isoformat(), fy.end_date.isoformat())
+                   for fy in db.query(FinancialYear).filter(FinancialYear.company_id == books))
+    assert years == [("2026-04-01", "2027-03-31"), ("2027-04-01", "2028-03-31")]
+    r = voucher(books, admin, date="2040-01-01", number="NY-2")
+    assert r.status_code == 422 and r.json()["code"] == "period_locked" and "5 years" in r.json()["detail"]
+    assert voucher(books, admin, date="2026-03-31", number="NY-3").json()["code"] == "period_locked"  # before books

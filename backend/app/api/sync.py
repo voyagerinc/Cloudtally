@@ -394,6 +394,22 @@ def reprocess_inbox(item_id: uuid.UUID, db: DB, user: CurrentUser):
     return {"outcome": outcome, "error_code": item.error_code, "error": item.error, "erp_id": item.erp_id}
 
 
+@router.post("/sync/inbox/reprocess-failed")
+def reprocess_failed_inbox(company_id: uuid.UUID, db: DB, user: CurrentUser, limit: int = 2000):
+    """Tries every failed inbound voucher again (e.g. after a missing ledger or financial year was fixed)."""
+    authorize(db, user, company_id, Perm.SYNC_MANAGE)
+    items = list(db.scalars(select(SyncInbox).where(SyncInbox.company_id == company_id, SyncInbox.status == "failed")
+                            .order_by(SyncInbox.received_at).limit(min(limit, 5000))))
+    outcomes: dict[str, int] = {}
+    errors: dict[str, int] = {}
+    for item in items:
+        outcome = inbound.reprocess(db, item)
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        if item.status == "failed":
+            errors[item.error_code or "error"] = errors.get(item.error_code or "error", 0) + 1
+    return {"tried": len(items), "outcomes": outcomes, "still_failing": errors}
+
+
 # ------------------------------------------------------------------ conflicts
 
 def _conflict_out(c: SyncConflict) -> dict:

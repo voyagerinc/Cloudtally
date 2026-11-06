@@ -1,6 +1,6 @@
 """The single voucher engine used by every voucher type and both sync directions (PRD §5.3)."""
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, select, update
@@ -140,9 +140,37 @@ class _Resolver:
         return vt
 
 
+MAX_YEARS_AHEAD = 5   # a voucher dated further ahead is a typo, not a reason to open years
+
+
+def _open_years_up_to(db: Session, company: Company, d: date) -> FinancialYear | None:
+    """Like Tally: a voucher after the last financial year opens the next year(s), each starting the day
+    after the previous one ends (so the company's April-March pattern continues)."""
+    last = db.scalar(select(FinancialYear).where(FinancialYear.company_id == company.id)
+                     .order_by(FinancialYear.end_date.desc()).limit(1))
+    if last is None or d <= last.end_date:
+        return None
+    fy = None
+    for _ in range(MAX_YEARS_AHEAD):
+        start = last.end_date + timedelta(days=1)
+        try:
+            end = start.replace(year=start.year + 1) - timedelta(days=1)
+        except ValueError:                    # 29 February
+            end = start.replace(year=start.year + 1, day=28)
+        fy = FinancialYear(company_id=company.id, start_date=start, end_date=end)
+        db.add(fy)
+        db.flush()
+        if d <= end:
+            return fy
+        last = fy
+    raise VoucherError("period_locked", f"{d} is more than {MAX_YEARS_AHEAD} years after the last financial year")
+
+
 def financial_year_for(db: Session, company: Company, d: date) -> FinancialYear:
     fy = db.scalar(select(FinancialYear).where(
         FinancialYear.company_id == company.id, FinancialYear.start_date <= d, FinancialYear.end_date >= d))
+    if fy is None:
+        fy = _open_years_up_to(db, company, d)
     if fy is None:
         raise VoucherError("period_locked", f"No financial year covers {d}")
     if d < company.books_from:

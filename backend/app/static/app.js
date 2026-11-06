@@ -376,6 +376,16 @@ $("#run-sync").onclick = async (e) => {
     watchProgress();
   } catch (err) { alert(err.message); e.target.disabled = false; }
 };
+$("#inbox-retry").onclick = async (e) => {
+  e.target.disabled = true; e.target.textContent = "Reprocessing…";
+  try {
+    const r = await api(`/sync/inbox/reprocess-failed?${cq()}`, { method: "POST" });
+    const left = Object.entries(r.still_failing).map(([k, v]) => `${k}: ${v}`).join(", ");
+    alert(`Tried ${r.tried} failed voucher(s): ${Object.entries(r.outcomes).map(([k, v]) => `${v} ${k}`).join(", ") || "nothing to do"}.`
+      + (left ? `\nStill failing: ${left}` : ""));
+  } catch (err) { alert(err.message); }
+  finally { e.target.disabled = false; e.target.textContent = "Reprocess all failed"; renderers.dashboard(); }
+};
 $("#retry-failed").onclick = async () => { const r = await api(`/sync/retry-failed?${cq()}`, { method: "POST" }); alert(JSON.stringify(r)); renderers.dashboard(); };
 $("#errors-csv").onclick = (e) => { e.preventDefault(); download(`/sync/errors.csv?${cq()}`, "sync-errors.csv"); };
 $("#recon-form").onsubmit = async (e) => {
