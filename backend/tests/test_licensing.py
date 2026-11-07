@@ -459,6 +459,15 @@ def test_installation_downloads_checks_and_offers_its_update(db, admin, portal, 
     assert (tmp_path / "updates" / f"TallyCloud-{newer}.zip").read_bytes() == _package(newer)
     s = api.get(f"{V1}/licence", headers=admin).json()
     assert s["update_available"]["version"] == newer and s["can_install_updates"]
+    # Once that version runs, the offer is no longer shown (the update bar goes away by itself).
+    st = db.get(LicenseState, 1)
+    db.refresh(st)
+    offer = dict(st.update_available)
+    st.update_available = {**offer, "version": __version__}
+    db.commit()
+    assert api.get(f"{V1}/licence", headers=admin).json()["update_available"] is None
+    st.update_available = offer
+    db.commit()
 
     # A release whose signature is not Voyager's is never downloaded.
     from app.models import SoftwareRelease

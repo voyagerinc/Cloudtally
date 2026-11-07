@@ -9,6 +9,7 @@ from app.api.deps import DB, CurrentUser, actor_of
 from app.core.config import settings
 from app.core.security import check_password_rules, hash_password
 from app.licensing import client, service
+from app.licensing.core import version_tuple
 from app.licensing.enforce import entitlement_for, seats_in_use
 from app.models import Company, User
 
@@ -26,7 +27,9 @@ def licence_status(db: DB, user: CurrentUser, company_id: uuid.UUID | None = Non
         st = client.state(db)
         out.update(installation_id=st.installation_id, server_url=st.server_url or settings.license_server_url,
                    activated=bool(st.installation_secret), last_check_at=st.last_check_at,
-                   last_attempt_at=st.last_attempt_at, last_error=st.last_error, update_available=st.update_available,
+                   last_attempt_at=st.last_attempt_at, last_error=st.last_error,
+                   update_available=st.update_available if st.update_available and version_tuple(
+                       st.update_available.get("version")) > version_tuple(__version__) else None,
                    companies_used=db.query(Company).count(), can_install_updates=bool(settings.install_dir),
                    public_key_set=bool(settings.license_public_key))
     return out

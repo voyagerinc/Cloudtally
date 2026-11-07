@@ -1376,7 +1376,14 @@ async function refreshBanner() {
   try {
     const l = await api(`/licence${state.company ? `?company_id=${state.company}` : ""}`);
     const text = l.read_only ? l.reason : (l.warnings || []).join(" ");
-    b.hidden = !text; b.textContent = text; b.classList.toggle("bad", !!l.read_only);
+    // On a customer's server the manager sees every new version at once, with one click to install it.
+    const upd = l.update_available ? `Version ${esc(l.update_available.version)} is available on the licence server `
+      + `(this server runs ${esc(l.version)}). <button type="button" class="small" id="banner-update">Update now</button>` : "";
+    b.hidden = !text && !upd;
+    b.innerHTML = [esc(text), upd].filter(Boolean).join(" ");
+    b.classList.toggle("bad", !!l.read_only);
+    const btn = $("#banner-update");
+    if (btn) btn.onclick = () => show("server");
   } catch (_) { b.hidden = true; }
 }
 
