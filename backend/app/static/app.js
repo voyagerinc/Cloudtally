@@ -953,7 +953,10 @@ function vouchersByPeriod(vouchers, keyOf, labelOf) {
 async function registerView(el, base) {
   const r = await api(`/reports/register?${rParams({ base_type: base })}`);
   const month = (v) => new Date(v.date).toLocaleString("en-IN", { month: "long", year: "numeric" });
-  el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · months expand into vouchers</p><div id="t"></div><p><b>Total ${money(r.total)}</b></p>`;
+  const skipped = (r.not_included || []).map((x) => `${x.vouchers} ${x.voucher_type}`).join(", ");
+  el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · months expand into vouchers · amount is the invoice value`
+    + `${skipped ? ` · not included, as in Tally: ${esc(skipped)}` : ""}</p><div id="t"></div>`
+    + `<p><b>Total ${money(r.total)}</b> · tax ${money(r.tax_total)}</p>`;
   treeTable($("#t"), [{ label: "Date", get: (n) => (n.v ? esc(n.v.date) : "") }, { label: "Party", get: (n) => (n.v ? esc(n.v.party || "") : "") },
     { label: "GSTIN", get: (n) => (n.v ? esc(n.v.gstin || "") : "") }, { label: "Tax", num: true, get: (n) => (n.v ? money(n.v.tax) : "") },
     ...amountCol], vouchersByPeriod(r.vouchers, (v) => v.date.slice(0, 7), month), { title: "Month / voucher" });

@@ -304,3 +304,21 @@ def test_long_hsn_descriptions_from_tally_are_kept(db, books):
     db.add(StockItem(company_id=books, name="Patch Panel 24", unit="Nos", hsn_description=text_))
     db.commit()
     assert len(db.query(StockItem).filter_by(company_id=books, name="Patch Panel 24").one().hsn_description) == len(text_)
+
+
+def test_sales_register_matches_tally(db, books, admin):
+    """Invoice value = the party's amount; tax = GST ledgers only (Tally marks other ledgers "Others");
+    proforma invoices are memos and stay out, as in Tally's Sales Register."""
+    from app.models import Ledger, VoucherType
+    db.query(Ledger).filter(Ledger.company_id == books).update({"tax_type": "Others"})
+    db.query(Ledger).filter_by(company_id=books, name="Output IGST").update({"tax_type": "GST", "gst_duty_head": "IGST"})
+    db.add(VoucherType(company_id=books, name="Proforma Invoice", base_type="Sales"))
+    db.commit()
+    assert voucher(books, admin, number="INV-1").status_code == 201
+    assert voucher(books, admin, number="PF-1", voucher_type="Proforma Invoice",
+                   entries=[{"ledger": "Acme Traders", "debit": "5900"}, {"ledger": "Sales", "credit": "5000"},
+                            {"ledger": "Output IGST", "credit": "900"}]).status_code == 201
+    r = client.get(f"/api/v1/reports/register?company_id={books}&base_type=Sales&from_date=2026-04-01&to_date=2026-04-30",
+                   headers=admin).json()
+    assert [(v["amount"], v["tax"]) for v in r["vouchers"]] == [("11800.00", "1800.00")]
+    assert r["total"] == "11800.00" and r["not_included"] == [{"voucher_type": "Proforma Invoice", "vouchers": 1}]

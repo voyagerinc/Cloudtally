@@ -342,16 +342,34 @@ def outstanding(db: Session, company_id: uuid.UUID, as_of: date, kind: str = "re
             "total": m(sum(totals.values(), ZERO))}
 
 
+def _is_tax_ledger(ledger, groups: dict) -> bool:
+    """GST/TDS ledgers. Tally marks ordinary ledgers with tax type "Others", so that alone means nothing."""
+    if ledger.gst_duty_head or (ledger.tax_type and ledger.tax_type != "Others"):
+        return True
+    g = groups.get(ledger.group_id)
+    return bool(g) and any(name == "Duties & Taxes" for name in g["path"])
+
+
 def register(db: Session, company_id: uuid.UUID, base_type: str, from_date: date, to_date: date) -> dict:
+    """Like Tally's Sales/Purchase Register: each voucher at its invoice value (the party's amount), with its
+    GST. Proforma invoices, quotations and estimates are memos there, so they are left out here too."""
+    from app.reports.analysis import MEMO_TYPE
     stmt = (select(Voucher).join(VoucherType)
             .where(Voucher.company_id == company_id, Voucher.status == POSTED, VoucherType.base_type == base_type,
-                   Voucher.voucher_date.between(from_date, to_date)).order_by(Voucher.voucher_date))
-    rows, total = [], ZERO
+                   Voucher.voucher_date.between(from_date, to_date)).order_by(Voucher.voucher_date, Voucher.voucher_number))
+    groups = _groups(db, company_id)
+    rows, total, tax_total, left_out = [], ZERO, ZERO, defaultdict(int)
     for v in db.scalars(stmt):
-        amount = sum((e.amount for e in v.entries if e.amount > 0), ZERO)
-        tax = sum((abs(e.amount) for e in v.entries if e.ledger.tax_type or e.ledger.gst_duty_head), ZERO)
+        if MEMO_TYPE.search(v.voucher_type.name):
+            left_out[v.voucher_type.name] += 1
+            continue
+        party = [e.amount for e in v.entries if v.party_ledger_id and e.ledger_id == v.party_ledger_id]
+        amount = abs(sum(party, ZERO)) if party else sum((e.amount for e in v.entries if e.amount > 0), ZERO)
+        tax = sum((abs(e.amount) for e in v.entries if _is_tax_ledger(e.ledger, groups)), ZERO)
         total += amount
+        tax_total += tax
         rows.append({"id": str(v.id), "date": str(v.voucher_date), "voucher_number": v.voucher_number,
                      "voucher_type": v.voucher_type.name, "party": v.party_ledger.name if v.party_ledger else None,
                      "gstin": v.party_ledger.gstin if v.party_ledger else None, "amount": m(amount), "tax": m(tax)})
-    return {"base_type": base_type, "from": str(from_date), "to": str(to_date), "vouchers": rows, "total": m(total)}
+    return {"base_type": base_type, "from": str(from_date), "to": str(to_date), "vouchers": rows, "total": m(total),
+            "tax_total": m(tax_total), "not_included": [{"voucher_type": k, "vouchers": n} for k, n in sorted(left_out.items())]}
