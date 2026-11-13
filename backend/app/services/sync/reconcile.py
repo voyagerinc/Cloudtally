@@ -46,21 +46,41 @@ def run(db: Session, company: Company, conn: TallyConnector, client: TallyClient
 
 def _compare(db: Session, company: Company, client: TallyClient, from_date: date, to_date: date,
              compare_ledgers: bool) -> dict:
-    in_range = [r.master_id for r in client.voucher_index() if r.date and from_date <= r.date <= to_date]
-    tally = [t for found in client.vouchers_in_batches(in_range) for t in found if not t.is_deleted]
     erp = db.scalars(select(Voucher).where(
         Voucher.company_id == company.id, Voucher.voucher_date.between(from_date, to_date),
         Voucher.status.in_([VoucherStatus.POSTED, VoucherStatus.CANCELLED]))).all()
     maps = {mp.erp_id: mp for mp in db.scalars(select(TallyMapping).where(
         TallyMapping.company_id == company.id, TallyMapping.entity_type == "voucher"))}
-    by_guid = {t.guid: t for t in tally}
+    erp_by_id = {v.id: v for v in erp}
+    by_master = {mp.tally_master_id: mp for mp in maps.values() if mp.tally_master_id}
+
+    # Only what changed is read in full. A voucher whose AlterID in Tally is the one we stored has not been
+    # touched since; reading thousands of full vouchers is what used to make Tally time out and hang.
+    index = [r for r in client.voucher_index() if r.date and from_date <= r.date <= to_date]
+    unchanged: dict[int, Voucher] = {}
+    to_fetch = []
+    for r in index:
+        mp = by_master.get(r.master_id)
+        v = erp_by_id.get(mp.erp_id) if mp else None
+        if v is not None and mp.tally_alter_id == r.alter_id:
+            unchanged[r.master_id] = v
+        else:
+            to_fetch.append(r.master_id)
+    fetched = [t for found in client.vouchers_in_batches(to_fetch) for t in found if not t.is_deleted] if to_fetch else []
+    by_master_tally = {t.master_id: t for t in fetched}
+    in_tally = set(unchanged) | set(by_master_tally)
 
     totals = defaultdict(lambda: {"tally_count": 0, "erp_count": 0, "tally_amount": ZERO, "erp_amount": ZERO})
-    for t in tally:
+    for t in fetched:
         if not t.doc["is_cancelled"]:
             row = totals[t.doc["voucher_type"]]
             row["tally_count"] += 1
             row["tally_amount"] += _tally_total(t.doc)
+    for v in unchanged.values():          # identical in Tally: same type, status and amount
+        if v.status == VoucherStatus.POSTED:
+            row = totals[v.voucher_type.name]
+            row["tally_count"] += 1
+            row["tally_amount"] += voucher_total(v)
     for v in erp:
         if v.status == VoucherStatus.POSTED:
             row = totals[v.voucher_type.name]
@@ -68,17 +88,20 @@ def _compare(db: Session, company: Company, client: TallyClient, from_date: date
             row["erp_amount"] += voucher_total(v)
 
     missing_in_tally, content_mismatch, status_mismatch = [], [], []
-    seen_guids = set()
+    matched_masters = set()
     for v in erp:
         mp = maps.get(v.id)
-        t = by_guid.get(mp.tally_guid) if mp and mp.tally_guid else None
+        master = mp.tally_master_id if mp else None
         ident = {"erp_id": str(v.id), "voucher_type": v.voucher_type.name, "voucher_number": v.voucher_number,
                  "date": str(v.voucher_date)}
-        if t is None:
+        if master is None or master not in in_tally:
             if v.status == VoucherStatus.POSTED:
                 missing_in_tally.append({**ident, "reason": "not mapped" if not mp else "mapped voucher not found in Tally"})
             continue
-        seen_guids.add(t.guid)
+        matched_masters.add(master)
+        t = by_master_tally.get(master)
+        if t is None:                     # unchanged since we stored it
+            continue
         if (v.status == VoucherStatus.CANCELLED) != bool(t.doc["is_cancelled"]):
             status_mismatch.append({**ident, "erp_status": v.status, "tally_cancelled": t.doc["is_cancelled"]})
         elif v.status == VoucherStatus.POSTED and content_hash(t.doc) != v.content_hash:
@@ -86,7 +109,7 @@ def _compare(db: Session, company: Company, client: TallyClient, from_date: date
     missing_in_erp = [
         {"tally_guid": t.guid, "master_id": t.master_id, "voucher_type": t.doc["voucher_type"],
          "voucher_number": t.doc["voucher_number"], "date": t.doc["date"], "amount": m(_tally_total(t.doc))}
-        for t in tally if t.guid not in seen_guids and not t.doc["is_cancelled"]
+        for t in fetched if t.master_id not in matched_masters and not t.doc["is_cancelled"]
     ]
 
     ledger_differences = []
@@ -117,4 +140,5 @@ def _compare(db: Session, company: Company, client: TallyClient, from_date: date
         "content_mismatch": content_mismatch,
         "status_mismatch": status_mismatch,
         "ledger_differences": ledger_differences,
+        "read_from_tally": {"vouchers_in_range": len(index), "read_in_full": len(to_fetch), "unchanged": len(unchanged)},
     }

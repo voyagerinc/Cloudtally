@@ -1,4 +1,5 @@
 """Tally XML-over-HTTP client (PRD §6.2). Only supported interfaces are used; no file access."""
+import threading
 import time
 from dataclasses import dataclass
 from datetime import date
@@ -23,6 +24,23 @@ class Exchange:
     duration_ms: int
 
 
+class _Gate:
+    """One per Tally address: our requests take turns, and after a timeout we wait for Tally to recover."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.recovering = False     # a request timed out; Tally may still be working on it
+
+
+_gates: dict[str, _Gate] = {}
+_gates_lock = threading.Lock()
+
+
+def _gate(url: str) -> _Gate:
+    with _gates_lock:
+        return _gates.setdefault(url, _Gate())
+
+
 class TallyClient:
     def __init__(self, host: str, port: int, company: str, *, timeout: float | None = None,
                  transport: httpx.BaseTransport | None = None):
@@ -44,6 +62,36 @@ class TallyClient:
     # ------------------------------------------------------------ transport
 
     def post(self, xml: str) -> str:
+        gate = _gate(self.url)
+        if not gate.lock.acquire(timeout=settings.tally_queue_seconds):
+            raise TallyError(ErrorCode.CONNECTIVITY, "Tally is still busy with an earlier request from Tally Cloud. "
+                             "Nothing more was sent; it continues later.", request_xml=xml)
+        try:
+            self._wait_for_recovery(gate, xml)
+            return self._send(xml, gate)
+        finally:
+            gate.lock.release()
+
+    def _wait_for_recovery(self, gate: _Gate, xml: str) -> None:
+        """After a timeout, send nothing until Tally answers again: a request queued behind the one it is
+        still working on is what makes Tally hang."""
+        if not gate.recovering:
+            return
+        deadline = time.monotonic() + settings.tally_recovery_seconds
+        while True:
+            try:
+                if self._http.get(self.url, timeout=5.0).status_code == 200:
+                    gate.recovering = False
+                    return
+            except httpx.HTTPError:
+                pass
+            if time.monotonic() >= deadline:
+                raise TallyError(ErrorCode.CONNECTIVITY, "Tally has not finished an earlier request yet and does "
+                                 "not answer. Nothing more was sent; sync continues once Tally is free.",
+                                 request_xml=xml)
+            time.sleep(5)
+
+    def _send(self, xml: str, gate: _Gate) -> str:
         started = time.monotonic()
         try:
             resp = self._http.post(self.url, content=xml.encode("utf-8"),
@@ -51,6 +99,8 @@ class TallyClient:
         except httpx.ConnectError as exc:
             raise TallyError(ErrorCode.CONNECTIVITY, f"Cannot reach Tally at {self.url}: {exc}", request_xml=xml)
         except httpx.TimeoutException as exc:
+            if not isinstance(exc, httpx.ConnectTimeout):
+                gate.recovering = True      # Tally is probably still working on this request
             # A write may have been applied even though we never saw the answer.
             raise TallyError(ErrorCode.CONNECTIVITY, f"Tally timed out after {self.timeout}s: {exc!r}",
                              outcome_unknown=not isinstance(exc, httpx.ConnectTimeout), request_xml=xml)

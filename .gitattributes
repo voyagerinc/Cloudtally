@@ -3,3 +3,5 @@
 *.conf text eol=lf
 *.ps1 text eol=crlf
 *.path text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf

@@ -14,9 +14,9 @@ class Settings(BaseSettings):
     # At most one voucher change scan per company this often (a scan costs a large Tally ~15 s); an
     # amendment made in Tally reaches the ERP within this time. Only runs when Tally's counter moved.
     sync_voucher_scan_seconds: int = 120
-    sync_voucher_batch_size: int = 200     # full vouchers fetched from Tally per request
+    sync_voucher_batch_size: int = 50      # full vouchers per Tally request (about 2 MB; 200 made Tally time out)
     sync_voucher_batch_pause: float = 2.0  # seconds between those requests, so Tally stays usable
-    sync_voucher_max_batches: int = 5      # per sync pass; a larger backlog continues on the next passes
+    sync_voucher_max_batches: int = 10     # per sync pass; a larger backlog continues on the next passes
     auto_sync: bool = True                 # the API server syncs every company on its own while Tally is open
     sync_backlog_pause: float = 5.0        # seconds between passes while a backlog is being worked through
     sync_batch_size: int = 50
@@ -26,6 +26,10 @@ class Settings(BaseSettings):
 
     # Tally connector
     tally_timeout: float = 60.0
+    # Tally answers one request at a time and keeps working on one we stopped waiting for. So requests to a
+    # Tally wait their turn, and after a timeout nothing more is sent until Tally answers again.
+    tally_queue_seconds: float = 600.0     # longest wait for our own earlier request to that Tally to finish
+    tally_recovery_seconds: float = 180.0  # longest wait, after a timeout, for Tally to answer again
     session_idle_hours: float = 12.0       # a signed-in browser is signed out after this long without use
     session_max_days: float = 30.0         # ... and after this long in any case
     seat_idle_minutes: int = 15            # a licence seat is freed this long after the browser was last active

@@ -778,3 +778,87 @@ def test_auto_sync_switch(db, company):
     r = api.put("/api/v1/sync/auto", json={"enabled": False})
     assert r.status_code == 200 and r.json()["enabled"] is False and auto_sync.paused
     assert api.get(f"/api/v1/sync/dashboard?company_id={company.id}").json()["auto_sync"]["enabled"] is False
+
+
+def test_reconcile_reads_only_vouchers_changed_in_tally(db, company, tc):
+    """Reading every voucher in full made Tally time out and hang; unchanged ones are compared by AlterID."""
+    from app.services.sync import reconcile, common
+    post(db, company)
+    sync()
+    mp = db.scalar(select(TallyMapping).where(TallyMapping.company_id == company.id, TallyMapping.entity_type == "voucher"))
+    mp.tally_alter_id = int(tc.vouchers[mp.tally_master_id].findtext("ALTERID"))   # as stored after a sync
+    db.commit()
+    conn = db.get(TallyConnector, company.id)
+    client = common.client_for(conn)
+    span = (date(2026, 4, 1), date(2027, 3, 31))
+    run = reconcile.run(db, company, conn, client, *span, USER)
+    assert run.status == "matched", run.result
+    read = run.result["read_from_tally"]
+    assert read["vouchers_in_range"] >= 1 and read["read_in_full"] == 0 and read["unchanged"] == read["vouchers_in_range"]
+
+    # Somebody alters the voucher in Tally: only that one is read in full, and the difference is found.
+    def alter(el):
+        n = el.find("NARRATION")
+        n.text = "changed in Tally"
+    tc.edit_voucher(mp.tally_master_id, alter)
+    run = reconcile.run(db, company, conn, client, *span, USER)
+    client.close()
+    assert run.result["read_from_tally"]["read_in_full"] == 1
+    assert len(run.result["content_mismatch"]) == 1, run.result
+
+
+def test_requests_to_one_tally_take_turns_and_wait_after_a_timeout(monkeypatch):
+    import threading
+    import time as _time
+    import httpx
+    from app.connectors.tally import client as tc_mod
+    from app.connectors.tally.errors import TallyError
+    from app.core.config import settings
+
+    busy = {"now": 0, "most": 0, "posts": 0, "gets": 0, "timeout_once": True, "answer_after_gets": 2}
+    lock = threading.Lock()
+
+    def handler(request: httpx.Request):
+        if request.method == "GET":
+            busy["gets"] += 1
+            if busy["gets"] <= busy["answer_after_gets"]:
+                raise httpx.ReadTimeout("still working", request=request)
+            return httpx.Response(200, text="<RESPONSE>TallyPrime Server is Running</RESPONSE>")
+        with lock:
+            busy["now"] += 1
+            busy["most"] = max(busy["most"], busy["now"])
+            busy["posts"] += 1
+        try:
+            if busy["timeout_once"]:
+                busy["timeout_once"] = False
+                raise httpx.ReadTimeout("no answer", request=request)
+            real_sleep(0.05)
+            return httpx.Response(200, text="<ENVELOPE></ENVELOPE>")
+        finally:
+            with lock:
+                busy["now"] -= 1
+
+    monkeypatch.setattr(settings, "tally_recovery_seconds", 30)
+    real_sleep = _time.sleep
+    monkeypatch.setattr(tc_mod.time, "sleep", lambda s: real_sleep(0.01))
+    url_port = 59999
+    tc_mod._gates.pop(f"http://gate-test:{url_port}", None)
+    make = lambda: tc_mod.TallyClient("gate-test", url_port, "Co", transport=httpx.MockTransport(handler))
+
+    with make() as c:
+        with pytest.raises(TallyError, match="timed out"):
+            c.post("<ENVELOPE/>")
+    assert busy["posts"] == 1
+    # The next request first waits until Tally answers again (2 unanswered checks), then goes out.
+    with make() as c:
+        assert c.post("<ENVELOPE/>")
+    assert busy["gets"] == 3 and busy["posts"] == 2
+
+    # Several syncs at once: never more than one request at a time to that Tally.
+    def worker():
+        with make() as c:
+            c.post("<ENVELOPE/>")
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert busy["most"] == 1 and busy["posts"] == 8
