@@ -161,10 +161,26 @@
       <option value="outstanding-payable" data-report="payables">Payables (ageing)</option>
       <option value="register-Sales" data-report="sales-register">Sales Register</option>
       <option value="register-Purchase" data-report="purchase-register">Purchase Register</option>
+      <option value="sales-analysis" data-report="sales-analysis">Sales analysis</option>
+      <option value="purchase-analysis" data-report="purchase-analysis">Purchase analysis</option>
+      <option value="sales-rm-cost" data-report="sales-rm-cost">Sales with raw-material cost</option>
+      <option value="fifo-costing" data-report="fifo-costing">Stock costing (FIFO)</option>
     </select>
     <input type="date" id="r-from"><input type="date" id="r-to"><button>Show</button>
     <a id="r-csv" class="button secondary" href="#">CSV</a>
   </form>
+  <div id="ra-filters" class="row filters wrap" hidden>
+    <label id="ra-by-label">View by<select id="ra-by">
+      <option value="party">Party</option><option value="date">Date</option><option value="month">Month</option>
+      <option value="item">Item</option><option value="category">Item category</option>
+      <option value="stock_group">Stock group</option><option value="voucher">Each voucher</option></select></label>
+    <label id="ra-party-label">Party<input id="ra-party" list="ra-parties" placeholder="all parties"></label>
+    <label>Item<input id="ra-item" list="ra-items" placeholder="all items"></label>
+    <label>Item category<select id="ra-cat"><option value="">all</option></select></label>
+    <label>Stock group<select id="ra-group"><option value="">all</option></select></label>
+    <label class="check" id="ra-returns-label"><input type="checkbox" id="ra-returns" checked> Deduct returns</label>
+    <datalist id="ra-parties"></datalist><datalist id="ra-items"></datalist>
+  </div>
   <div id="r-out"></div>
 </section>
 

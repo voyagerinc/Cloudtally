@@ -610,9 +610,133 @@ function reportUrl(fmt) {
   if (name.startsWith("register-")) { path = "register"; p.set("base_type", name.split("-")[1]); }
   if (["balance-sheet", "outstanding"].includes(path)) { if (t) p.set("as_of", t); }
   else { if (f) p.set("from_date", f); if (t) p.set("to_date", t); }
+  if (name in ANALYSIS || name === "fifo-costing") {
+    for (const [k, v] of Object.entries(analysisParams())) p.set(k, v);
+    if (name in ANALYSIS) p.set("by", $("#ra-by").value);
+  }
   if (fmt) p.set("format", fmt);
   return `/reports/${path}?${p}`;
 }
+
+// ------------------------------------------------------------------ sales / purchase analysis, FIFO costing
+const ANALYSIS = { "sales-analysis": "Sales", "purchase-analysis": "Purchases", "sales-rm-cost": "Sales" };
+let raFilters = null;            // {company, parties, items, categories, stock_groups}
+async function loadAnalysisFilters() {
+  if (raFilters && raFilters.company === state.company) return raFilters;
+  const f = await api(`/reports/filters?company_id=${state.company}`);
+  raFilters = { company: state.company, ...f };
+  $("#ra-parties").innerHTML = f.parties.map((x) => `<option value="${esc(x.name)}">`).join("");
+  $("#ra-items").innerHTML = f.items.map((x) => `<option value="${esc(x.name)}">`).join("");
+  $("#ra-cat").innerHTML = `<option value="">all</option>` + f.categories.map((c) => `<option>${esc(c)}</option>`).join("");
+  $("#ra-group").innerHTML = `<option value="">all</option>` + f.stock_groups.map((g) => `<option value="${esc(g.id)}">${esc(g.name)}</option>`).join("");
+  return raFilters;
+}
+function showAnalysisControls() {
+  const name = $("#r-name").value;
+  const trade = name in ANALYSIS, fifo = name === "fifo-costing";
+  $("#ra-filters").hidden = !(trade || fifo);
+  ["#ra-by-label", "#ra-party-label", "#ra-returns-label"].forEach((id) => ($(id).hidden = !trade));
+  if (name === "sales-rm-cost" && $("#ra-by").dataset.touched !== "1") $("#ra-by").value = "item";
+  if (trade || fifo) loadAnalysisFilters().catch(() => {});
+}
+$("#r-name").addEventListener("change", showAnalysisControls);
+$("#ra-by").addEventListener("change", (e) => (e.target.dataset.touched = "1"));
+function analysisParams() {
+  const f = raFilters || { parties: [], items: [] };
+  const id = (list, name) => (list.find((x) => x.name === name) || {}).id;
+  const p = {};
+  const party = $("#ra-party").value.trim(), item = $("#ra-item").value.trim();
+  if (party) p.party = id(f.parties, party) || "00000000-0000-0000-0000-000000000000";
+  if (item) p.item = id(f.items, item) || "00000000-0000-0000-0000-000000000000";
+  if ($("#ra-cat").value) p.category = $("#ra-cat").value;
+  if ($("#ra-group").value) p.stock_group = $("#ra-group").value;
+  if (!$("#ra-returns").checked) p.include_returns = "false";
+  return p;
+}
+const qtyText = (q, unit) => (q == null ? "" : `${Number(q).toLocaleString("en-IN", { maximumFractionDigits: 3 })}${unit ? " " + esc(unit) : ""}`);
+const BY_LABEL = { party: "Party", date: "Date", month: "Month", item: "Item", category: "Item category",
+  stock_group: "Stock group", voucher: "Voucher" };
+
+async function analysisView(el, report, fixed = {}) {
+  await loadAnalysisFilters();
+  const by = fixed.by || $("#ra-by").value;
+  const p = rParams({ ...analysisParams(), by });
+  for (const [k, v] of Object.entries(fixed)) p.set(k, v);
+  const r = await api(`/reports/${report}?${p}`);
+  const rm = report === "sales-rm-cost";
+  const counted = r.voucher_types.filter((t) => t.counted).map((t) => t.name).join(", ");
+  const left = r.voucher_types.filter((t) => !t.counted).map((t) => t.name).join(", ");
+  el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · ${esc(counted || "no voucher types")}`
+    + `${left ? ` (not counted: ${esc(left)})` : ""}${r.include_returns ? " · returns deducted" : ""}`
+    + `${by === "voucher" ? " · click a voucher to open it" : " · click a row for its vouchers"}</p>`
+    + `${rm ? `<p class="small muted">Raw-material cost: what the components of each sold item cost in its production vouchers
+       (weighted average up to the sale date); labour and other costs are not included.</p>` : ""}<table id="t"></table>`;
+  const rmCols = rm ? [
+    { label: "Raw-material cost", num: true, get: (x) => (x.rm_cost == null ? "—" : money(x.rm_cost)) },
+    { label: "Margin", num: true, get: (x) => (x.margin == null ? "—" : money(x.margin)) },
+    ...(by === "voucher" ? [{ label: "RM cost / unit", num: true, get: (x) => (x.rm_cost_per_unit == null ? "no production" : money(x.rm_cost_per_unit)) }]
+      : [{ label: "Margin %", num: true, get: (x) => (x.margin_pct == null ? "" : `${x.margin_pct}%`) }]),
+  ] : [];
+  const tot = { ...r.total, _class: "total" };
+  if (by === "voucher") {
+    table($("#t"), [
+      { label: "Date", key: "date" }, { label: "Voucher", get: (x) => (x.voucher_type ? `${x.voucher_type} ${x.voucher_number}` : "Total") },
+      { label: "Party", key: "party", wrap: true }, { label: "Item", key: "item", wrap: true },
+      { label: "Quantity", num: true, get: (x) => qtyText(x.quantity, x.unit) }, { label: "Rate", num: true, get: (x) => (x.rate ? money(x.rate) : "") },
+      { label: "Value", num: true, get: (x) => money(x.value) }, ...rmCols,
+    ], [...r.lines, tot], (x) => x.voucher_id && drillTo(`${x.voucher_type} ${x.voucher_number}`, (el2) => voucherView(el2, x.voucher_id)));
+    return;
+  }
+  const qtyCol = ["item", "category", "stock_group"].includes(by)
+    ? [{ label: "Quantity", num: true, get: (x) => qtyText(x.quantity, x.unit) }] : [];
+  table($("#t"), [
+    { label: BY_LABEL[by], get: (x) => x.name ?? "Total", wrap: true }, { label: "Vouchers", num: true, key: "vouchers" },
+    ...qtyCol, { label: "Value", num: true, get: (x) => money(x.value) }, ...rmCols,
+  ], [...r.rows, tot], (x) => {
+    if (x._class === "total") return;
+    const next = { by: "voucher" };
+    if (by === "party") next.party = x.key;
+    else if (by === "item") next.item = x.key;
+    else if (by === "category") next.category = x.key;
+    else if (by === "stock_group") next.stock_group = x.key;
+    else if (by === "date") { next.from_date = x.key; next.to_date = x.key; }
+    else if (by === "month") {
+      const [y, mth] = x.key.split("-").map(Number);
+      next.from_date = x.key + "-01"; next.to_date = new Date(Date.UTC(y, mth, 0)).toISOString().slice(0, 10);
+    }
+    drillTo(x.name, (el2) => analysisView(el2, report, { ...fixed, ...next }));
+  });
+}
+
+async function fifoView(el) {
+  await loadAnalysisFilters();
+  const r = await api(`/reports/fifo-costing?${rParams(analysisParams())}`);
+  el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · valued first-in-first-out: every issue takes the cost of the
+    oldest stock still on hand · gross profit counts sales only · click an item for its movements</p>
+    <p><input id="fifo-q" placeholder="Search item"></p><table id="t"></table>`;
+  const draw = () => {
+    const q = $("#fifo-q").value.trim().toLowerCase();
+    const rows = r.items.filter((x) => !q || x.item.toLowerCase().includes(q));
+    table($("#t"), [
+      { label: "Item", key: "item", wrap: true }, { label: "Stock group", key: "stock_group" },
+      { label: "Opening", num: true, get: (x) => (x.item ? qtyText(x.opening_qty, x.unit) : "") },
+      { label: "Opening value", num: true, get: (x) => money(x.opening_value) },
+      { label: "In", num: true, get: (x) => (x.item ? qtyText(x.in_qty, x.unit) : "") },
+      { label: "In value", num: true, get: (x) => money(x.in_value) },
+      { label: "Out", num: true, get: (x) => (x.item ? qtyText(x.out_qty, x.unit) : "") },
+      { label: "Out at FIFO cost", num: true, get: (x) => money(x.out_cost) },
+      { label: "Sales value", num: true, get: (x) => money(x.sold_value) },
+      { label: "Gross profit", num: true, get: (x) => money(x.gross_profit) },
+      { label: "Closing", num: true, get: (x) => (x.item ? qtyText(x.closing_qty, x.unit) : "") },
+      { label: "Closing value", num: true, get: (x) => money(x.closing_value) },
+      { label: "Rate", num: true, get: (x) => (x.closing_rate ? money(x.closing_rate) : "") },
+      { label: "", html: (x) => (x.short_qty ? `<span class="chip failed" title="Issued more than was in stock">short ${esc(x.short_qty)}</span>` : "") },
+    ], [...rows, { ...r.total, _class: "total" }], (x) => x.item_id && drillTo(x.item, (el2) => stockItemView(el2, x.item_id)));
+  };
+  $("#fifo-q").oninput = draw;
+  draw();
+}
+
 $("#rform").onsubmit = (e) => { e.preventDefault(); renderers.reports(); };
 $("#r-csv").onclick = (e) => { e.preventDefault(); download(reportUrl("csv"), `${$("#r-name").value}.csv`); };
 
@@ -696,12 +820,17 @@ const amountCol = [{ label: "Amount", num: true, get: (n) => (n.amount == null ?
 // ---------------------------------------------------------------- the reports
 renderers.reports = async () => {
   const name = $("#r-name").value;
+  showAnalysisControls();
   nav.length = 0;
   const label = $("#r-name").selectedOptions[0].textContent;
   const roots = {
     "trial-balance": trialBalanceView, "profit-loss": profitLossView, "balance-sheet": balanceSheetView,
     "day-book": dayBookView, "stock-summary": stockSummaryView, outstanding: (el) => outstandingView(el, "receivable"),
     "outstanding-payable": (el) => outstandingView(el, "payable"),
+    "sales-analysis": (el) => analysisView(el, "sales-analysis"),
+    "purchase-analysis": (el) => analysisView(el, "purchase-analysis"),
+    "sales-rm-cost": (el) => analysisView(el, "sales-rm-cost"),
+    "fifo-costing": fifoView,
   };
   await drillTo(label, roots[name] || ((el) => registerView(el, name.split("-")[1])));
 };

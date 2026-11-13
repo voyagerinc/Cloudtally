@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from app import audit, reports
+from app.reports import analysis
 from app.api.deps import DB, CurrentUser, actor_of, authorize
 from app.core.security import Perm
 from app.models import FinancialYear
@@ -19,6 +20,7 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 CSV_ROWS = {
     "trial-balance": "lines", "day-book": "vouchers", "ledger": "lines", "stock-summary": "items",
     "outstanding": "bills", "register": "vouchers", "ledger-balances": None, "stock-item": "lines",
+    "sales-analysis": "rows", "purchase-analysis": "rows", "sales-rm-cost": "rows", "fifo-costing": "items",
 }
 
 
@@ -140,3 +142,85 @@ def register(company_id: uuid.UUID, db: DB, user: CurrentUser, base_type: str = 
     authorize(db, user, company_id, Perm.report(f"{base_type.lower().replace(' ', '-')}-register"))
     f, t = _default_period(db, company_id, from_date, to_date)
     return _respond(db, user, company_id, "register", reports.register(db, company_id, base_type, f, t), format)
+
+
+By = Literal["party", "date", "month", "item", "category", "stock_group", "voucher"]
+
+
+def _analysis(db, user, company_id, report: str, side: str, from_date, to_date, by, party, item, category,
+              stock_group, voucher_types, include_returns, format, rm: bool):
+    authorize(db, user, company_id, Perm.report(report))
+    f, t = _default_period(db, company_id, from_date, to_date)
+    types = [x.strip() for x in voucher_types.split(",") if x.strip()] if voucher_types else None
+    data = analysis.trade_analysis(db, company_id, side, f, t, by=by, party=party, item=item, category=category,
+                                   stock_group=stock_group, voucher_types=types, include_returns=include_returns,
+                                   raw_material_cost=rm)
+    if format == "csv" and by == "voucher":
+        data = {**data, "rows": data["lines"]}
+    return _respond(db, user, company_id, report, data, format)
+
+
+@router.get("/sales-analysis")
+def sales_analysis(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                   to_date: date | None = None, by: By = "party", party: uuid.UUID | None = None,
+                   item: uuid.UUID | None = None, category: str | None = None, stock_group: uuid.UUID | None = None,
+                   voucher_types: str | None = None, include_returns: bool = True, format: Fmt = "json"):
+    """Sales by party, date, month, item, item category or stock group (credit notes count negative)."""
+    return _analysis(db, user, company_id, "sales-analysis", "sales", from_date, to_date, by, party, item, category,
+                     stock_group, voucher_types, include_returns, format, rm=False)
+
+
+@router.get("/purchase-analysis")
+def purchase_analysis(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                      to_date: date | None = None, by: By = "party", party: uuid.UUID | None = None,
+                      item: uuid.UUID | None = None, category: str | None = None, stock_group: uuid.UUID | None = None,
+                      voucher_types: str | None = None, include_returns: bool = True, format: Fmt = "json"):
+    """Purchases by party, date, month, item, item category or stock group (debit notes count negative)."""
+    return _analysis(db, user, company_id, "purchase-analysis", "purchase", from_date, to_date, by, party, item,
+                     category, stock_group, voucher_types, include_returns, format, rm=False)
+
+
+@router.get("/sales-rm-cost")
+def sales_raw_material_cost(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                            to_date: date | None = None, by: By = "item", party: uuid.UUID | None = None,
+                            item: uuid.UUID | None = None, category: str | None = None,
+                            stock_group: uuid.UUID | None = None, voucher_types: str | None = None,
+                            include_returns: bool = True, format: Fmt = "json"):
+    """Sales with the raw-material cost of what was sold, from its production vouchers, and the margin."""
+    return _analysis(db, user, company_id, "sales-rm-cost", "sales", from_date, to_date, by, party, item, category,
+                     stock_group, voucher_types, include_returns, format, rm=True)
+
+
+@router.get("/fifo-costing")
+def fifo_costing(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                 to_date: date | None = None, item: uuid.UUID | None = None, category: str | None = None,
+                 stock_group: uuid.UUID | None = None, format: Fmt = "json"):
+    """Opening, inward, outward and closing stock per item, valued first-in-first-out."""
+    authorize(db, user, company_id, Perm.report("fifo-costing"))
+    f, t = _default_period(db, company_id, from_date, to_date)
+    data = analysis.fifo_costing(db, company_id, f, t, item=item, category=category, stock_group=stock_group)
+    return _respond(db, user, company_id, "fifo-costing", data, format)
+
+
+@router.get("/filters")
+def report_filters(company_id: uuid.UUID, db: DB, user: CurrentUser):
+    """Choices for the analysis filters: parties, items, item categories and stock groups."""
+    from sqlalchemy import func
+    from app.core.security import has_perm
+    from app.models import Ledger, StockGroup, StockItem, Voucher
+    allowed = [k for k in ("sales-analysis", "purchase-analysis", "fifo-costing", "sales-rm-cost")
+               if has_perm(db, user, company_id, Perm.report(k))]
+    authorize(db, user, company_id, Perm.report(allowed[0] if allowed else "sales-analysis"))
+    parties = db.execute(select(Ledger.id, Ledger.name).where(
+        Ledger.company_id == company_id,
+        Ledger.id.in_(select(Voucher.party_ledger_id).where(Voucher.company_id == company_id).distinct()))
+        .order_by(func.lower(Ledger.name))).all()
+    items = db.execute(select(StockItem.id, StockItem.name).where(StockItem.company_id == company_id)
+                       .order_by(func.lower(StockItem.name))).all()
+    cats = db.scalars(select(StockItem.category).where(StockItem.company_id == company_id, StockItem.category.is_not(None))
+                      .distinct().order_by(StockItem.category)).all()
+    groups = db.execute(select(StockGroup.id, StockGroup.name).where(StockGroup.company_id == company_id)
+                        .order_by(func.lower(StockGroup.name))).all()
+    return {"parties": [{"id": str(i), "name": n} for i, n in parties],
+            "items": [{"id": str(i), "name": n} for i, n in items],
+            "categories": list(cats), "stock_groups": [{"id": str(i), "name": n} for i, n in groups]}
