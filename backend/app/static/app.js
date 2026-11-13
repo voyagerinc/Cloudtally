@@ -619,7 +619,11 @@ function reportUrl(fmt) {
 }
 
 // ------------------------------------------------------------------ sales / purchase analysis, FIFO costing
-const ANALYSIS = { "sales-analysis": "Sales", "purchase-analysis": "Purchases", "sales-rm-cost": "Sales" };
+const ANALYSIS = { "sales-analysis": "Sales", "purchase-analysis": "Purchases", "sales-rm-cost": "Sales",
+  "sales-fifo-cost": "Sales" };
+// Reports with a cost column, and the view they open in.
+const COSTED = { "sales-rm-cost": { label: "Raw-material cost", by: "item", none: "no production" },
+  "sales-fifo-cost": { label: "FIFO cost", by: "voucher", none: "no stock movement" } };
 let raFilters = null;            // {company, parties, items, categories, stock_groups}
 async function loadAnalysisFilters() {
   if (raFilters && raFilters.company === state.company) return raFilters;
@@ -636,7 +640,7 @@ function showAnalysisControls() {
   const trade = name in ANALYSIS, fifo = name === "fifo-costing";
   $("#ra-filters").hidden = !(trade || fifo);
   ["#ra-by-label", "#ra-party-label", "#ra-returns-label"].forEach((id) => ($(id).hidden = !trade));
-  if (name === "sales-rm-cost" && $("#ra-by").dataset.touched !== "1") $("#ra-by").value = "item";
+  if (COSTED[name] && $("#ra-by").dataset.touched !== "1") $("#ra-by").value = COSTED[name].by;
   if (trade || fifo) loadAnalysisFilters().catch(() => {});
 }
 $("#r-name").addEventListener("change", showAnalysisControls);
@@ -663,19 +667,21 @@ async function analysisView(el, report, fixed = {}) {
   const p = rParams({ ...analysisParams(), by });
   for (const [k, v] of Object.entries(fixed)) p.set(k, v);
   const r = await api(`/reports/${report}?${p}`);
-  const rm = report === "sales-rm-cost";
+  const costed = COSTED[report];
   const counted = r.voucher_types.filter((t) => t.counted).map((t) => t.name).join(", ");
   const left = r.voucher_types.filter((t) => !t.counted).map((t) => t.name).join(", ");
   el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · ${esc(counted || "no voucher types")}`
     + `${left ? ` (not counted: ${esc(left)})` : ""}${r.include_returns ? " · returns deducted" : ""}`
     + `${by === "voucher" ? " · click a voucher to open it" : " · click a row for its vouchers"}</p>`
-    + `${rm ? `<p class="small muted">Raw-material cost: what the components of each sold item cost in its production vouchers
-       (weighted average up to the sale date); labour and other costs are not included.</p>` : ""}<table id="t"></table>`;
-  const rmCols = rm ? [
-    { label: "Raw-material cost", num: true, get: (x) => (x.rm_cost == null ? "—" : money(x.rm_cost)) },
-    { label: "Margin", num: true, get: (x) => (x.margin == null ? "—" : money(x.margin)) },
-    ...(by === "voucher" ? [{ label: "RM cost / unit", num: true, get: (x) => (x.rm_cost_per_unit == null ? "no production" : money(x.rm_cost_per_unit)) }]
-      : [{ label: "Margin %", num: true, get: (x) => (x.margin_pct == null ? "" : `${x.margin_pct}%`) }]),
+    + `${report === "sales-rm-cost" ? `<p class="small muted">Raw-material cost: what the components of each sold item cost in its
+       production vouchers (weighted average up to the sale date); labour and other costs are not included.</p>` : ""}`
+    + `${report === "sales-fifo-cost" ? `<p class="small muted">FIFO cost: each sale takes the cost of the oldest stock of that item
+       still on hand; returns come back at the cost they went out at.</p>` : ""}<table id="t"></table>`;
+  const rmCols = costed ? [
+    ...(by === "voucher" ? [{ label: "Cost / unit", num: true, get: (x) => (x.cost_per_unit == null ? (x.voucher_id ? costed.none : "") : money(x.cost_per_unit)) }] : []),
+    { label: costed.label, num: true, get: (x) => (x.cost == null ? "—" : money(x.cost)) },
+    { label: "Gross profit", num: true, get: (x) => (x.margin == null ? "—" : money(x.margin)) },
+    { label: "Margin %", num: true, get: (x) => (x.margin_pct == null ? "" : `${x.margin_pct}%`) },
   ] : [];
   const tot = { ...r.total, _class: "total" };
   if (by === "voucher") {
@@ -830,6 +836,7 @@ renderers.reports = async () => {
     "sales-analysis": (el) => analysisView(el, "sales-analysis"),
     "purchase-analysis": (el) => analysisView(el, "purchase-analysis"),
     "sales-rm-cost": (el) => analysisView(el, "sales-rm-cost"),
+    "sales-fifo-cost": (el) => analysisView(el, "sales-fifo-cost"),
     "fifo-costing": fifoView,
   };
   await drillTo(label, roots[name] || ((el) => registerView(el, name.split("-")[1])));

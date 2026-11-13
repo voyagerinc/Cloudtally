@@ -66,9 +66,9 @@ def test_sales_and_purchase_analysis_by_party_month_item_and_category(db, books)
 
 
 def test_raw_material_cost_comes_from_the_production_voucher(db, books):
-    r = analysis.trade_analysis(db, books.id, "sales", *SPAN, by="item", raw_material_cost=True)
+    r = analysis.trade_analysis(db, books.id, "sales", *SPAN, by="item", cost="rm")
     row = r["rows"][0]
-    assert (row["name"], row["value"], row["rm_cost"], row["margin"], row["margin_pct"]) == \
+    assert (row["name"], row["value"], row["cost"], row["margin"], row["margin_pct"]) == \
         ("Finished Cooler", "500.00", "200.00", "300.00", "60.00")      # 400 of components / 2 made = 200 each
 
 
@@ -95,3 +95,30 @@ def test_report_permissions_and_api(db, books):
     assert csv.status_code == 200 and "P-2" in csv.text
     f = api.get(f"/api/v1/reports/filters?company_id={books.id}", headers=h).json()
     assert "FINISH GOODS" in f["categories"] and any(p["name"] == "Acme Traders" for p in f["parties"])
+
+
+def test_sales_register_with_fifo_cost_and_a_return(db, books):
+    r = analysis.trade_analysis(db, books.id, "sales", *SPAN, by="voucher", cost="fifo")
+    line = r["lines"][0]
+    assert (line["item"], line["value"], line["cost_per_unit"], line["cost"], line["margin"], line["margin_pct"]) == \
+        ("Finished Cooler", "500.00", "200.00", "200.00", "300.00", "60.00")
+
+    # The customer returns it: the sale and its cost both come back out, and stock returns at cost, not at 500.
+    engine.create_voucher(db, books, {
+        "voucher_type": "Credit Note", "voucher_number": "CN-1", "date": "2026-06-20", "party_ledger": "Acme Traders",
+        "entries": [{"ledger": "Acme Traders", "amount": "-500"}, {"ledger": "Sales", "amount": "500"}],
+        "inventory": [{"item": "Finished Cooler", "quantity": "1", "rate": "500", "unit": "Nos", "ledger": "Sales"}]},
+        USER, action="post", source="tally")
+    r = analysis.trade_analysis(db, books.id, "sales", *SPAN, by="item", cost="fifo")
+    assert (r["total"]["value"], r["total"]["cost"], r["total"]["margin"]) == ("0.00", "0.00", "0.00")
+    cooler = next(i for i in analysis.fifo_costing(db, books.id, *SPAN)["items"] if i["item"] == "Finished Cooler")
+    assert (cooler["closing_qty"], cooler["closing_value"], cooler["gross_profit"]) == ("2", "400.00", "0.00")
+
+
+def test_sales_fifo_cost_api(db, books):
+    from app.core.security import hash_key
+    db.add(User(username="boss2", api_key_hash=hash_key("k-boss2"), is_superadmin=True))
+    db.commit()
+    r = TestClient(app).get(f"/api/v1/reports/sales-fifo-cost?company_id={books.id}&from_date=2026-04-01&to_date=2027-03-31",
+                            headers={"X-API-Key": "k-boss2"}).json()
+    assert r["by"] == "voucher" and r["total"]["cost"] == "200.00" and r["total"]["margin"] == "300.00"

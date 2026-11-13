@@ -33,7 +33,7 @@ ALL_MODULES = list(MODULES)
 def module_of(perm: str) -> str | None:
     """The licensed module a permission belongs to (None: always available, e.g. user management)."""
     if perm in (Perm.REPORTS_READ,) or perm.startswith("report."):
-        stock = {Perm.report(k) for k in ("stock-summary", "fifo-costing", "sales-rm-cost")}
+        stock = {Perm.report(k) for k in ("stock-summary", "fifo-costing", "sales-rm-cost", "sales-fifo-cost")}
         return "inventory" if perm in stock else "reports"
     if perm.startswith(("voucher.", "masters.")):
         return "accounting"

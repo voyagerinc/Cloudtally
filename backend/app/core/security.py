@@ -50,6 +50,7 @@ REPORTS: dict[str, str] = {
     "purchase-analysis": "Purchase analysis",
     "fifo-costing": "FIFO stock costing",
     "sales-rm-cost": "Sales with raw-material cost",
+    "sales-fifo-cost": "Sales register with FIFO cost",
 }
 
 # What the company admin sees when ticking permissions, grouped by area.

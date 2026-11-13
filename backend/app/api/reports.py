@@ -21,6 +21,7 @@ CSV_ROWS = {
     "trial-balance": "lines", "day-book": "vouchers", "ledger": "lines", "stock-summary": "items",
     "outstanding": "bills", "register": "vouchers", "ledger-balances": None, "stock-item": "lines",
     "sales-analysis": "rows", "purchase-analysis": "rows", "sales-rm-cost": "rows", "fifo-costing": "items",
+    "sales-fifo-cost": "rows",
 }
 
 
@@ -148,13 +149,13 @@ By = Literal["party", "date", "month", "item", "category", "stock_group", "vouch
 
 
 def _analysis(db, user, company_id, report: str, side: str, from_date, to_date, by, party, item, category,
-              stock_group, voucher_types, include_returns, format, rm: bool):
+              stock_group, voucher_types, include_returns, format, cost: str | None):
     authorize(db, user, company_id, Perm.report(report))
     f, t = _default_period(db, company_id, from_date, to_date)
     types = [x.strip() for x in voucher_types.split(",") if x.strip()] if voucher_types else None
     data = analysis.trade_analysis(db, company_id, side, f, t, by=by, party=party, item=item, category=category,
                                    stock_group=stock_group, voucher_types=types, include_returns=include_returns,
-                                   raw_material_cost=rm)
+                                   cost=cost)
     if format == "csv" and by == "voucher":
         data = {**data, "rows": data["lines"]}
     return _respond(db, user, company_id, report, data, format)
@@ -167,7 +168,7 @@ def sales_analysis(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: 
                    voucher_types: str | None = None, include_returns: bool = True, format: Fmt = "json"):
     """Sales by party, date, month, item, item category or stock group (credit notes count negative)."""
     return _analysis(db, user, company_id, "sales-analysis", "sales", from_date, to_date, by, party, item, category,
-                     stock_group, voucher_types, include_returns, format, rm=False)
+                     stock_group, voucher_types, include_returns, format, cost=None)
 
 
 @router.get("/purchase-analysis")
@@ -177,7 +178,7 @@ def purchase_analysis(company_id: uuid.UUID, db: DB, user: CurrentUser, from_dat
                       voucher_types: str | None = None, include_returns: bool = True, format: Fmt = "json"):
     """Purchases by party, date, month, item, item category or stock group (debit notes count negative)."""
     return _analysis(db, user, company_id, "purchase-analysis", "purchase", from_date, to_date, by, party, item,
-                     category, stock_group, voucher_types, include_returns, format, rm=False)
+                     category, stock_group, voucher_types, include_returns, format, cost=None)
 
 
 @router.get("/sales-rm-cost")
@@ -188,7 +189,17 @@ def sales_raw_material_cost(company_id: uuid.UUID, db: DB, user: CurrentUser, fr
                             include_returns: bool = True, format: Fmt = "json"):
     """Sales with the raw-material cost of what was sold, from its production vouchers, and the margin."""
     return _analysis(db, user, company_id, "sales-rm-cost", "sales", from_date, to_date, by, party, item, category,
-                     stock_group, voucher_types, include_returns, format, rm=True)
+                     stock_group, voucher_types, include_returns, format, cost="rm")
+
+
+@router.get("/sales-fifo-cost")
+def sales_fifo_cost(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                    to_date: date | None = None, by: By = "voucher", party: uuid.UUID | None = None,
+                    item: uuid.UUID | None = None, category: str | None = None, stock_group: uuid.UUID | None = None,
+                    voucher_types: str | None = None, include_returns: bool = True, format: Fmt = "json"):
+    """Sales register item-wise, with the FIFO cost of the goods sold and the margin."""
+    return _analysis(db, user, company_id, "sales-fifo-cost", "sales", from_date, to_date, by, party, item, category,
+                     stock_group, voucher_types, include_returns, format, cost="fifo")
 
 
 @router.get("/fifo-costing")
@@ -208,7 +219,7 @@ def report_filters(company_id: uuid.UUID, db: DB, user: CurrentUser):
     from sqlalchemy import func
     from app.core.security import has_perm
     from app.models import Ledger, StockGroup, StockItem, Voucher
-    allowed = [k for k in ("sales-analysis", "purchase-analysis", "fifo-costing", "sales-rm-cost")
+    allowed = [k for k in ("sales-analysis", "purchase-analysis", "fifo-costing", "sales-rm-cost", "sales-fifo-cost")
                if has_perm(db, user, company_id, Perm.report(k))]
     authorize(db, user, company_id, Perm.report(allowed[0] if allowed else "sales-analysis"))
     parties = db.execute(select(Ledger.id, Ledger.name).where(
