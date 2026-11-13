@@ -6,7 +6,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
@@ -91,5 +91,10 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 @app.get("/", include_in_schema=False)
 def index():
-    return FileResponse(STATIC / "index.html")
+    """The page, always fresh, with its script and styles tagged by version: after an update the browser
+    loads the new ones by itself instead of an old copy it kept."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    html = html.replace('/static/app.js"', f'/static/app.js?v={__version__}"').replace(
+        '/static/app.css"', f'/static/app.css?v={__version__}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 

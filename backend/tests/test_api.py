@@ -322,3 +322,11 @@ def test_sales_register_matches_tally(db, books, admin):
                    headers=admin).json()
     assert [(v["amount"], v["tax"]) for v in r["vouchers"]] == [("11800.00", "1800.00")]
     assert r["total"] == "11800.00" and r["not_included"] == [{"voucher_type": "Proforma Invoice", "vouchers": 1}]
+
+
+def test_page_loads_the_current_version_of_its_script():
+    """After an update the browser must not keep using an old app.js (a new report was missing from the list)."""
+    from app import __version__
+    r = client.get("/")
+    assert r.headers["cache-control"] == "no-cache"
+    assert f'/static/app.js?v={__version__}"' in r.text and f'/static/app.css?v={__version__}"' in r.text
