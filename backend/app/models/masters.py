@@ -2,7 +2,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, Text, UniqueConstraint, event
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.core.db import Base
@@ -158,7 +158,7 @@ class StockGroup(IdMixin, Base):
     name: Mapped[str] = mapped_column(String(200))
     parent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stock_groups.id"))
     # GST/HSN set on the group; items marked "As per Company/Stock Group" inherit them
-    hsn_code: Mapped[str | None] = mapped_column(String(20))
+    hsn_code: Mapped[str | None] = mapped_column(String(50))
     hsn_description: Mapped[str | None] = mapped_column(Text)
     gst_rate: Mapped[Decimal | None] = mapped_column(Rate)
     gst_rates: Mapped[dict | None] = mapped_column(JSON)
@@ -175,9 +175,9 @@ class StockItem(IdMixin, TimestampMixin, Base):
     group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stock_groups.id"))
     unit: Mapped[str | None] = mapped_column(String(40))
     alternate_unit: Mapped[str | None] = mapped_column(String(40))
-    hsn_code: Mapped[str | None] = mapped_column(String(20))
+    hsn_code: Mapped[str | None] = mapped_column(String(50))
     gst_rate: Mapped[Decimal | None] = mapped_column(Rate)
-    valuation_method: Mapped[str] = mapped_column(String(20), default="avg_cost")   # Tally costing method
+    valuation_method: Mapped[str] = mapped_column(String(50), default="avg_cost")   # Tally costing method
     opening_qty: Mapped[Decimal] = mapped_column(Qty, default=ZERO)
     opening_rate: Mapped[Decimal] = mapped_column(Rate, default=ZERO)
     opening_value: Mapped[Decimal] = mapped_column(Money, default=ZERO)
@@ -190,12 +190,12 @@ class StockItem(IdMixin, TimestampMixin, Base):
     denominator: Mapped[Decimal | None] = mapped_column(Qty)
     # GST
     gst_applicable: Mapped[str | None] = mapped_column(String(30))
-    supply_type: Mapped[str | None] = mapped_column(String(20))         # Goods / Services / Capital Goods
+    supply_type: Mapped[str | None] = mapped_column(String(50))         # Goods / Services / Capital Goods
     hsn_description: Mapped[str | None] = mapped_column(Text)
     gst_rates: Mapped[dict | None] = mapped_column(JSON)                # {"IGST": 18, "CGST": 9, ...}
     taxability: Mapped[str | None] = mapped_column(String(30))
     itc_eligible: Mapped[bool | None] = mapped_column(Boolean)
-    gst_source: Mapped[str | None] = mapped_column(String(20))          # item | stock group | company
+    gst_source: Mapped[str | None] = mapped_column(String(250))          # item | stock group | company
     # Behaviour
     market_valuation: Mapped[str | None] = mapped_column(String(30))
     batch_wise: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -224,3 +224,25 @@ class TaxCode(IdMixin, Base):
     cess_rate: Mapped[Decimal] = mapped_column(Rate, default=ZERO)
     effective_from: Mapped[date] = mapped_column(Date)
     attributes: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+# ------------------------------------------------------------------ long texts from Tally
+# Tally allows longer texts than some columns hold. A descriptive text that is too long is shortened rather
+# than making the whole master fail to import (and every voucher that uses it). Names and keys are never
+# shortened: they identify records, so those still fail loudly.
+_NEVER_SHORTEN = {"name", "code", "alias", "unit", "alternate_unit", "group", "parent", "guid"}
+
+
+def _shorten_long_texts(mapper, connection, target) -> None:
+    for col in mapper.columns:
+        length = getattr(col.type, "length", None)
+        if not length or col.key in _NEVER_SHORTEN or not isinstance(col.type, String):
+            continue
+        value = getattr(target, col.key, None)
+        if isinstance(value, str) and len(value) > length:
+            setattr(target, col.key, value[:length])
+
+
+for _cls in (Ledger, LedgerGroup, StockItem, StockGroup, Unit, Godown, VoucherType, CostCentre):
+    event.listen(_cls, "before_insert", _shorten_long_texts)
+    event.listen(_cls, "before_update", _shorten_long_texts)

@@ -184,7 +184,8 @@ def financial_year_for(db: Session, company: Company, d: date) -> FinancialYear:
 
 # ------------------------------------------------------------------ validation + apply
 
-def _validate_and_build(db: Session, company: Company, data: dict, r: _Resolver, vt: VoucherType):
+def _validate_and_build(db: Session, company: Company, data: dict, r: _Resolver, vt: VoucherType,
+                        source: str = "erp"):
     entries_in = data.get("entries") or []
     inventory_in = data.get("inventory") or []
     # Like Tally. Vouchers that post to the books need balanced ledger entries, or only stock lines
@@ -235,7 +236,10 @@ def _validate_and_build(db: Session, company: Company, data: dict, r: _Resolver,
             alloc[ledger.name] = alloc.get(ledger.name, ZERO) + (amount if inward else -amount)
         inventory.append((idx, item, qty, rate, disc, amount, ledger, i))
 
-    for name, value in alloc.items() if vt.affects_accounts else ():
+    # A voucher typed here must book each sales/purchase ledger exactly what its items add up to. One from
+    # Tally is already accepted there: a ledger may carry more than its items (e.g. freight or job-work charges
+    # on the same ledger), and the ledger lines are what count in the books.
+    for name, value in alloc.items() if vt.affects_accounts and source != "tally" else ():
         booked = sum((a for _, led, a, _ in entries if led.name == name), ZERO)
         if booked != value:
             raise VoucherError("validation_failure",
@@ -387,7 +391,7 @@ def create_voucher(db: Session, company: Company, data: dict, actor: Actor, *, a
     vt = r.voucher_type(data["voucher_type"])
     vdate = _date(data["date"])
     fy = financial_year_for(db, company, vdate)
-    entries, inventory = _validate_and_build(db, company, data, r, vt)
+    entries, inventory = _validate_and_build(db, company, data, r, vt, source)
     _check_stock(db, company.id, inventory)
 
     number = (data.get("voucher_number") or "").strip()
@@ -453,7 +457,7 @@ def update_voucher(db: Session, v: Voucher, data: dict, actor: Actor, *, expecte
     # Both the old and the new date must be in open periods.
     financial_year_for(db, company, v.voucher_date)
     fy = financial_year_for(db, company, vdate)
-    entries, inventory = _validate_and_build(db, company, data, r, vt)
+    entries, inventory = _validate_and_build(db, company, data, r, vt, source)
     _check_stock(db, company.id, inventory, exclude_voucher_id=v.id)
     number = (data.get("voucher_number") if source == "tally" else data.get("voucher_number") or v.voucher_number) or ""
     number = number.strip()

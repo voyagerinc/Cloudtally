@@ -862,3 +862,33 @@ def test_requests_to_one_tally_take_turns_and_wait_after_a_timeout(monkeypatch):
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert busy["most"] == 1 and busy["posts"] == 8
+
+
+def test_tally_ledger_may_carry_more_than_its_items(db, company, tc):
+    """In Tally a purchase or job-work ledger can hold freight or charges besides its items. Such vouchers
+    come from Tally already accepted; only vouchers typed here must match their items exactly."""
+    from app.services.sync import common
+    from app.services.sync.initial_import import import_masters
+    tc.add_item("Steel Spool 10in")
+    conn = db.get(TallyConnector, company.id)
+    client = common.client_for(conn)
+    import_masters(db, company, conn, client, USER)
+    client.close()
+    doc = {"voucher_type": "Sales", "date": "2026-04-15", "party_ledger": "Acme Traders",
+           "entries": [{"ledger": "Acme Traders", "amount": "1250"}, {"ledger": "Sales", "amount": "-1250"}],
+           "inventory": [{"item": "Steel Spool 10in", "quantity": "-10", "rate": "100", "unit": "Nos", "ledger": "Sales"}]}
+    v = engine.create_voucher(db, company, {**doc, "voucher_number": "T-1"}, USER, action="post", source="tally")
+    assert v.status == VoucherStatus.POSTED
+    with pytest.raises(engine.VoucherError, match="Inventory allocated to 'Sales' is"):
+        engine.create_voucher(db, company, {**doc, "voucher_number": "E-1"}, USER, action="post")
+
+
+def test_long_texts_from_tally_do_not_block_an_item(db, company):
+    """A stock group name longer than gst_source once made 7 COOLACE items (and 210 vouchers) fail."""
+    from app.models import StockItem
+    item = StockItem(company_id=company.id, name="AH 1012-C-F-012-DC-01", unit="Nos",
+                     gst_source="stock group: " + "Air Cooled Oil Cooler With Fan Motor 230V AC Single Phase " * 6)
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    assert item.name == "AH 1012-C-F-012-DC-01" and len(item.gst_source) == 250
