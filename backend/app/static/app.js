@@ -111,7 +111,7 @@ function applyPerms() {
     const special = SPECIAL_TABS[b.dataset.perm];
     b.hidden = special ? !special() : b.dataset.perm === "report" ? !reportOpts.some((o) => !o.disabled) : !can(b.dataset.perm);
   });
-  $("#r-csv").hidden = $("#errors-csv").hidden = !can("export");
+  $("#r-csv").hidden = $("#r-xlsx").hidden = $("#errors-csv").hidden = !can("export");
   $("#l-new").hidden = $("#ld-edit").hidden = !can("masters.write");
 }
 function tabAllowed(tab) { const b = document.querySelector(`#tabs button[data-tab="${tab}"]`); return !!b && !b.hidden; }
@@ -216,6 +216,7 @@ document.querySelectorAll("#tabs button").forEach((b) => (b.onclick = () => show
 
 async function loadMasters() {
   itemsCache = null;
+  for (const k of Object.keys(listCache)) delete listCache[k];
   if (!can("masters.read")) {   // e.g. a reports-only user: nothing to look up
     state.ledgers = []; state.vtypes = []; state.groups = {};
     $("#ledger-names").innerHTML = $("#ve-type").innerHTML = $("#group-names").innerHTML = "";
@@ -255,7 +256,7 @@ renderers.dashboard = async () => {
         (d.vouchers.not_stored ? ` · ${d.vouchers.not_stored} need attention` : "") : ""],
     ["Amended in Tally", Number(d.vouchers.amended_in_tally).toLocaleString("en-IN"), "vouchers whose amendment was synced"],
     ["Last import", when(c.last_inbound_at) || "never", c.freeze_inbound ? "inbound frozen" : ""],
-    ["Last export", when(c.last_outbound_at) || "never", c.freeze_outbound ? "outbound frozen" : (c.outbound_enabled ? "" : "outbound disabled (shadow mode)")],
+    ["Last export", when(c.last_outbound_at) || "never", c.freeze_outbound ? "outbound frozen" : (c.outbound_enabled ? "bidirectional" : "one way: Tally → software")],
   ];
   $("#health").innerHTML = cards.map(([k, v, s]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="small muted">${s}</div></div>`).join("");
   setBadge(d.open_conflicts);
@@ -441,15 +442,28 @@ async function historyHtml(id) {
 // Stock lines as Tally shows them: quantities without a sign. The stored sign (inward +, outward −) only
 // matters when one voucher moves stock both ways, as stock and manufacturing journals do; then an
 // In / Out column says which lines were produced and which consumed.
-function inventoryTable(lines) {
+function inventoryTable(lines, groups = {}) {
   const dir = (i) => (Number(i.quantity) > 0 || (Number(i.quantity) === 0 && i.direction === "in") ? "In" : "Out");
   const mixed = new Set(lines.map(dir)).size > 1;
-  const qtyText = (i) => `${Math.abs(Number(i.quantity)).toLocaleString("en-IN", { maximumFractionDigits: 4 })} ${i.unit || ""}`.trim();
-  return `<h3>Inventory</h3><table><thead><tr>${mixed ? "<th>In / Out</th>" : ""}<th>Item</th><th class="num">Qty</th>
-    <th class="num">Rate</th><th class="num">Amount</th><th>Godown</th><th>Batch</th></tr></thead><tbody>${lines.map((i) =>
-    `<tr>${mixed ? `<td>${dir(i) === "In" ? "In (produced / received)" : "Out (consumed / issued)"}</td>` : ""}<td>${esc(i.item)}</td>
-      <td class="num">${Number(i.quantity) === 0 ? "value only" : esc(qtyText(i))}</td><td class="num">${money(i.rate)}</td>
-      <td class="num">${money(i.amount)}</td><td>${esc(i.godown || "")}</td><td>${esc(i.batch || "")}</td></tr>`).join("")}</tbody></table>`;
+  const qtyNum = (n) => n.toLocaleString("en-IN", { maximumFractionDigits: 4 });
+  const qtyText = (i) => `${qtyNum(Math.abs(Number(i.quantity)))} ${i.unit || ""}`.trim();
+  const part = (title, rows) => {
+    const units = new Set(rows.map((i) => i.unit || ""));
+    const qty = rows.reduce((a, i) => a + Math.abs(Number(i.quantity)), 0);
+    const amount = rows.reduce((a, i) => a + paise(i.amount), 0);
+    return `<h3>${esc(title)} <span class="muted small">${rows.length} item${rows.length === 1 ? "" : "s"}</span></h3>
+      <table><thead><tr><th>Item</th><th>Item group</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th>
+      <th>Godown</th><th>Batch</th></tr></thead><tbody>${rows.map((i) =>
+      `<tr><td>${esc(i.item)}</td><td>${esc(groups[i.item] || "")}</td>
+        <td class="num">${Number(i.quantity) === 0 ? "value only" : esc(qtyText(i))}</td><td class="num">${money(i.rate)}</td>
+        <td class="num">${money(i.amount)}</td><td>${esc(i.godown || "")}</td><td>${esc(i.batch || "")}</td></tr>`).join("")}
+      <tr class="total"><td><b>Total</b></td><td></td><td class="num"><b>${units.size === 1 ? esc(`${qtyNum(qty)} ${[...units][0]}`.trim()) : ""}</b></td>
+        <td></td><td class="num"><b>${rupees(amount)}</b></td><td></td><td></td></tr></tbody></table>`;
+  };
+  // stock and manufacturing journals move stock both ways: what came in and what went out, as separate tables
+  if (mixed) return part("In (produced / received)", lines.filter((i) => dir(i) === "In"))
+    + part("Out (consumed / issued)", lines.filter((i) => dir(i) === "Out"));
+  return part("Inventory", lines);
 }
 
 async function openVoucher(id) {
@@ -466,12 +480,13 @@ async function openVoucher(id) {
     ${d.entries.map((e) => `<tr><td>${esc(e.ledger)}</td><td class="num">${+e.amount > 0 ? money(e.amount) : ""}</td><td class="num">${+e.amount < 0 ? money(-e.amount) : ""}</td>
       <td>${e.bills.map((b) => esc(`${b.type} ${b.name || ""}`)).join(", ")}</td><td>${e.bank.map((b) => esc(`${b.transaction_type || ""} ${b.instrument_no || ""}`)).join(", ")}</td></tr>`).join("")}
     </tbody></table>
-    ${d.inventory.length ? inventoryTable(d.inventory) : ""}
+    ${d.inventory.length ? inventoryTable(d.inventory, v.item_groups || {}) : ""}
     <p class="small muted">${v.tally ? `Tally: MasterID ${esc(v.tally.master_id)} · AlterID ${esc(v.tally.alter_id)} · GUID ${esc(v.tally.guid)} · last sync ${when(v.tally.last_synced_at)}
       ${v.tally.last_error ? `<br><span class="error">${esc(v.tally.error_code)}: ${esc(v.tally.last_error)}</span>` : ""}` : "Not yet in Tally"}</p>
     <div class="row">${!["cancelled", "deleted"].includes(v.status) ? `<button data-edit>Edit</button>` : ""}
       ${acts.map((a) => `<button class="secondary" data-act="${a}">${a[0].toUpperCase() + a.slice(1)}</button>`).join("")}
-      <button class="secondary" data-dup>Duplicate</button><button class="link" data-hist>History</button></div><div id="vhist" hidden></div>`;
+      <button class="secondary" data-dup>Duplicate</button>${can("export") ? `<button class="secondary" data-xlsx>Excel</button>` : ""}
+      <button class="link" data-hist>History</button></div><div id="vhist" hidden></div>`;
   el.querySelectorAll("[data-act]").forEach((b) => (b.onclick = async () => {
     const reason = ["cancel", "delete", "reject"].includes(b.dataset.act) ? prompt(`Reason to ${b.dataset.act}?`) : null;
     if (reason === null && ["cancel", "delete", "reject"].includes(b.dataset.act)) return;
@@ -482,6 +497,8 @@ async function openVoucher(id) {
     } catch (err) { alert(err.message); }
   }));
   el.querySelector("[data-edit]") && (el.querySelector("[data-edit]").onclick = () => editVoucher(v));
+  el.querySelector("[data-xlsx]") && (el.querySelector("[data-xlsx]").onclick = () =>
+    download(`/vouchers/${id}/xlsx`, `${d.voucher_type} ${d.voucher_number}.xlsx`.replace(/[\\/:*?"<>|]/g, "-")));
   el.querySelector("[data-dup]").onclick = async () => { const n = await api(`/vouchers/${id}/duplicate`, { method: "POST" }); openVoucher(n.id); };
   el.querySelector("[data-hist]").onclick = async () => {
     const box = $("#vhist"); box.hidden = false; box.innerHTML = await historyHtml(id);
@@ -610,7 +627,12 @@ function reportUrl(fmt) {
   if (name.startsWith("register-")) { path = "register"; p.set("base_type", name.split("-")[1]); }
   if (["balance-sheet", "outstanding"].includes(path)) { if (t) p.set("as_of", t); }
   else { if (f) p.set("from_date", f); if (t) p.set("to_date", t); }
-  if (name in ANALYSIS || name === "fifo-costing") {
+  if (name === "stock-journal" || name === "material-transfer-wip") {
+    const f2 = analysisParams();
+    for (const k of ["item", "stock_group"]) if (f2[k]) p.set(k, f2[k]);
+    if (sjType && name === "stock-journal") p.set("voucher_type", sjType);
+  }
+  if (name in ANALYSIS || name === "fifo-costing" || name === "sales-group-wise") {
     for (const [k, v] of Object.entries(analysisParams())) p.set(k, v);
     if (name in ANALYSIS) p.set("by", $("#ra-by").value);
   }
@@ -637,11 +659,16 @@ async function loadAnalysisFilters() {
 }
 function showAnalysisControls() {
   const name = $("#r-name").value;
-  const trade = name in ANALYSIS, fifo = name === "fifo-costing";
-  $("#ra-filters").hidden = !(trade || fifo);
-  ["#ra-by-label", "#ra-party-label", "#ra-returns-label"].forEach((id) => ($(id).hidden = !trade));
+  const trade = name in ANALYSIS, fifo = name === "fifo-costing", grouped = name === "sales-group-wise";
+  const journal = name === "stock-journal" || name === "material-transfer-wip";
+  $("#ra-filters").hidden = !(trade || fifo || grouped || journal);
+  $("#ra-cat").closest("label").hidden = journal;
+  $("#ra-by-label").hidden = !trade;
+  ["#ra-party-label", "#ra-returns-label"].forEach((id) => ($(id).hidden = !(trade || grouped)));
+  $("#ra-item-label").hidden = grouped;
+  if (journal) loadAnalysisFilters().catch(() => {});
   if (COSTED[name] && $("#ra-by").dataset.touched !== "1") $("#ra-by").value = COSTED[name].by;
-  if (trade || fifo) loadAnalysisFilters().catch(() => {});
+  if (trade || fifo || grouped) loadAnalysisFilters().catch(() => {});
 }
 $("#r-name").addEventListener("change", showAnalysisControls);
 $("#ra-by").addEventListener("change", (e) => (e.target.dataset.touched = "1"));
@@ -664,80 +691,510 @@ const BY_LABEL = { party: "Party", date: "Date", month: "Month", item: "Item", c
 async function analysisView(el, report, fixed = {}) {
   await loadAnalysisFilters();
   const by = fixed.by || $("#ra-by").value;
-  const p = rParams({ ...analysisParams(), by });
-  for (const [k, v] of Object.entries(fixed)) p.set(k, v);
+  // one fetch of every item line; the groups, vouchers and their totals are built here, so every level expands
+  const p = rParams({ ...analysisParams(), by: "voucher" });
+  for (const [k, v] of Object.entries(fixed)) if (k !== "by") p.set(k, v);
   const r = await api(`/reports/${report}?${p}`);
   const costed = COSTED[report];
   const counted = r.voucher_types.filter((t) => t.counted).map((t) => t.name).join(", ");
   const left = r.voucher_types.filter((t) => !t.counted).map((t) => t.name).join(", ");
   el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · ${esc(counted || "no voucher types")}`
     + `${left ? ` (not counted: ${esc(left)})` : ""}${r.include_returns ? " · returns deducted" : ""}`
-    + `${by === "voucher" ? " · click a voucher to open it" : " · click a row for its vouchers"}</p>`
+    + ` · ${by === "voucher" ? "vouchers" : `${esc(BY_LABEL[by].toLowerCase())} rows`} expand; click an item line to open its voucher</p>`
     + `${report === "sales-rm-cost" ? `<p class="small muted">Raw-material cost: what the components of each sold item cost in its
        production vouchers (weighted average up to the sale date); labour and other costs are not included.</p>` : ""}`
     + `${report === "sales-fifo-cost" ? `<p class="small muted">FIFO cost: each sale takes the cost of the oldest stock of that item
-       still on hand; returns come back at the cost they went out at.</p>` : ""}<table id="t"></table>`;
-  const rmCols = costed ? [
-    ...(by === "voucher" ? [{ label: "Cost / unit", num: true, get: (x) => (x.cost_per_unit == null ? (x.voucher_id ? costed.none : "") : money(x.cost_per_unit)) }] : []),
-    { label: costed.label, num: true, get: (x) => (x.cost == null ? "—" : money(x.cost)) },
-    { label: "Gross profit", num: true, get: (x) => (x.margin == null ? "—" : money(x.margin)) },
-    { label: "Margin %", num: true, get: (x) => (x.margin_pct == null ? "" : `${x.margin_pct}%`) },
-  ] : [];
-  const tot = { ...r.total, _class: "total" };
-  if (by === "voucher") {
-    table($("#t"), [
-      { label: "Date", key: "date" }, { label: "Voucher", get: (x) => (x.voucher_type ? `${x.voucher_type} ${x.voucher_number}` : "Total") },
-      { label: "Party", key: "party", wrap: true }, { label: "Item", key: "item", wrap: true },
-      { label: "Quantity", num: true, get: (x) => qtyText(x.quantity, x.unit) }, { label: "Rate", num: true, get: (x) => (x.rate ? money(x.rate) : "") },
-      { label: "Value", num: true, get: (x) => money(x.value) }, ...rmCols,
-    ], [...r.lines, tot], (x) => x.voucher_id && drillTo(`${x.voucher_type} ${x.voucher_number}`, (el2) => voucherView(el2, x.voucher_id)));
-    return;
-  }
-  const qtyCol = ["item", "category", "stock_group"].includes(by)
-    ? [{ label: "Quantity", num: true, get: (x) => qtyText(x.quantity, x.unit) }] : [];
-  table($("#t"), [
-    { label: BY_LABEL[by], get: (x) => x.name ?? "Total", wrap: true }, { label: "Vouchers", num: true, key: "vouchers" },
-    ...qtyCol, { label: "Value", num: true, get: (x) => money(x.value) }, ...rmCols,
-  ], [...r.rows, tot], (x) => {
-    if (x._class === "total") return;
-    const next = { by: "voucher" };
-    if (by === "party") next.party = x.key;
-    else if (by === "item") next.item = x.key;
-    else if (by === "category") next.category = x.key;
-    else if (by === "stock_group") next.stock_group = x.key;
-    else if (by === "date") { next.from_date = x.key; next.to_date = x.key; }
-    else if (by === "month") {
-      const [y, mth] = x.key.split("-").map(Number);
-      next.from_date = x.key + "-01"; next.to_date = new Date(Date.UTC(y, mth, 0)).toISOString().slice(0, 10);
+       still on hand; returns come back at the cost they went out at. Tax: the GST on the item itself; GST on packing &amp;
+       forwarding and other charges belongs to no item and is not included.</p>` : ""}<div id="t"></div>`;
+  const node = (label, extra = {}) => ({ label, children: [], value: 0, tax: 0, cost: 0, noCost: 0, qty: 0, units: new Set(), vouchers: new Set(), ...extra });
+  const add = (n, x) => {
+    n.value += paise(x.value); n.tax += paise(x.tax); n.qty += Number(x.quantity || 0); n.units.add(x.unit || "");
+    n.vouchers.add(x.voucher_id);
+    if (costed) { if (x.cost == null) n.noCost += 1; else n.cost += paise(x.cost); }
+  };
+  const lineNode = (x, label) => {
+    const n = node(label, { x, open: () => drillVoucher(x.voucher_id, `${x.voucher_type} ${x.voucher_number}`) });
+    delete n.children;
+    add(n, x);
+    return n;
+  };
+  const vchLabel = (x) => `${x.voucher_type} ${x.voucher_number}`;
+  const month = (d) => new Date(`${d}T00:00:00`).toLocaleString("en-IN", { month: "long", year: "numeric" });
+  const keyOf = { party: (x) => [x.party || "(no party)", x.party || "(no party)"], date: (x) => [x.date, x.date],
+    month: (x) => [x.date.slice(0, 7), month(x.date)], item: (x) => [x.item, x.item],
+    category: (x) => [x.category || "", x.category || "(no category)"], stock_group: (x) => [x.item_group || "", x.item_group || "(no group)"] };
+  const total = node("Total", { cls: "total" });
+  const groups = new Map(), vouchers = new Map();
+  for (const x of r.lines) {
+    add(total, x);
+    if (by === "voucher") {
+      if (!vouchers.has(x.voucher_id)) vouchers.set(x.voucher_id, node(vchLabel(x), { v: x }));
+      const v = vouchers.get(x.voucher_id);
+      add(v, x); v.children.push(lineNode(x, x.item));
+      continue;
     }
-    drillTo(x.name, (el2) => analysisView(el2, report, { ...fixed, ...next }));
+    const [k, label] = keyOf[by](x);
+    if (!groups.has(k)) groups.set(k, node(label, { key: k, vmap: new Map() }));
+    const g = groups.get(k);
+    add(g, x);
+    if (["item", "category", "stock_group"].includes(by)) { g.children.push(lineNode(x, `${x.date} · ${vchLabel(x)}${by === "item" ? "" : " · " + x.item}`)); continue; }
+    if (!g.vmap.has(x.voucher_id)) { const v = node(vchLabel(x), { v: x }); g.vmap.set(x.voucher_id, v); g.children.push(v); }
+    const v = g.vmap.get(x.voucher_id);
+    add(v, x); v.children.push(lineNode(x, x.item));
+  }
+  let roots = by === "voucher" ? [...vouchers.values()] : [...groups.values()];
+  if (!["voucher", "date", "month"].includes(by)) roots.sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
+  if (by === "month" || by === "date") roots.sort((a, b) => (a.key < b.key ? -1 : 1));
+  const qty = (n) => (n.units.size === 1 ? qtyText(n.qty, [...n.units][0]) : "");
+  const costCols = costed ? [
+    { label: "Cost / unit", num: true, get: (n) => (n.x ? (n.x.cost_per_unit == null ? costed.none : money(n.x.cost_per_unit)) : "") },
+    { label: costed.label, num: true, get: (n) => (n.noCost && !n.cost ? "—" : rupees(n.cost)) },
+    { label: "Gross profit", num: true, get: (n) => (n.noCost && !n.cost ? "—" : rupees(n.value - n.cost)) },
+    { label: "Margin %", num: true, get: (n) => (n.value && !(n.noCost && !n.cost) ? `${(((n.value - n.cost) / n.value) * 100).toFixed(2)}%` : "") },
+  ] : [];
+  treeTable($("#t"), [
+    { label: "Date", get: (n) => (n.v ? esc(n.v.date) : n.x ? esc(n.x.date) : "") },
+    { label: "Party", get: (n) => (n.v ? esc(n.v.party || "") : n.x && ["item", "category", "stock_group"].includes(by) ? esc(n.x.party || "") : "") },
+    { label: "Item group", get: (n) => (n.x ? esc(n.x.item_group || "") : "") },
+    { label: "Vouchers", num: true, get: (n) => (n.x ? "" : n.vouchers.size) },
+    { label: "Quantity", num: true, get: qty },
+    { label: "Rate", num: true, get: (n) => (n.x && n.x.rate ? money(n.x.rate) : "") },
+    { label: "Value", num: true, get: (n) => rupees(n.value) },
+    { label: "Tax", num: true, get: (n) => rupees(n.tax) },
+    ...costCols,
+  ], [...roots, total], { title: by === "voucher" ? "Voucher / item" : `${BY_LABEL[by]} / ${["item", "category", "stock_group"].includes(by) ? "voucher" : "voucher / item"}` });
+}
+
+// Stock journals as Tally shows them: each voucher with what came in and what went out side by side.
+let sjType = null;   // chosen voucher type; null = Material Transfer to WIP when there is one
+async function stockJournalView(el, report = "stock-journal") {
+  await loadAnalysisFilters();
+  const f = analysisParams();
+  const p = rParams();
+  for (const k of ["item", "stock_group"]) if (f[k]) p.set(k, f[k]);
+  const fixedType = report !== "stock-journal";
+  if (sjType && !fixedType) p.set("voucher_type", sjType);
+  const r = await api(`/reports/${report}?${p}`);
+  const qtyT = (q, u) => (q == null ? "" : qtyText(q, u));
+  const side = (title, lines, t) => `<div><h4>${esc(title)} <span class="muted small">${lines.length} item${lines.length === 1 ? "" : "s"}</span></h4>
+    <table><thead><tr><th>Item</th><th>Item group</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th><th>Godown</th><th>Batch</th></tr></thead><tbody>
+    ${lines.map((x) => `<tr class="click" data-item="${esc(x.item_id)}" data-name="${esc(x.item)}"><td>${esc(x.item)}</td><td>${esc(x.item_group || "")}</td>
+      <td class="num">${qtyT(x.quantity, x.unit)}</td><td class="num">${money(x.rate)}</td><td class="num">${money(x.amount)}</td>
+      <td>${esc(x.godown || "")}</td><td>${esc(x.batch || "")}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">Nothing</td></tr>`}
+    <tr class="total"><td>Total</td><td></td><td class="num">${qtyT(t.quantity, t.unit)}</td><td></td><td class="num">${money(t.amount)}</td><td></td><td></td></tr></tbody></table></div>`;
+  const shown = r.vouchers.slice(0, 300);
+  el.innerHTML = (fixedType ? "" : `<div class="row wrap"><label>Voucher type<select id="sj-type"><option value="all">All stock journals</option>
+      ${r.voucher_types.map((t) => `<option ${t === r.voucher_type ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label></div>`) + `
+    <p class="muted">${esc(r.from)} to ${esc(r.to)} · ${r.total.vouchers} voucher${r.total.vouchers === 1 ? "" : "s"} · in ${money(r.total.in_amount)}
+      · out ${money(r.total.out_amount)} · vouchers expand; click an item for its movements${r.vouchers.length > shown.length ? ` · first ${shown.length} shown (narrow the period or filter by item)` : ""}</p>
+    <div class="tree-tools"><button type="button" class="link" data-sj="1">Expand all</button><button type="button" class="link" data-sj="0">Collapse all</button></div>
+    ${shown.map((v, i) => `<details class="fs-block" ${i < 5 ? "open" : ""}><summary><h3>${esc(v.voucher_type)} ${esc(v.voucher_number)} · ${esc(v.date)}</h3>
+      <span class="muted small"> in ${money(v.in_total.amount)} · out ${money(v.out_total.amount)}</span>
+      <button type="button" class="link" data-v="${esc(v.id)}" data-t="${esc(`${v.voucher_type} ${v.voucher_number}`)}">open voucher</button></summary>
+      ${v.narration ? `<p class="small muted">${esc(v.narration)}</p>` : ""}
+      <div class="sj-pair">${side("In (produced / received)", v.in, v.in_total)}${side("Out (consumed / issued)", v.out, v.out_total)}</div></details>`).join("")
+      || `<p class="muted">No stock journals in this period</p>`}`;
+  if ($("#sj-type")) $("#sj-type").onchange = (e) => { sjType = e.target.value; drawNav(); };
+  el.querySelectorAll("[data-sj]").forEach((b) => (b.onclick = () => el.querySelectorAll("details.fs-block").forEach((d) => (d.open = b.dataset.sj === "1"))));
+  el.querySelectorAll("button[data-v]").forEach((b) => (b.onclick = (e) => { e.preventDefault(); drillVoucher(b.dataset.v, b.dataset.t); }));
+  el.querySelectorAll("tr[data-item]").forEach((tr) => (tr.onclick = () => drillTo(tr.dataset.name, (e2) => stockItemView(e2, tr.dataset.item))));
+}
+
+// Item group-wise sales: stock groups expand into sub-groups and items; an item opens its invoices.
+async function groupWiseView(el) {
+  await loadAnalysisFilters();
+  const p = rParams(analysisParams());
+  p.delete("item");
+  const r = await api(`/reports/sales-group-wise?${p}`);
+  const counted = r.voucher_types.filter((t) => t.counted).map((t) => t.name).join(", ");
+  const total = Number(r.total.value) || 0;
+  const node = (n) => ({
+    label: n.name, n, cls: n.kind === "group" ? "" : "",
+    children: n.kind === "group" ? n.children.map(node) : undefined,
+    open: n.kind === "item" ? () => drillTo(n.name, (e) => analysisView(e, "sales-fifo-cost", { by: "voucher", item: n.key })) : undefined,
   });
+  const roots = r.tree.map(node);
+  roots.push({ label: "Total", n: { ...r.total, kind: "total" }, cls: "total" });
+  const share = (n) => {
+    if (!total || n.kind === "total") return "";
+    const pc = (Number(n.value) / total) * 100;
+    return `<span class="bar" style="width:${Math.max(1, Math.min(60, Math.abs(pc) * 0.6))}px"></span>${pc.toFixed(1)}%`;
+  };
+  el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · ${esc(counted || "no voucher types")}`
+    + `${r.include_returns ? " · returns deducted" : ""} · click a group to expand it, an item for its invoices</p>`
+    + `<p class="small muted">Groups include all their sub-groups and items. Cost is FIFO; tax is the GST on the items
+       (not on packing &amp; forwarding or other charges).</p><div id="t"></div>`;
+  treeTable($("#t"), [
+    { label: "Items", num: true, get: (x) => (x.n.kind === "group" ? x.n.items : "") },
+    { label: "Quantity", num: true, get: (x) => qtyText(x.n.quantity, x.n.unit) },
+    { label: "Value", num: true, get: (x) => money(x.n.value) },
+    { label: "Share", num: true, get: (x) => share(x.n) },
+    { label: "Tax", num: true, get: (x) => money(x.n.tax) },
+    { label: "FIFO cost", num: true, get: (x) => (x.n.cost == null ? "" : money(x.n.cost)) },
+    { label: "Gross profit", num: true, get: (x) => (x.n.margin == null ? "" : money(x.n.margin)) },
+    { label: "Margin %", num: true, get: (x) => (x.n.margin_pct == null ? "" : `${x.n.margin_pct}%`) },
+  ], roots, { title: "Stock group / item" });
+}
+
+// ------------------------------------------------------------------ MIS reports by division
+let misCache = null;   // settings of the current company
+async function misSettings(fresh = false) {
+  if (fresh || !misCache || misCache.company !== state.company)
+    misCache = { company: state.company, ...(await api(`/mis/settings?company_id=${state.company}`)) };
+  return misCache;
+}
+const misPeriod = () => rParams();
+const misNote = (r) => `<p class="muted">${esc(r.from)} to ${esc(r.to)} · divisions: ${r.divisions.map((d) => esc(d.name)).join(", ")}
+  · <a href="#" class="mis-settings-link">division settings</a></p>`;
+function bindMisLinks(el) {
+  el.querySelectorAll(".mis-settings-link").forEach((a) => (a.onclick = (e) => { e.preventDefault(); show("masters"); openMaster("mis"); }));
+}
+
+async function misPlView(el) {
+  const [r, st] = await Promise.all([api(`/reports/mis-pl?${misPeriod()}`), misSettings()]);
+  const divs = r.divisions;
+  const editable = st.can_edit && r.month;
+  const cell = (ln, k) => {
+    const v = k ? ln.by[k] : ln.total;
+    const over = k && (ln.overridden || []).includes(k);
+    const key = ln.editable && k && editable ? `${ln.editable}:${k}` : "";
+    return `<span class="${key ? "edit" : ""} ${over ? "over" : ""}" ${key ? `data-edit="${key}"` : ""} title="${over ? "Entered by hand for this month" : ""}">${money(v)}${over ? " ✎" : ""}</span>`;
+  };
+  const roots = r.sections.map((sec) => ({ label: sec.name, sec: true, children: sec.lines.flatMap((ln) => [
+    { label: ln.label, ln, cls: ln.strong ? "strong" : "" },
+    ...(ln.pct ? [{ label: "% of net revenue", pct: ln, cls: "pcrow" }] : []),
+  ]) }));
+  el.innerHTML = misNote(r)
+    + `<p class="small muted">Stock values come from the stock groups set in division settings; items below zero count as nil.
+      ${editable ? "Click an opening or closing stock value to enter it by hand for this month." : r.month ? "" : "Choose a single month (from the 1st) to enter stock values by hand."}
+      ${r.shared_cost_centres.length ? ` Shared cost centres (split by each ledger's %): ${esc(r.shared_cost_centres.join(", "))}.` : ""}</p><div id="t" class="mis"></div>`;
+  const pc = (v) => (v == null ? "" : `${v}%`);
+  treeTable($("#t"), [
+    ...divs.map((d) => ({ label: d.name, num: true, get: (n) => (n.ln ? cell(n.ln, d.key) : n.pct ? pc(n.pct.pct[d.key]) : "") })),
+    { label: "Total", num: true, get: (n) => (n.ln ? cell(n.ln, null) : n.pct ? pc(n.pct.pct_total) : "") },
+  ], roots, { expandDepth: 1 });
+  bindMisLinks(el);
+  if (editable) $("#t").onclick = async (e) => {
+    const sp = e.target.closest("[data-edit]");
+    if (!sp) return;
+    e.stopPropagation();
+    try { if (await misEditStock(r.month, divs, sp.dataset.edit)) await drawNav(); } catch (err) { alert(err.message); }
+  };
+}
+
+// enter an opening/closing stock value by hand for one month; key = "opening:rm:cooler"
+async function misEditStock(month, divs, key) {
+  const st = await misSettings();
+  const [side, kind, div] = key.split(":");
+  const label = `${side === "opening" ? "Opening" : "Closing"} ${{ rm: "RM", wip: "WIP", fg: "FG" }[kind]} value, ${divs.find((d) => d.key === div).name}, ${month}`;
+  const v = prompt(`${label}\nEnter the value, or leave empty to use the value from Tally stock:`, "");
+  if (v === null) return false;
+  const clean = v.replace(/,/g, "").trim();
+  if (clean && !/^-?\d+(\.\d{1,2})?$/.test(clean)) { alert("Enter an amount such as 125000.50"); return false; }
+  const m = { ...(st.stock_overrides[month] || {}) };
+  const d = { ...(m[div] || {}) };
+  const k = { ...(d[kind] || {}) };
+  if (clean) k[side] = clean; else delete k[side];
+  d[kind] = k; m[div] = d;
+  await api(`/mis/settings?company_id=${state.company}`, { method: "PUT", body: { stock_overrides: { [month]: m } } });
+  await misSettings(true);
+  return true;
+}
+
+// The P&L as the finance workbook lays it out: a block per stage, a row per division, a total and its %.
+async function misSheetView(el) {
+  const [r, st] = await Promise.all([api(`/reports/mis-finance-sheet?${misPeriod()}`), misSettings()]);
+  const editable = st.can_edit && r.month;
+  const pctText = (v) => (v == null ? "" : `${Number(v).toFixed(2)}%`);
+  const block = (b, withMonth = true) => {
+    const head = `<tr>${withMonth ? "<th>Month</th>" : ""}<th>Category</th>${b.columns.map((c) => `<th class="num">${esc(c)}</th>`).join("")}${b.pct ? `<th class="num">%</th>` : ""}</tr>`;
+    const body = b.rows.map((row) => `<tr class="${row.total ? "total" : ""}">${withMonth ? `<td>${esc(row.month || "")}</td>` : ""}<td>${esc(row.category)}</td>`
+      + row.values.map((v, i) => {
+        const key = b.editable && b.editable[i] && row.division ? `${b.editable[i]}:${row.division}` : "";
+        const over = key && (b.overridden[i] || []).includes(row.division);
+        return `<td class="num ${key && editable ? "edit" : ""} ${over ? "over" : ""}" ${key ? `data-edit="${key}"` : ""}>${money(v)}${over ? " ✎" : ""}</td>`;
+      }).join("")
+      + `${b.pct ? `<td class="num">${pctText(row.pct)}</td>` : ""}</tr>`).join("");
+    return `<details class="fs-block" open><summary><h3>${esc(b.title)}</h3></summary><div class="mis-grid"><table class="mis fs"><thead>${head}</thead><tbody>${body}</tbody></table></div></details>`;
+  };
+  const blocks = r.blocks.map((b, i) => block(b) + (i === 0 && r.purchase.columns.length > 1 ? block(r.purchase, false) : "")).join("");
+  el.innerHTML = `<p class="fs-title">Monthly Finance Sheet - ${esc(r.period)}</p>${misNote(r)}`
+    + `<div class="tree-tools"><button type="button" class="link" data-fs="1">Expand all</button><button type="button" class="link" data-fs="0">Collapse all</button></div>`
+    + `<p class="small muted">% is of each division's net revenue. ${editable ? "Click an opening or closing stock value to enter it by hand for this month." : r.month ? "" : "Choose a single month (from the 1st) to enter stock values by hand."}</p>`
+    + `<div class="fs-blocks">${blocks}</div>`;
+  bindMisLinks(el);
+  el.querySelectorAll("[data-fs]").forEach((b) => (b.onclick = () => el.querySelectorAll("details.fs-block").forEach((d) => (d.open = b.dataset.fs === "1"))));
+  if (!editable) return;
+  el.querySelectorAll("td[data-edit]").forEach((td) => (td.onclick = async () => {
+    try { if (await misEditStock(r.month, r.divisions, td.dataset.edit)) await drawNav(); } catch (err) { alert(err.message); }
+  }));
+}
+
+async function misExpenseView(el) {
+  const [r, st] = await Promise.all([api(`/reports/mis-exp-breakup?${misPeriod()}`), misSettings()]);
+  const divs = r.divisions;
+  el.innerHTML = misNote(r) + `<p class="small muted">Overheads expand into expense heads (the ledger's group, or the head set for it)
+    and heads into ledgers. Shared costs are split by each ledger's %. ${st.can_edit ? "Click a ledger to set its split." : "Click a ledger for its statement."}</p><div id="t" class="mis"></div>`;
+  const sum = (rows, k) => rows.reduce((a, x) => a + paise(k ? x.by[k] : x.amount), 0);
+  const roots = r.sections.map((sec) => {
+    const heads = new Map();
+    for (const x of sec.rows) { if (!heads.has(x.head)) heads.set(x.head, []); heads.get(x.head).push(x); }
+    return { label: sec.name, rows: sec.rows, children: [...heads.entries()].map(([h, rows]) => ({ label: h, rows,
+      children: rows.map((x) => ({ label: x.ledger, rows: [x], open: () => misLedgerClick(x, st) })) }))
+      .sort((a, b) => sum(b.rows) - sum(a.rows)) };
+  });
+  const all = r.sections.flatMap((sec) => sec.rows);
+  roots.push({ label: "Total overheads", rows: all, cls: "total" });
+  treeTable($("#t"), [
+    ...divs.map((d) => ({ label: d.name, num: true, get: (n) => rupees(sum(n.rows, d.key)) })),
+    { label: "Total", num: true, get: (n) => rupees(sum(n.rows)) },
+  ], roots, { expandDepth: 1, title: "Overhead / head / ledger" });
+  bindMisLinks(el);
+}
+function misLedgerClick(x, st) {
+  if (!x.ledger_id) return;
+  if (!st.can_edit) return openLedgerStatement(x.ledger_id, x.ledger);
+  const led = st.ledgers.find((l) => l.id === x.ledger_id) || { id: x.ledger_id, name: x.ledger, class: x.class, head: x.head };
+  editMisLedger(led, () => drawNav());
+}
+
+async function misBreakupView(el, head = null) {
+  const [r, st] = await Promise.all([api(`/reports/mis-exp-breakup?${misPeriod()}`), misSettings()]);
+  const divs = r.divisions;
+  el.innerHTML = misNote(r) + `<p class="small muted">${head ? `Head: <b>${esc(head)}</b> · ` : ""}Each overhead ledger, with deferred
+    charges added. ${st.can_edit ? "Click a ledger to set its split %, division, head or class." : ""}</p><div id="t" class="mis"></div>`;
+  const splitText = (x) => (x.division ? (divs.find((d) => d.key === x.division)?.name || "shared")
+    : x.split ? divs.map((d) => `${Number(x.split[d.key] || 0)}`).join("/") : "equal");
+  const roots = [];
+  for (const sec of r.sections) {
+    const list = head ? sec.rows.filter((x) => x.head === head) : sec.rows;
+    if (!list.length) continue;
+    roots.push({ label: sec.name, rows: list, children: list.map((x) => ({ label: x.ledger, x, rows: [x], open: () => misLedgerClick(x, st) })) });
+  }
+  const sum = (rows, k) => rows.reduce((a, x) => a + paise(k ? x.by[k] : x.amount), 0);
+  treeTable($("#t"), [
+    { label: "Head", get: (n) => (n.x ? esc(n.x.head) : "") },
+    { label: "In Tally", num: true, get: (n) => rupees(n.rows.reduce((a, x) => a + paise(x.tally), 0)) },
+    { label: "Deferred", num: true, get: (n) => { const v = n.rows.reduce((a, x) => a + paise(x.deferred), 0); return v ? rupees(v) + (n.x && n.x.deferred_mode === "replace" ? " *" : "") : ""; } },
+    { label: "Amount", num: true, get: (n) => rupees(sum(n.rows)) },
+    { label: "%", num: true, get: (n) => (n.x && n.x.pct != null ? `${n.x.pct}%` : "") },
+    { label: "Split", get: (n) => (n.x ? esc(splitText(n.x)) : "") },
+    ...divs.map((d) => ({ label: d.name, num: true, get: (n) => rupees(sum(n.rows, d.key)) })),
+  ], roots, { expandDepth: 1, title: "Overhead / ledger" });
+  if (roots.some((n) => n.rows.some((x) => x.deferred_mode === "replace" && Number(x.deferred)))) el.insertAdjacentHTML("beforeend", `<p class="small muted">* the deferred charge replaces the amount booked in Tally.</p>`);
+  bindMisLinks(el);
+}
+
+// one dialog for all MIS edits; fill(body) builds the fields, save() returns true to close
+function misDialog(title, fill, save) {
+  $("#mis-title").textContent = title;
+  $("#mis-msg").textContent = "";
+  fill($("#mis-body"));
+  $("#mis-cancel").onclick = () => $("#mis-dlg").close();
+  $("#mis-form").onsubmit = async (e) => {
+    e.preventDefault();
+    try { if ((await save()) !== false) $("#mis-dlg").close(); } catch (err) { $("#mis-msg").textContent = err.message; }
+  };
+  $("#mis-dlg").showModal();
+}
+
+async function editMisLedger(led, after) {
+  const st = await misSettings();
+  const divs = st.divisions;
+  misDialog(`MIS settings: ${led.name}`, (b) => {
+    b.innerHTML = `<p class="muted small">${esc(led.group || "")}${led.primary ? " · " + esc(led.primary) : ""}</p>
+      <div class="grid">
+        <label>Counts as<select name="class">${Object.entries(st.classes).map(([k, v]) => `<option value="${k}" ${k === led.class ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>
+        <label>Expense head<input name="head" value="${esc(led.head || "")}" placeholder="${esc(led.default_head || "")}"></label>
+        <label>Division (when no cost centre is given)<select name="division"><option value="">split by % below</option>
+          ${divs.map((d) => `<option value="${d.key}" ${led.division === d.key ? "selected" : ""}>${esc(d.name)} only</option>`).join("")}</select></label>
+        <label>Deferred schedules for this ledger<select name="deferred">
+          <option value="add" ${led.deferred !== "replace" ? "selected" : ""}>add to the amount in Tally</option>
+          <option value="replace" ${led.deferred === "replace" ? "selected" : ""}>replace the amount in Tally</option></select></label>
+      </div>
+      <h3>Split of shared amounts (%)</h3><p class="small muted">Amounts on a shared cost centre (such as H.O) or with no cost centre. Leave all empty for equal parts.</p>
+      <div class="split-row">${divs.map((d) => `<label>${esc(d.name)}<input name="split_${d.key}" inputmode="decimal" value="${led.split && led.split[d.key] != null ? esc(led.split[d.key]) : ""}"></label>`).join("")}</div>
+      <p><button type="button" class="link" id="mis-open-ledger">Open ledger statement</button></p>`;
+    $("#mis-open-ledger").onclick = () => { $("#mis-dlg").close(); openLedgerStatement(led.id, led.name); };
+  }, async () => {
+    const f = $("#mis-form").elements;
+    const split = {};
+    for (const d of divs) {
+      const v = f[`split_${d.key}`].value.trim();
+      if (v !== "") { if (!/^\d+(\.\d+)?$/.test(v)) throw new Error(`${d.name}: enter a percentage`); split[d.key] = Number(v); }
+    }
+    const sum = Object.values(split).reduce((a, v) => a + v, 0);
+    if (Object.keys(split).length && Math.abs(sum - 100) > 0.01 && !confirm(`The split adds up to ${sum}%, not 100%. Amounts are shared in these proportions. Save?`)) return false;
+    const body = { class: f.class.value === led.default_class ? null : f.class.value, head: f.head.value.trim() || null,
+      division: f.division.value || null, split: Object.keys(split).length ? split : null, deferred: f.deferred.value };
+    for (const k of Object.keys(body)) if (body[k] === null) delete body[k];
+    await api(`/mis/settings?company_id=${state.company}`, { method: "PUT", body: { ledgers: { [led.id]: body } } });
+    await misSettings(true);
+    if (after) await after();
+  });
+}
+
+async function misDeferredView(el) {
+  const [r, st] = await Promise.all([api(`/reports/mis-deferred?${rParams()}`), misSettings()]);
+  const mon = (k) => new Date(`${k}-01T00:00:00`).toLocaleString("en-IN", { month: "short", year: "2-digit" });
+  el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · prepaid costs spread evenly over months
+    ${st.can_edit ? ` · <button type="button" id="dx-add">Add schedule</button>` : ""}</p>
+    <h3>Schedules</h3><div class="mis-grid"><table class="mis" id="dx-s"></table></div>
+    <h3>Profit &amp; loss charge by head</h3><div class="mis-grid" id="dx-pl"></div>
+    <h3>Balance still to charge (balance sheet) by head</h3><div class="mis-grid" id="dx-bs"></div>`;
+  const head = `<th class="num">${r.months.map(mon).join(`</th><th class="num">`)}</th>`;
+  const nums = (arr) => arr.map((v) => `<td class="num">${Number(v) ? money(v) : ""}</td>`).join("");
+  $("#dx-s").innerHTML = `<thead><tr><th>Head</th><th>Description</th><th class="num">Amount</th><th>From</th><th class="num">Months</th><th class="num">Per month</th>${head}</tr></thead><tbody>`
+    + (r.schedules.map((x, i) => `<tr data-i="${i}" class="${st.can_edit ? "click" : ""}"><td>${esc(x.head)}</td><td class="wrap">${esc(x.description || "")}</td>`
+      + `<td class="num">${money(x.total_amount)}</td><td>${mon(x.first_month)} – ${mon(x.last_month)}</td><td class="num">${x.months}</td>`
+      + `<td class="num">${money(x.monthly)}</td>${nums(x.charge)}</tr>`).join("")
+      || `<tr><td colspan="${6 + r.months.length}" class="muted">No schedules yet${st.can_edit ? " – use Add schedule" : ""}</td></tr>`) + `</tbody>`;
+  // by head, each head expanding into its schedules
+  const grid = (elId, key) => {
+    const roots = r.heads.map((h) => ({ label: h.head, vals: h[key], children: r.schedules.filter((x) => x.head === h.head)
+      .map((x) => ({ label: x.description || `${mon(x.first_month)} – ${mon(x.last_month)}`, vals: x[key] })) }));
+    roots.push({ label: "Total", vals: r.total[key], cls: "total" });
+    treeTable($(elId), r.months.map((mo, i) => ({ label: mon(mo), num: true, get: (n) => (Number(n.vals[i]) ? money(n.vals[i]) : "") })),
+      roots, { title: "Head / schedule" });
+  };
+  grid("#dx-pl", "charge");
+  grid("#dx-bs", "balance");
+  if (!st.can_edit) return;
+  $("#dx-add").onclick = () => editDeferred(null);
+  $("#dx-s").querySelectorAll("tr.click").forEach((tr) => (tr.onclick = () => editDeferred(r.schedules[+tr.dataset.i])));
+}
+
+async function editDeferred(x) {
+  const st = await misSettings();
+  const ledgers = st.ledgers.filter((l) => ["factory", "admin"].includes(l.class));
+  misDialog(x ? `Deferred: ${x.head}` : "New deferred schedule", (b) => {
+    b.innerHTML = `<div class="grid">
+      <label>Expense ledger<select name="ledger_id"><option value="">(none – own line in admin overheads)</option>
+        ${ledgers.map((l) => `<option value="${l.id}" ${x && x.ledger_id === l.id ? "selected" : ""}>${esc(l.name)}</option>`).join("")}</select></label>
+      <label>Head *<input name="head" required maxlength="200" value="${esc(x ? x.head : "")}" placeholder="e.g. Insurance Expenses"></label>
+      <label>Total amount *<input name="total_amount" inputmode="decimal" required value="${esc(x ? x.total_amount : "")}"></label>
+      <label>First month *<input name="first_month" type="month" required value="${esc(x ? x.first_month : new Date().toISOString().slice(0, 7))}"></label>
+      <label>Number of months *<input name="months" type="number" min="1" max="120" required value="${x ? x.months : 12}"></label>
+      <label>Description<input name="description" maxlength="1000" value="${esc(x ? x.description || "" : "")}"></label></div>
+      <p class="small muted">The P&amp;L is charged amount ÷ months each month from the first month. Choose the ledger so the charge
+        follows that ledger's division split, and set the ledger to "replace" if the full payment is booked to it in Tally.</p>
+      ${x ? `<p><button type="button" class="secondary" id="dx-del">Delete schedule</button></p>` : ""}`;
+    const f = $("#mis-form").elements;
+    f.ledger_id.onchange = () => { if (!f.head.value) f.head.value = f.ledger_id.selectedOptions[0].textContent; };
+    if (x) $("#dx-del").onclick = async () => {
+      if (!confirm(`Delete the schedule "${x.head}"?`)) return;
+      try { await api(`/mis/deferred/${x.id}?company_id=${state.company}`, { method: "DELETE" }); $("#mis-dlg").close(); await drawNav(); }
+      catch (err) { $("#mis-msg").textContent = err.message; }
+    };
+  }, async () => {
+    const f = $("#mis-form").elements;
+    const body = { head: f.head.value.trim(), ledger_id: f.ledger_id.value || null, description: f.description.value.trim() || null,
+      total_amount: f.total_amount.value.replace(/,/g, "").trim(), first_month: f.first_month.value, months: Number(f.months.value) };
+    if (!body.head || !body.total_amount || !body.first_month) throw new Error("Head, amount and first month are needed");
+    await api(`/mis/deferred${x ? "/" + x.id : ""}?company_id=${state.company}`, { method: x ? "PUT" : "POST", body });
+    await drawNav();
+  });
+}
+
+// Masters → MIS divisions: divisions, cost centres, stock groups and ledgers
+let misTab = "centres";
+async function misSettingsView(el) {
+  const st = await misSettings(true);
+  const divs = st.divisions;
+  const ro = !st.can_edit;
+  const divOpts = (sel, extra) => `${extra || ""}${divs.map((d) => `<option value="${d.key}" ${sel === d.key ? "selected" : ""}>${esc(d.name)}</option>`).join("")}`;
+  el.innerHTML = `<h3>MIS divisions</h3><p class="small muted">How the MIS reports place amounts in divisions: by the Tally cost centre first,
+      then the ledger's own division, then (for sales and purchases) the stock group of the items; anything else is shared by the ledger's %.</p>
+    <nav class="subnav" id="mis-tabs"><button type="button" data-t="centres">Divisions &amp; cost centres</button>
+      <button type="button" data-t="groups">Stock groups</button><button type="button" data-t="ledgers">Ledgers</button></nav>
+    <div id="mis-tab"></div>`;
+  el.querySelectorAll("#mis-tabs button").forEach((b) => { b.classList.toggle("active", b.dataset.t === misTab); b.onclick = () => { misTab = b.dataset.t; misSettingsView(el); }; });
+  const box = $("#mis-tab");
+  const saveBtn = (id) => (ro ? "" : `<p><button type="button" id="${id}">Save</button> <span id="${id}-msg"></span></p>`);
+  const done = async (id, body) => {
+    try { await api(`/mis/settings?company_id=${state.company}`, { method: "PUT", body }); $(`#${id}-msg`).innerHTML = `<span class="okmsg">Saved</span>`; await misSettings(true); }
+    catch (err) { $(`#${id}-msg`).innerHTML = `<span class="error">${esc(err.message)}</span>`; }
+  };
+  if (misTab === "centres") {
+    box.innerHTML = `<h3>Divisions</h3><table><thead><tr><th>Key</th><th>Name</th></tr></thead><tbody>
+      ${divs.map((d) => `<tr><td>${esc(d.key)}</td><td><input data-div="${esc(d.key)}" value="${esc(d.name)}" ${ro ? "disabled" : ""}></td></tr>`).join("")}</tbody></table>
+      <h3>Cost centres</h3><table><thead><tr><th>Cost centre in Tally</th><th>Division</th></tr></thead><tbody>
+      ${st.cost_centres.map((c) => `<tr><td>${esc(c.name)}</td><td><select data-cc="${esc(c.name)}" ${ro ? "disabled" : ""}>${divOpts(c.division, `<option value="shared" ${c.division === "shared" ? "selected" : ""}>Shared (split by %)</option>`)}</select></td></tr>`).join("")
+        || `<tr><td colspan="2" class="muted">No cost centres in this company</td></tr>`}</tbody></table>${saveBtn("mis-cc")}`;
+    if (!ro) $("#mis-cc").onclick = () => done("mis-cc", {
+      divisions: divs.map((d) => ({ key: d.key, name: box.querySelector(`[data-div="${d.key}"]`).value.trim() || d.name })),
+      cost_centres: Object.fromEntries([...box.querySelectorAll("[data-cc]")].map((s) => [s.dataset.cc, s.value])) });
+  } else if (misTab === "groups") {
+    box.innerHTML = `<p class="row between"><span class="small muted">Sub-groups take their parent's setting unless set themselves.
+      Kind marks stock counted as raw material, WIP or finished goods in the P&amp;L.</span><input id="mis-gq" placeholder="Search groups"></p>
+      <table id="mis-gt"></table>${saveBtn("mis-sg")}`;
+    const changed = {};
+    const draw = () => {
+      const q = $("#mis-gq").value.trim().toLowerCase();
+      const rows = st.stock_groups.filter((g) => !q || g.name.toLowerCase().includes(q) || (g.parent || "").toLowerCase().includes(q));
+      $("#mis-gt").innerHTML = `<thead><tr><th>Stock group</th><th>Under</th><th>Division</th><th>Kind</th><th>In effect</th></tr></thead><tbody>`
+        + rows.slice(0, 400).map((g) => `<tr><td>${esc(g.name)}</td><td class="small muted">${esc(g.parent || "")}</td>
+          <td><select data-g="${g.id}" data-f="division" ${ro ? "disabled" : ""}>${divOpts(g.division, `<option value="">(from parent)</option>`)}</select></td>
+          <td><select data-g="${g.id}" data-f="kind" ${ro ? "disabled" : ""}><option value="">(from parent)</option>
+            ${Object.entries(st.kinds).map(([k, v]) => `<option value="${k}" ${g.kind === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></td>
+          <td class="small">${esc([divs.find((d) => d.key === g.effective_division)?.name, st.kinds[g.effective_kind]].filter(Boolean).join(" · ") || "—")}</td></tr>`).join("")
+        + `</tbody>`;
+      $("#mis-gt").querySelectorAll("select").forEach((s) => (s.onchange = () => {
+        const g = st.stock_groups.find((x) => x.id === s.dataset.g);
+        g[s.dataset.f] = s.value || null;
+        changed[g.id] = { division: g.division, kind: g.kind };
+      }));
+    };
+    $("#mis-gq").oninput = draw;
+    draw();
+    if (!ro) $("#mis-sg").onclick = () => done("mis-sg", { stock_groups: changed }).then(() => misSettingsView(el));
+  } else {
+    box.innerHTML = `<p class="row between"><span class="small muted">P&amp;L ledgers. Click one to change what it counts as, its head, division or split.</span>
+      <input id="mis-lq" placeholder="Search ledgers"></p><table id="mis-lt"></table>`;
+    const draw = () => {
+      const q = $("#mis-lq").value.trim().toLowerCase();
+      const rows = st.ledgers.filter((l) => !q || l.name.toLowerCase().includes(q) || (l.head || "").toLowerCase().includes(q));
+      table($("#mis-lt"), [
+        { label: "Ledger", key: "name", wrap: true }, { label: "Group", key: "group", wrap: true },
+        { label: "Counts as", get: (l) => st.classes[l.class] || "" }, { label: "Head", key: "head", wrap: true },
+        { label: "Division / split", get: (l) => (l.division ? divs.find((d) => d.key === l.division)?.name || l.division
+          : l.split ? divs.map((d) => `${d.name} ${Number(l.split[d.key] || 0)}%`).join(", ") : "cost centre, else equal") },
+        { label: "Deferred", get: (l) => (l.deferred === "replace" ? "replaces Tally" : "") },
+      ], rows.slice(0, 1000), ro ? null : (l) => editMisLedger(l, () => misSettingsView(el)));
+    };
+    $("#mis-lq").oninput = draw;
+    draw();
+  }
 }
 
 async function fifoView(el) {
   await loadAnalysisFilters();
   const r = await api(`/reports/fifo-costing?${rParams(analysisParams())}`);
   el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · valued first-in-first-out: every issue takes the cost of the
-    oldest stock still on hand · gross profit counts sales only · click an item for its movements</p>
-    <p><input id="fifo-q" placeholder="Search item"></p><table id="t"></table>`;
+    oldest stock still on hand · gross profit counts sales only · stock groups expand; click an item for its movements</p>
+    <p><input id="fifo-q" placeholder="Search item"></p><div id="t"></div>`;
   const draw = () => {
     const q = $("#fifo-q").value.trim().toLowerCase();
-    const rows = r.items.filter((x) => !q || x.item.toLowerCase().includes(q));
-    table($("#t"), [
-      { label: "Item", key: "item", wrap: true }, { label: "Stock group", key: "stock_group" },
-      { label: "Opening", num: true, get: (x) => (x.item ? qtyText(x.opening_qty, x.unit) : "") },
-      { label: "Opening value", num: true, get: (x) => money(x.opening_value) },
-      { label: "In", num: true, get: (x) => (x.item ? qtyText(x.in_qty, x.unit) : "") },
-      { label: "In value", num: true, get: (x) => money(x.in_value) },
-      { label: "Out", num: true, get: (x) => (x.item ? qtyText(x.out_qty, x.unit) : "") },
-      { label: "Out at FIFO cost", num: true, get: (x) => money(x.out_cost) },
-      { label: "Sales value", num: true, get: (x) => money(x.sold_value) },
-      { label: "Gross profit", num: true, get: (x) => money(x.gross_profit) },
-      { label: "Closing", num: true, get: (x) => (x.item ? qtyText(x.closing_qty, x.unit) : "") },
-      { label: "Closing value", num: true, get: (x) => money(x.closing_value) },
-      { label: "Rate", num: true, get: (x) => (x.closing_rate ? money(x.closing_rate) : "") },
-      { label: "", html: (x) => (x.short_qty ? `<span class="chip failed" title="Issued more than was in stock">short ${esc(x.short_qty)}</span>` : "") },
-    ], [...rows, { ...r.total, _class: "total" }], (x) => x.item_id && drillTo(x.item, (el2) => stockItemView(el2, x.item_id)));
+    const groups = new Map();
+    for (const x of r.items.filter((i) => !q || i.item.toLowerCase().includes(q))) {
+      const g = x.stock_group || "(no group)";
+      if (!groups.has(g)) groups.set(g, { label: g, items: [], children: [] });
+      groups.get(g).items.push(x);
+      groups.get(g).children.push({ label: x.item, x, items: [x], open: () => drillTo(x.item, (el2) => stockItemView(el2, x.item_id)) });
+    }
+    const roots = [...groups.values()].sort((a, b) => a.label.localeCompare(b.label));
+    roots.push({ label: "Total", total: r.total, cls: "total" });
+    const sum = (n, k) => (n.total ? money(n.total[k]) : rupees(n.items.reduce((a, x) => a + paise(x[k]), 0)));
+    const q2 = (k) => (n) => (n.x ? qtyText(n.x[k], n.x.unit) : "");
+    treeTable($("#t"), [
+      { label: "Opening", num: true, get: q2("opening_qty") }, { label: "Opening value", num: true, get: (n) => sum(n, "opening_value") },
+      { label: "In", num: true, get: q2("in_qty") }, { label: "In value", num: true, get: (n) => sum(n, "in_value") },
+      { label: "Out", num: true, get: q2("out_qty") }, { label: "Out at FIFO cost", num: true, get: (n) => sum(n, "out_cost") },
+      { label: "Sales value", num: true, get: (n) => sum(n, "sold_value") }, { label: "Gross profit", num: true, get: (n) => sum(n, "gross_profit") },
+      { label: "Closing", num: true, get: q2("closing_qty") }, { label: "Closing value", num: true, get: (n) => sum(n, "closing_value") },
+      { label: "Rate", num: true, get: (n) => (n.x && n.x.closing_rate ? money(n.x.closing_rate) : "") },
+      { label: "", get: (n) => (n.x && n.x.short_qty ? `<span class="chip failed" title="Issued more than was in stock">short ${esc(n.x.short_qty)}</span>` : "") },
+    ], roots, { title: "Stock group / item", expandDepth: q ? 1 : 0 });
   };
   $("#fifo-q").oninput = draw;
   draw();
@@ -745,6 +1202,7 @@ async function fifoView(el) {
 
 $("#rform").onsubmit = (e) => { e.preventDefault(); renderers.reports(); };
 $("#r-csv").onclick = (e) => { e.preventDefault(); download(reportUrl("csv"), `${$("#r-name").value}.csv`); };
+$("#r-xlsx").onclick = (e) => { e.preventDefault(); download(reportUrl("xlsx"), `${$("#r-name").value}.xlsx`); };
 
 // Drill-down like Tally: report → group → sub-group → ledger / item → voucher. A breadcrumb (or Esc)
 // goes back up. Group rows expand in place; amounts are summed in paise so totals never drift.
@@ -837,6 +1295,9 @@ renderers.reports = async () => {
     "purchase-analysis": (el) => analysisView(el, "purchase-analysis"),
     "sales-rm-cost": (el) => analysisView(el, "sales-rm-cost"),
     "sales-fifo-cost": (el) => analysisView(el, "sales-fifo-cost"),
+    "sales-group-wise": groupWiseView, "stock-journal": (el) => stockJournalView(el), "material-transfer-wip": (el) => stockJournalView(el, "material-transfer-wip"),
+    "mis-finance-sheet": misSheetView, "mis-pl": misPlView, "mis-expense": misExpenseView, "mis-exp-breakup": (el) => misBreakupView(el),
+    "mis-deferred": misDeferredView,
     "fifo-costing": fifoView,
   };
   await drillTo(label, roots[name] || ((el) => registerView(el, name.split("-")[1])));
@@ -919,12 +1380,25 @@ async function stockSummaryView(el) {
 async function stockItemView(el, itemId) {
   const r = await api(`/reports/stock-item?${rParams({ item_id: itemId })}`);
   const q = (v) => (v === "" || v == null ? "" : `${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 4 })} ${esc(r.unit || "")}`);
-  el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · opening ${q(r.opening_qty)} · closing ${q(r.closing_qty)} (value ${money(r.closing_value)})</p><table id="t"></table>`;
-  table($("#t"), [{ label: "Date", key: "date" }, { label: "Particulars", key: "particulars", wrap: true }, { label: "Type", key: "voucher_type" },
-    { label: "No.", key: "voucher_number" }, { label: "Godown", key: "godown" },
-    { label: "Inward", num: true, get: (x) => q(x.inward_qty) }, { label: "Outward", num: true, get: (x) => q(x.outward_qty) },
-    { label: "Value", num: true, get: (x) => (x.inward_value ? money(x.inward_value) : x.outward_value ? money(x.outward_value) : "") },
-    { label: "Balance", num: true, get: (x) => q(x.balance_qty) }], r.lines, (x) => drillVoucher(x.voucher_id, `${x.voucher_type} ${x.voucher_number}`));
+  el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · opening ${q(r.opening_qty)} · closing ${q(r.closing_qty)} (value ${money(r.closing_value)})
+    · months expand; click a movement to open its voucher</p><div id="t"></div>`;
+  const month = (d) => new Date(`${d}T00:00:00`).toLocaleString("en-IN", { month: "long", year: "numeric" });
+  const months = new Map();
+  for (const x of r.lines) {
+    const k = x.date.slice(0, 7);
+    if (!months.has(k)) months.set(k, { label: month(x.date), inQ: 0, outQ: 0, val: 0, last: null, children: [] });
+    const g = months.get(k);
+    g.inQ += Number(x.inward_qty || 0); g.outQ += Number(x.outward_qty || 0); g.last = x.balance_qty;
+    g.children.push({ label: `${x.date} · ${x.particulars || ""}`, x, open: () => drillVoucher(x.voucher_id, `${x.voucher_type} ${x.voucher_number}`) });
+  }
+  treeTable($("#t"), [
+    { label: "Type / no.", get: (n) => (n.x ? esc(`${n.x.voucher_type} ${n.x.voucher_number}`) : "") },
+    { label: "Godown", get: (n) => (n.x ? esc(n.x.godown || "") : "") },
+    { label: "Inward", num: true, get: (n) => (n.x ? q(n.x.inward_qty) : n.inQ ? q(n.inQ) : "") },
+    { label: "Outward", num: true, get: (n) => (n.x ? q(n.x.outward_qty) : n.outQ ? q(n.outQ) : "") },
+    { label: "Value", num: true, get: (n) => (n.x ? (n.x.inward_value ? money(n.x.inward_value) : n.x.outward_value ? money(n.x.outward_value) : "") : "") },
+    { label: "Balance", num: true, get: (n) => (n.x ? q(n.x.balance_qty) : q(n.last)) },
+  ], [...months.values()], { title: "Month / movement" });
 }
 
 async function outstandingView(el, kind) {
@@ -979,14 +1453,25 @@ async function dayBookView(el) {
 function openLedgerStatement(ledgerId, name) { return drillTo(name, (el) => ledgerStatementView(el, ledgerId)); }
 async function ledgerStatementView(el, ledgerId) {
   const r = await api(`/reports/ledger?${rParams({ ledger_id: ledgerId })}`);
-  el.innerHTML = `<p class="muted">${esc(r.group)} · ${esc(r.from)} to ${esc(r.to)} · click a voucher to open it</p><table id="t"></table>`;
-  const rows = [{ particulars: "Opening balance", balance: r.opening, _class: "total" }, ...r.lines,
-    { particulars: "Closing balance", debit: r.total_debit, credit: r.total_credit, balance: r.closing, _class: "total" }];
+  el.innerHTML = `<p class="muted">${esc(r.group)} · ${esc(r.from)} to ${esc(r.to)} · months expand; click a voucher to open it</p><div id="t"></div>`;
   const bal = (v) => (v == null ? "" : `${money(Math.abs(v))} ${+v >= 0 ? "Dr" : "Cr"}`);
-  table($("#t"), [{ label: "Date", key: "date" }, { label: "Particulars", key: "particulars", wrap: true }, { label: "Type", key: "voucher_type" },
-    { label: "No.", key: "voucher_number" }, { label: "Debit", num: true, get: (x) => (+x.debit ? money(x.debit) : "") },
-    { label: "Credit", num: true, get: (x) => (+x.credit ? money(x.credit) : "") }, { label: "Balance", num: true, get: (x) => bal(x.balance) }],
-    rows, (x) => x.voucher_id && drillVoucher(x.voucher_id, `${x.voucher_type} ${x.voucher_number}`));
+  const month = (d) => new Date(`${d}T00:00:00`).toLocaleString("en-IN", { month: "long", year: "numeric" });
+  const months = new Map();
+  for (const x of r.lines) {
+    const k = x.date.slice(0, 7);
+    if (!months.has(k)) months.set(k, { label: month(x.date), dr: 0, cr: 0, balance: null, children: [] });
+    const g = months.get(k);
+    g.dr += paise(x.debit); g.cr += paise(x.credit); g.balance = x.balance;
+    g.children.push({ label: `${x.date} · ${x.particulars || ""}`, x, open: () => x.voucher_id && drillVoucher(x.voucher_id, `${x.voucher_type} ${x.voucher_number}`) });
+  }
+  const roots = [{ label: "Opening balance", balance: r.opening, cls: "total" }, ...months.values(),
+    { label: "Closing balance", dr: paise(r.total_debit), cr: paise(r.total_credit), balance: r.closing, cls: "total" }];
+  treeTable($("#t"), [
+    { label: "Type / no.", get: (n) => (n.x ? esc(`${n.x.voucher_type} ${n.x.voucher_number}`) : "") },
+    { label: "Debit", num: true, get: (n) => (n.x ? (+n.x.debit ? money(n.x.debit) : "") : n.dr ? rupees(n.dr) : "") },
+    { label: "Credit", num: true, get: (n) => (n.x ? (+n.x.credit ? money(n.x.credit) : "") : n.cr ? rupees(n.cr) : "") },
+    { label: "Balance", num: true, get: (n) => bal(n.x ? n.x.balance : n.balance) },
+  ], roots, { title: "Month / voucher" });
 }
 
 // The voucher itself, inside the report trail; ledgers and items in it drill further
@@ -995,13 +1480,15 @@ async function voucherView(el, id) {
   const v = await api(`/vouchers/${id}`), d = v.doc;
   const ledgerIds = Object.fromEntries((state.ledgers || []).map((l) => [l.name, l.id]));
   el.innerHTML = `<div class="row between"><h3>${esc(d.voucher_type)} ${esc(d.voucher_number)} · ${esc(d.date)}</h3>
-      <span>${chip(v.status)} <button type="button" id="v-open">Open in Vouchers tab</button></span></div>
+      <span>${chip(v.status)} ${can("export") ? `<button type="button" class="secondary" id="v-xlsx">Excel</button>` : ""}
+      <button type="button" id="v-open">Open in Vouchers tab</button></span></div>
     ${d.party_ledger ? `<p>Party: <b>${esc(d.party_ledger)}</b>${d.reference_no ? ` · Ref ${esc(d.reference_no)}` : ""}</p>` : ""}
     <p>${esc(d.narration || "")}</p>
     ${d.entries.length ? `<table id="v-e"></table>` : `<p class="muted">No ledger entries (stock-only voucher)</p>`}
-    ${d.inventory.length ? inventoryTable(d.inventory) : ""}
+    ${d.inventory.length ? inventoryTable(d.inventory, v.item_groups || {}) : ""}
     <div id="v-hist"><p class="muted">Loading history…</p></div>`;
   historyHtml(id).then((html) => { if ($("#v-hist")) $("#v-hist").innerHTML = html; }).catch(() => {});
+  if ($("#v-xlsx")) $("#v-xlsx").onclick = () => download(`/vouchers/${id}/xlsx`, `${d.voucher_type} ${d.voucher_number}.xlsx`.replace(/[\\/:*?"<>|]/g, "-"));
   if (d.entries.length) table($("#v-e"), [{ label: "Ledger", key: "ledger" },
     { label: "Debit", num: true, get: (e) => (+e.amount > 0 ? money(e.amount) : "") },
     { label: "Credit", num: true, get: (e) => (+e.amount < 0 ? money(-e.amount) : "") },
@@ -1017,9 +1504,84 @@ function detailBlock(title, pairs) {
   return `<section><h3>${title}</h3>${shown.length ? `<dl>${shown.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>` : `<p class="muted small">Not given in Tally</p>`}</section>`;
 }
 
+// ------------------------------------------------------------------ masters menu
+const MASTER_VIEWS = ["items", "stock-groups", "stock-categories", "units", "ledgers", "ledger-groups", "ledger-categories", "mis"];
+let masterView = (() => { try { const v = localStorage.getItem("erp_master"); return MASTER_VIEWS.includes(v) ? v : "items"; } catch (_) { return "items"; } })();
+let ledgerGroup = null;   // set when a ledger group is opened from the Ledger group list
+const listCache = {};
 renderers.masters = async () => {
+  document.querySelectorAll("#m-nav button").forEach((b) => b.classList.toggle("active", b.dataset.m === masterView));
+  $("#mp-ledgers").hidden = masterView !== "ledgers";
+  $("#mp-items").hidden = masterView !== "items";
+  $("#mp-mis").hidden = masterView !== "mis";
+  $("#mp-list").hidden = ["ledgers", "items", "mis"].includes(masterView);
+  if (masterView === "mis") return misSettingsView($("#mp-mis"));
+  if (masterView === "ledgers") return renderLedgers();
+  if (masterView === "items") return renderItems();
+  return renderMasterList();
+};
+function openMaster(view) {
+  masterView = view;
+  try { localStorage.setItem("erp_master", view); } catch (_) { /* private window */ }
+  return renderers.masters().catch((e) => alert(e.message));
+}
+document.querySelectorAll("#m-nav button").forEach((b) => (b.onclick = () => {
+  if (b.dataset.m === "ledgers") { ledgerGroup = null; $("#lq").value = ""; }
+  if (b.dataset.m === "items") { $("#iq").value = ""; itemFilter = null; }
+  if (b.dataset.m !== masterView) $("#ml-q").value = "";
+  openMaster(b.dataset.m);
+}));
+const NATURE = { asset: "Assets", liability: "Liabilities", income: "Income", expense: "Expenses" };
+const MASTER_LISTS = {
+  "stock-groups": { title: "Stock group", path: "stock-groups", note: "Click a group for its stock items.",
+    cols: [{ label: "Name", key: "name", wrap: true }, { label: "Under", get: (g) => g.parent || "Primary", wrap: true },
+      { label: "HSN", key: "hsn_code" }, { label: "GST", num: true, get: (g) => (g.gst_rate == null ? "" : `${Number(g.gst_rate)}%`) },
+      { label: "Stock items", num: true, key: "items" }],
+    open: (g) => openItems("group", g.name, "Stock group") },
+  "stock-categories": { title: "Stock category", path: "stock-categories", note: "Categories given to stock items in Tally. Click one for its items.",
+    cols: [{ label: "Name", key: "name", wrap: true }, { label: "Stock items", num: true, key: "items" }],
+    open: (c) => openItems("category", c.name, "Stock category") },
+  units: { title: "UOM (units of measure)", path: "units", note: "Click a unit for the stock items that use it.",
+    cols: [{ label: "Symbol", key: "symbol" }, { label: "Formal name", key: "formal_name", wrap: true },
+      { label: "Decimals", num: true, key: "decimals" },
+      { label: "Compound unit", get: (u) => (u.base_unit && u.additional_unit ? `${u.base_unit} of ${Number(u.conversion || 1)} ${u.additional_unit}` : "") },
+      { label: "Stock items", num: true, key: "items" }],
+    search: (u) => [u.symbol, u.formal_name],
+    open: (u) => openItems("unit", u.symbol, "Unit") },
+  "ledger-groups": { title: "Ledger group", path: "groups", note: "Click a group for its ledgers.",
+    cols: [{ label: "Name", key: "name", wrap: true }, { label: "Under", get: (g) => g.parent || "Primary", wrap: true },
+      { label: "Category", get: (g) => NATURE[g.nature] || g.nature },
+      { label: "Affects gross profit", get: (g) => (g.affects_gross_profit ? "Yes" : "") },
+      { label: "Ledgers", num: true, key: "ledgers" }],
+    search: (g) => [g.name, g.parent, NATURE[g.nature]],
+    open: (g) => { ledgerGroup = g.name; $("#lq").value = ""; openMaster("ledgers"); } },
+  "ledger-categories": { title: "Ledger categories", path: "ledger-categories",
+    note: "Every ledger group belongs to one of Tally's four kinds. Click one for its groups.",
+    cols: [{ label: "Category", key: "name" }, { label: "Primary groups", get: (c) => c.primary_groups.join(", "), wrap: true },
+      { label: "Groups", num: true, key: "groups" }, { label: "Ledgers", num: true, key: "ledgers" }],
+    open: (c) => { $("#ml-q").value = c.name; openMaster("ledger-groups"); } },
+};
+async function renderMasterList() {
+  const cfg = MASTER_LISTS[masterView];
+  const key = `${state.company}:${masterView}`;
+  if (!listCache[key]) listCache[key] = await api(`/companies/${state.company}/masters/${cfg.path}`);
+  const all = listCache[key];
+  const q = $("#ml-q").value.trim().toLowerCase();
+  const rows = !q ? all : all.filter((r) => (cfg.search ? cfg.search(r) : [r.name, r.parent]).some((v) => (v || "").toLowerCase().includes(q)));
+  $("#ml-title").textContent = cfg.title;
+  $("#ml-note").textContent = `${rows.length} of ${all.length} · ${cfg.note}`;
+  table($("#ml-table"), cfg.cols, rows, cfg.open);
+}
+let mlTimer; $("#ml-q").oninput = () => { clearTimeout(mlTimer); mlTimer = setTimeout(renderMasterList, 200); };
+
+async function renderLedgers() {
   const q = $("#lq").value;
-  const rows = q ? await api(`/companies/${state.company}/masters/ledgers?q=${encodeURIComponent(q)}`) : state.ledgers;
+  const p = new URLSearchParams();
+  if (q) p.set("q", q);
+  if (ledgerGroup) p.set("group", ledgerGroup);
+  $("#l-filter").innerHTML = ledgerGroup ? `· group ${esc(ledgerGroup)} <button type="button" class="link" id="l-clear">show all</button>` : "";
+  if ($("#l-clear")) $("#l-clear").onclick = () => { ledgerGroup = null; renderLedgers(); };
+  const rows = q || ledgerGroup ? await api(`/companies/${state.company}/masters/ledgers?${p}`) : state.ledgers;
   const bank = (r) => (r.party_banks && r.party_banks[0]) ||
     (r.bank_account_no ? { bank_name: r.bank_name || "Own account", account_no: r.bank_account_no, ifsc: r.bank_ifsc } : null);
   table($("#ltable"), [
@@ -1034,8 +1596,8 @@ renderers.masters = async () => {
     { label: "Opening", num: true, get: (r) => money(r.opening_balance) },
     { label: "In Tally", get: (r) => (r.tally_guid ? "✓" : "") },
   ], rows.slice(0, 1000), (r) => showLedger(r.name).catch((e) => alert(e.message)));
-};
-let lqTimer; $("#lq").oninput = () => { clearTimeout(lqTimer); lqTimer = setTimeout(renderers.masters, 250); };
+}
+let lqTimer; $("#lq").oninput = () => { clearTimeout(lqTimer); lqTimer = setTimeout(renderLedgers, 250); };
 
 // ------------------------------------------------------------------ stock items
 const qty = (v, unit) => (v == null ? "" : `${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 4 })} ${unit || ""}`.trim());
@@ -1043,12 +1605,18 @@ const pct = (v) => (v == null ? "" : `${Number(v)}%`);
 const amt = (v) => (v == null ? null : money(v));
 const conversionText = (i) => (i.alternate_unit && i.conversion ? `${Number(i.denominator || 1)} ${i.unit} = ${Number(i.conversion)} ${i.alternate_unit}` : "");
 let itemsCache = null;
-renderers.items = async () => {
+let itemFilter = null;   // { field, value, label } when opened from a stock group, category or unit
+function openItems(field, value, label) { itemFilter = { field, value, label }; $("#iq").value = ""; openMaster("items"); }
+async function renderItems() {
   if (!itemsCache || itemsCache.company !== state.company)
     itemsCache = { company: state.company, rows: await api(`/companies/${state.company}/masters/stock-items`) };
   const q = $("#iq").value.trim().toLowerCase();
-  const rows = q ? itemsCache.rows.filter((i) => [i.name, i.group, i.hsn_code, i.alias].some((v) => (v || "").toLowerCase().includes(q))) : itemsCache.rows;
-  $("#icount").textContent = `${rows.length} of ${itemsCache.rows.length} items` + (rows.length > 1000 ? " (first 1,000 shown; search to narrow)" : "");
+  let rows = itemFilter ? itemsCache.rows.filter((i) => i[itemFilter.field] === itemFilter.value) : itemsCache.rows;
+  if (q) rows = rows.filter((i) => [i.name, i.group, i.category, i.hsn_code, i.alias].some((v) => (v || "").toLowerCase().includes(q)));
+  $("#icount").innerHTML = (itemFilter ? `${esc(itemFilter.label)}: <b>${esc(itemFilter.value)}</b> `
+    + `<button type="button" class="link" id="i-clear">show all</button> · ` : "")
+    + `${rows.length} of ${itemsCache.rows.length} items` + (rows.length > 1000 ? " (first 1,000 shown; search to narrow)" : "");
+  if ($("#i-clear")) $("#i-clear").onclick = () => { itemFilter = null; renderItems(); };
   table($("#itable"), [
     { label: "Name", key: "name", wrap: true }, { label: "Group", key: "group", wrap: true },
     { label: "Unit", wrap: true, get: (i) => [i.unit, conversionText(i)].filter(Boolean).join(" · ") },
@@ -1059,8 +1627,8 @@ renderers.items = async () => {
     { label: "Std cost", num: true, get: (i) => amt(i.standard_cost) || "" },
     { label: "Costing", key: "valuation_method" },
   ], rows.slice(0, 1000), showItem);
-};
-let iqTimer; $("#iq").oninput = () => { clearTimeout(iqTimer); iqTimer = setTimeout(renderers.items, 200); };
+}
+let iqTimer; $("#iq").oninput = () => { clearTimeout(iqTimer); iqTimer = setTimeout(renderItems, 200); };
 
 function showItem(i) {
   const yn = (b) => (b ? "Yes" : "No");
@@ -1231,13 +1799,19 @@ $("#ld-edit").onclick = async () => {
 
 // ------------------------------------------------------------------ connector settings
 const CF = { host: "#c-host", port: "#c-port", tally_company_name: "#c-name", alter_by: "#c-alter", inbound_from_date: "#c-from" };
-const CB = { enabled: "#c-enabled", inbound_enabled: "#c-in", outbound_enabled: "#c-out", freeze_outbound: "#c-fout", freeze_inbound: "#c-fin" };
+const CB = { enabled: "#c-enabled", freeze_outbound: "#c-fout", freeze_inbound: "#c-fin" };
+const cMode = () => (document.querySelector('input[name="c-mode"]:checked') || {}).value || "one_way";
 renderers.settings = async () => {
   let c = null;
   try { c = await api(`/sync/connectors/${state.company}`); } catch (_) { $("#c-msg").textContent = "Not configured yet"; }
   if (!c) return;
   for (const [k, s] of Object.entries(CF)) $(s).value = c[k] ?? "";
   for (const [k, s] of Object.entries(CB)) $(s).checked = !!c[k];
+  const both = c.sync_mode === "bidirectional";
+  $("#c-mode-both").checked = $("#c-mode-both").defaultChecked = both;
+  $("#c-mode-one").checked = $("#c-mode-one").defaultChecked = !both;
+  $("#c-waiting").textContent = c.waiting_for_tally
+    ? `${c.waiting_for_tally} change(s) made in the software are waiting to be written into Tally.` : "";
   $("#c-ftypes").value = (c.frozen_voucher_types || []).join(", ");
 };
 $("#cform").onsubmit = async (e) => {
@@ -1246,9 +1820,23 @@ $("#cform").onsubmit = async (e) => {
   for (const [k, s] of Object.entries(CF)) body[k] = $(s).value || null;
   for (const [k, s] of Object.entries(CB)) body[k] = $(s).checked;
   body.port = +body.port;
-  if (body.outbound_enabled && !confirm("Outbound sync writes vouchers into Tally. Use a test company until reconciliation is signed off. Continue?")) return;
-  try { await api(`/sync/connectors/${state.company}`, { method: "PUT", body }); $("#c-msg").innerHTML = `<span class="okmsg">Saved</span>`; }
-  catch (err) { $("#c-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; }
+  body.sync_mode = cMode();
+  if (body.sync_mode === "bidirectional" && !$("#c-mode-both").defaultChecked && !confirm("Bidirectional sync writes vouchers "
+    + "into Tally. Use a test company until reconciliation is signed off. Continue?")) return;
+  const save = async () => {
+    const r = await api(`/sync/connectors/${state.company}`, { method: "PUT", body });
+    await renderers.settings();
+    $("#c-msg").innerHTML = `<span class="okmsg">Saved · ${r.sync_mode === "bidirectional" ? "bidirectional" : "one way (Tally → software)"}`
+      + `${r.queued_changes_discarded ? ` · ${r.queued_changes_discarded} waiting change(s) discarded` : ""}</span>`;
+  };
+  try { await save(); }
+  catch (err) {
+    if (!/waiting for Tally/.test(err.message)) { $("#c-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; return; }
+    if (confirm(`${err.message}\n\nOK: send them to Tally.\nCancel: choose whether to discard them.`)) body.queued_changes = "send";
+    else if (confirm("Discard the waiting changes? They stay in the software but are not written into Tally.")) body.queued_changes = "discard";
+    else return;
+    try { await save(); } catch (e2) { $("#c-msg").innerHTML = `<span class="error">${esc(e2.message)}</span>`; }
+  }
 };
 function cResult(text) { const el = $("#c-result"); el.hidden = false; el.textContent = text; }
 $("#c-test").onclick = async (e) => {

@@ -51,6 +51,14 @@ REPORTS: dict[str, str] = {
     "fifo-costing": "FIFO stock costing",
     "sales-rm-cost": "Sales with raw-material cost",
     "sales-fifo-cost": "Sales register with FIFO cost",
+    "sales-group-wise": "Item group-wise sales",
+    "stock-journal": "Stock journal register (in / out)",
+    "material-transfer-wip": "Material transfer to WIP",
+    "mis-pl": "MIS: P&L by division",
+    "mis-finance-sheet": "MIS: Monthly finance sheet (P&L)",
+    "mis-expense": "MIS: Expenses by division",
+    "mis-exp-breakup": "MIS: Expense breakup",
+    "mis-deferred": "MIS: Deferred expenses",
 }
 
 # What the company admin sees when ticking permissions, grouped by area.

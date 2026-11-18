@@ -47,6 +47,10 @@ class ConnectorIn(BaseModel):
     freeze_inbound: bool = False
     frozen_voucher_types: list[str] = []
     inbound_from_date: date | None = None
+    # "one_way": Tally -> software only. "bidirectional": both ways. When given, it sets inbound/outbound.
+    sync_mode: Literal["one_way", "bidirectional"] | None = None
+    # What to do with software changes queued while the sync was one-way, when it becomes bidirectional.
+    queued_changes: Literal["send", "discard"] | None = None
 
     @field_validator("host")
     @classmethod
@@ -61,8 +65,30 @@ class ConnectorIn(BaseModel):
         return host
 
 
-def _conn_out(conn: TallyConnector) -> dict:
-    return {c.name: getattr(conn, c.name) for c in TallyConnector.__table__.columns}
+WAITING = (OutboxStatus.PENDING, OutboxStatus.FAILED, OutboxStatus.PAUSED)
+
+
+def _waiting(db, company_id) -> int:
+    """Software changes queued for Tally and not yet sent."""
+    return db.scalar(select(func.count()).select_from(SyncOutbox).where(
+        SyncOutbox.company_id == company_id, SyncOutbox.status.in_(WAITING))) or 0
+
+
+def _discard_waiting(db, company_id) -> int:
+    jobs = list(db.scalars(select(SyncOutbox).where(SyncOutbox.company_id == company_id, SyncOutbox.status.in_(WAITING))))
+    for ev in jobs:
+        ev.status, ev.completed_at, ev.last_error = OutboxStatus.SUPERSEDED, utcnow(), "discarded when sync became bidirectional"
+        if ev.entity_type == "voucher" and (v := db.get(Voucher, ev.entity_id)) is not None:
+            v.sync_status = "not_synced"
+    return len(jobs)
+
+
+def _conn_out(conn: TallyConnector, db=None) -> dict:
+    out = {c.name: getattr(conn, c.name) for c in TallyConnector.__table__.columns}
+    out["sync_mode"] = "bidirectional" if conn.outbound_enabled else "one_way"
+    if db is not None:
+        out["waiting_for_tally"] = _waiting(db, conn.company_id)
+    return out
 
 
 def _connector(db, company_id) -> TallyConnector:
@@ -75,7 +101,7 @@ def _connector(db, company_id) -> TallyConnector:
 @router.get("/sync/connectors/{company_id}")
 def get_connector(company_id: uuid.UUID, db: DB, user: CurrentUser):
     authorize(db, user, company_id, Perm.SYNC_READ)
-    return _conn_out(_connector(db, company_id))
+    return _conn_out(_connector(db, company_id), db)
 
 
 @router.put("/sync/connectors/{company_id}")
@@ -86,13 +112,25 @@ def put_connector(company_id: uuid.UUID, body: ConnectorIn, db: DB, user: Curren
     if conn is None:
         conn = TallyConnector(company_id=company_id, tally_company_name=body.tally_company_name)
         db.add(conn)
-    for k, v in body.model_dump().items():
+    values = body.model_dump(exclude={"sync_mode", "queued_changes"})
+    if body.sync_mode:
+        values["inbound_enabled"], values["outbound_enabled"] = True, body.sync_mode == "bidirectional"
+    discarded = 0
+    if values["outbound_enabled"] and not (before or {}).get("outbound_enabled"):
+        # Turning on Tally writes: changes made in the software meanwhile would all go to Tally at once.
+        waiting = _waiting(db, company_id)
+        if waiting and body.queued_changes is None:
+            raise HTTPException(409, f"{waiting} change(s) made in the software are waiting for Tally. "
+                                     "Choose whether to send them to Tally or discard them.")
+        if waiting and body.queued_changes == "discard":
+            discarded = _discard_waiting(db, company_id)
+    for k, v in values.items():
         setattr(conn, k, v)
     db.flush()
     audit.record(db, actor_of(user), "sync.connector.update", "company", company_id, company_id=company_id,
-                 before=before, after=_conn_out(conn))
+                 before=before, after={**_conn_out(conn), "queued_changes_discarded": discarded})
     db.commit()
-    return _conn_out(conn)
+    return {**_conn_out(conn, db), "queued_changes_discarded": discarded}
 
 
 class FreezeIn(BaseModel):

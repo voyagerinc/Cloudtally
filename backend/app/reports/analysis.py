@@ -9,7 +9,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session, aliased
 
-from app.models import Ledger, StockGroup, StockItem, Voucher, VoucherInventoryLine, VoucherType
+from app.models import Ledger, StockGroup, StockItem, Voucher, VoucherEntry, VoucherInventoryLine, VoucherType
 from app.services.canonical import m
 
 ZERO = Decimal("0")
@@ -100,6 +100,48 @@ class RawMaterialCost:
 
 # ------------------------------------------------------------------ sales / purchase analysis
 
+ROUND_OFF = re.compile(r"round", re.I)
+
+
+def line_taxes(db: Session, company_id: uuid.UUID, rows) -> dict:
+    """GST of each item line. A voucher's tax ledgers are shared over what is taxed in it: its item lines
+    and other income/charge ledgers such as packing & forwarding, each weighted by its GST rate (charges
+    take the highest item rate). A line gets only its own share: the tax on charges belongs to no item, so
+    the lines add up to the voucher's tax only when it has no such charges."""
+    from app.reports import _groups, _is_tax_ledger
+    by_voucher: dict = defaultdict(list)
+    for line, v, _base, _vtype, it, _party in rows:
+        by_voucher[v.id].append((line, it, v.party_ledger_id))
+    if not by_voucher:
+        return {}
+    groups = _groups(db, company_id)
+    ledgers = {l.id: l for l in db.scalars(select(Ledger).where(Ledger.company_id == company_id))}
+    tax_ids = {i for i, l in ledgers.items() if _is_tax_ledger(l, groups)}
+    round_ids = {i for i, l in ledgers.items() if ROUND_OFF.search(l.name)}
+    tax, other = defaultdict(lambda: ZERO), defaultdict(lambda: ZERO)
+    ids = list(by_voucher)
+    for n in range(0, len(ids), 5000):
+        for vid, lid, amount in db.execute(select(VoucherEntry.voucher_id, VoucherEntry.ledger_id, VoucherEntry.amount)
+                                           .where(VoucherEntry.voucher_id.in_(ids[n:n + 5000]))):
+            if lid in tax_ids:
+                tax[vid] += abs(amount)
+            elif lid not in round_ids and lid != by_voucher[vid][0][2]:
+                other[vid] += abs(amount)   # the item ledgers (= the item lines) plus charges
+    out = {}
+    for vid, lines in by_voucher.items():
+        if not tax[vid]:
+            out.update({line.id: ZERO for line, *_ in lines})
+            continue
+        items_value = sum((abs(line.amount) for line, *_ in lines), ZERO)
+        rates = [Decimal(str(it.gst_rate)) if it.gst_rate else None for _, it, _ in lines]
+        top = max((r for r in rates if r), default=Decimal(1))
+        weights = [abs(line.amount) * (r or top) for (line, *_), r in zip(lines, rates)]
+        charges = max(other[vid] - items_value, ZERO)
+        total_w = sum(weights, ZERO) + charges * top
+        for (line, *_), w in zip(lines, weights):
+            out[line.id] = (tax[vid] * w / total_w) if total_w else ZERO
+    return out
+
 def trade_analysis(db: Session, company_id: uuid.UUID, side: str, from_date: date, to_date: date, *,
                    by: str = "party", party: uuid.UUID | None = None, item: uuid.UUID | None = None,
                    category: str | None = None, stock_group: uuid.UUID | None = None,
@@ -134,16 +176,18 @@ def trade_analysis(db: Session, company_id: uuid.UUID, side: str, from_date: dat
     rm = RawMaterialCost(production_costs(db, company_id, to_date)) if cost == "rm" else None
     fifo = fifo_line_costs(db, company_id, to_date, {line.stock_item_id for line, *_ in rows}) if cost == "fifo" else None
     costed = rm is not None or fifo is not None
+    taxes = line_taxes(db, company_id, rows)
 
     agg: dict = {}
     lines_out = []
-    total = {"quantity": ZERO, "value": ZERO, "cost": ZERO, "vouchers": set(), "no_cost": 0}
+    total = {"quantity": ZERO, "value": ZERO, "tax": ZERO, "cost": ZERO, "vouchers": set(), "no_cost": 0}
     for line, v, base, vtype, it, party_name in rows:
         if party and v.party_ledger_id != party or item and it.id != item or category and (it.category or "") != category \
                 or stock_group and it.group_id != stock_group:
             continue
         sign = Decimal(-1) if base == ret else Decimal(1)
         qty, value = abs(line.quantity) * sign, line.amount * sign
+        tax = taxes.get(line.id, ZERO) * sign
         if rm is not None:
             unit_cost = rm.per_unit(it.id, v.voucher_date)
             line_cost = unit_cost * abs(line.quantity) * sign if unit_cost is not None else None
@@ -160,12 +204,13 @@ def trade_analysis(db: Session, company_id: uuid.UUID, side: str, from_date: dat
                "category": (it.category or "", it.category or "(no category)"),
                "stock_group": (str(it.group_id), groups.get(it.group_id, "(no group)")),
                "voucher": (str(v.id), f"{vtype} {v.voucher_number}")}[by]
-        row = agg.setdefault(key[0], {"key": key[0], "name": key[1], "quantity": ZERO, "value": ZERO, "cost": ZERO,
-                                       "vouchers": set(), "no_cost": 0, "units": set(), "date": str(v.voucher_date),
+        row = agg.setdefault(key[0], {"key": key[0], "name": key[1], "quantity": ZERO, "value": ZERO, "tax": ZERO,
+                                       "cost": ZERO, "vouchers": set(), "no_cost": 0, "units": set(), "date": str(v.voucher_date),
                                        "party": party_name, "voucher_type": vtype, "voucher_number": v.voucher_number})
         for target in (row, total):
             target["quantity"] += qty
             target["value"] += value
+            target["tax"] += tax
             target["vouchers"].add(v.id)
             if costed:
                 if line_cost is None:
@@ -177,8 +222,10 @@ def trade_analysis(db: Session, company_id: uuid.UUID, side: str, from_date: dat
         if by == "voucher":
             lines_out.append({"voucher_id": str(v.id), "date": str(v.voucher_date), "voucher_type": vtype,
                               "voucher_number": v.voucher_number, "party": party_name, "item": it.name,
+                              "item_group": groups.get(it.group_id, "(no group)") if it.group_id else None,
+                              "category": it.category,
                               "quantity": _qty(qty), "unit": line.unit, "rate": m(line.rate),
-                              "value": m(value), **({"cost_per_unit": m(unit_cost) if unit_cost is not None else None,
+                              "value": m(value), "tax": m(tax), **({"cost_per_unit": m(unit_cost) if unit_cost is not None else None,
                                                      "cost": m(line_cost) if line_cost is not None else None,
                                                      "margin": m(value - line_cost) if line_cost is not None else None,
                                                      "margin_pct": m((value - line_cost) / value * 100)
@@ -187,6 +234,7 @@ def trade_analysis(db: Session, company_id: uuid.UUID, side: str, from_date: dat
 
     def out(r):
         res = {"key": r["key"], "name": r["name"], "vouchers": len(r["vouchers"]), "value": m(r["value"]),
+               "tax": m(r["tax"]),
                "quantity": _qty(r["quantity"]) if len(r.get("units", ())) <= 1 else None,
                "unit": next(iter(r["units"])) if len(r.get("units", ())) == 1 else None}
         if costed:
@@ -202,7 +250,7 @@ def trade_analysis(db: Session, company_id: uuid.UUID, side: str, from_date: dat
         "cost": cost,
         "voucher_types": [{"name": t.name, "base_type": t.base_type, "counted": t.id in chosen} for t in types],
         "rows": [out(r) for r in rows_out],
-        "total": {"vouchers": len(total["vouchers"]), "value": m(total["value"]),
+        "total": {"vouchers": len(total["vouchers"]), "value": m(total["value"]), "tax": m(total["tax"]),
                   **({"cost": m(total["cost"]), "margin": m(total["value"] - total["cost"]),
                       "margin_pct": m(((total["value"] - total["cost"]) / total["value"] * 100) if total["value"] else ZERO),
                       "lines_without_cost": total["no_cost"]} if costed else {})},
@@ -309,6 +357,105 @@ def fifo_line_costs(db: Session, company_id: uuid.UUID, to_date: date, item_ids)
     return costs
 
 
+def group_wise(db: Session, company_id: uuid.UUID, side: str, from_date: date, to_date: date, *,
+               party: uuid.UUID | None = None, category: str | None = None, stock_group: uuid.UUID | None = None,
+               voucher_types: list[str] | None = None, include_returns: bool = True, cost: str | None = "fifo") -> dict:
+    """Sales (or purchases) by stock group as a tree, like Tally's group-wise reports: each group holds its
+    sub-groups and items, and its figures include everything under it. stock_group keeps that group's
+    branch only, sub-groups included."""
+    data = trade_analysis(db, company_id, side, from_date, to_date, by="item", party=party, category=category,
+                          voucher_types=voucher_types, include_returns=include_returns, cost=cost)
+    groups = {g.id: g for g in db.scalars(select(StockGroup).where(StockGroup.company_id == company_id))}
+    item_group = dict(db.execute(select(StockItem.id, StockItem.group_id).where(StockItem.company_id == company_id)).all())
+    costed = cost is not None
+
+    def chain(gid):   # the group and its parents, nearest first
+        out, seen = [], set()
+        while gid in groups and gid not in seen:
+            seen.add(gid)
+            out.append(gid)
+            gid = groups[gid].parent_id
+        return out
+
+    def blank(key, name, kind):
+        return {"key": key, "name": name, "kind": kind, "quantity": ZERO, "value": ZERO, "tax": ZERO, "cost": ZERO,
+                "no_cost": 0, "items": 0, "units": set(), "children": []}
+
+    nodes = {}
+    roots = []
+    for r in data["rows"]:
+        gid = item_group.get(uuid.UUID(r["key"]))
+        path = chain(gid)
+        if stock_group and stock_group not in path:
+            continue
+        leaf = {"key": r["key"], "name": r["name"], "kind": "item", "quantity": r["quantity"], "unit": r["unit"],
+                "value": r["value"], "tax": r["tax"], "vouchers": r["vouchers"],
+                **({k: r[k] for k in ("cost", "margin", "margin_pct", "lines_without_cost")} if costed else {})}
+        parent_list = roots
+        # build from the top: the root group first
+        for g in reversed(path):
+            if g not in nodes:
+                nodes[g] = blank(str(g), groups[g].name, "group")
+                parent_list.append(nodes[g])
+            parent_list = nodes[g]["children"]
+        if not path:
+            if "none" not in nodes:
+                nodes["none"] = blank("", "(no group)", "group")
+                roots.append(nodes["none"])
+            parent_list = nodes["none"]["children"]
+            path = ["none"]
+        parent_list.append(leaf)
+        for g in path:
+            n = nodes[g]
+            n["value"] += Decimal(r["value"])
+            n["tax"] += Decimal(r["tax"])
+            n["items"] += 1
+            if r["quantity"] is not None and r["unit"]:
+                n["quantity"] += Decimal(r["quantity"])
+            n["units"].add(r["unit"] if r["quantity"] is not None else None)
+            if costed:
+                n["cost"] += Decimal(r["cost"])
+                n["no_cost"] += r["lines_without_cost"]
+
+    def finish(n):
+        if n["kind"] == "item":
+            return n
+        one_unit = len(n["units"]) == 1 and None not in n["units"]
+        out = {"key": n["key"], "name": n["name"], "kind": "group", "items": n["items"],
+               "quantity": _qty(n["quantity"]) if one_unit else None, "unit": next(iter(n["units"])) if one_unit else None,
+               "value": m(n["value"]), "tax": m(n["tax"])}
+        if costed:
+            out.update(cost=m(n["cost"]), margin=m(n["value"] - n["cost"]),
+                       margin_pct=m((n["value"] - n["cost"]) / n["value"] * 100) if n["value"] else None,
+                       lines_without_cost=n["no_cost"])
+        kids = [finish(c) for c in n["children"]]
+        # groups first, then items, each by value (largest first) as in Tally's group summary
+        out["children"] = sorted(kids, key=lambda c: (c["kind"] != "group", -abs(Decimal(c["value"]))))
+        return out
+
+    tree = sorted((finish(n) for n in roots), key=lambda c: -abs(Decimal(c["value"])))
+    total_value = sum((Decimal(n["value"]) for n in tree), ZERO)
+    total = {"value": m(total_value), "tax": m(sum((Decimal(n["tax"]) for n in tree), ZERO))}
+    if costed:
+        tc = sum((Decimal(n["cost"]) for n in tree), ZERO)
+        total.update(cost=m(tc), margin=m(total_value - tc),
+                     margin_pct=m((total_value - tc) / total_value * 100) if total_value else None,
+                     lines_without_cost=sum(n["lines_without_cost"] for n in tree))
+
+    rows = []   # flat, for CSV and Excel: one row per group and item, with its level and group path
+
+    def flatten(n, level, path):
+        rows.append({"level": level, "type": n["kind"], "group_path": " > ".join(path), "name": n["name"],
+                     **{k: n.get(k) for k in ("quantity", "unit", "value", "tax", "cost", "margin", "margin_pct")
+                        if k in n}})
+        for c in n.get("children", []):
+            flatten(c, level + 1, path + [n["name"]])
+    for n in tree:
+        flatten(n, 1, [])
+    return {"side": side, "from": data["from"], "to": data["to"], "include_returns": include_returns, "cost": cost,
+            "voucher_types": data["voucher_types"], "tree": tree, "rows": rows, "total": total}
+
+
 def fifo_costing(db: Session, company_id: uuid.UUID, from_date: date, to_date: date, *, item: uuid.UUID | None = None,
                  category: str | None = None, stock_group: uuid.UUID | None = None, only_moved: bool = True) -> dict:
     """Stock valued first-in-first-out: each issue takes the cost of the oldest stock still on hand.
@@ -346,3 +493,60 @@ def fifo_costing(db: Session, company_id: uuid.UUID, from_date: date, to_date: d
     out_rows.sort(key=lambda r: r["item"].lower())
     return {"from": str(from_date), "to": str(to_date), "method": "FIFO", "items": out_rows,
             "total": {k: m(v) for k, v in totals.items()} | {"gross_profit": m(totals["sold_value"] - totals["sold_cost"])}}
+
+
+# ------------------------------------------------------------------ stock journal register (in / out)
+
+JOURNAL_BASES = ("Stock Journal", "Manufacturing Journal")
+DEFAULT_JOURNAL = "Material Transfer to WIP"
+
+
+def stock_journal_register(db: Session, company_id: uuid.UUID, from_date: date, to_date: date, *,
+                           voucher_type: str | None = None, item: uuid.UUID | None = None,
+                           stock_group: uuid.UUID | None = None) -> dict:
+    """Stock journals (material transfer to WIP, manufacturing ...) with what came in and what went out of
+    each, as two lists side by side. voucher_type "all" takes every stock journal type; none takes
+    Material Transfer to WIP when the company has it."""
+    types = list(db.scalars(select(VoucherType).where(VoucherType.company_id == company_id,
+                                                      VoucherType.base_type.in_(JOURNAL_BASES)).order_by(VoucherType.name)))
+    names = {t.name for t in types}
+    chosen = voucher_type if voucher_type and voucher_type != "all" else (
+        DEFAULT_JOURNAL if voucher_type is None and DEFAULT_JOURNAL in names else None)
+    ids = [t.id for t in types if chosen is None or t.name == chosen]
+    groups = _group_names(db, company_id)
+    rows = db.execute(
+        select(VoucherInventoryLine, Voucher, VoucherType.name, StockItem)
+        .join(Voucher, Voucher.id == VoucherInventoryLine.voucher_id)
+        .join(VoucherType, VoucherType.id == Voucher.voucher_type_id)
+        .join(StockItem, StockItem.id == VoucherInventoryLine.stock_item_id)
+        .where(Voucher.company_id == company_id, Voucher.status == POSTED, Voucher.voucher_type_id.in_(ids or [None]),
+               Voucher.voucher_date.between(from_date, to_date))
+        .order_by(Voucher.voucher_date, Voucher.voucher_number, VoucherInventoryLine.line_no)).all()
+    keep = None
+    if item or stock_group:   # the vouchers that move the item / an item of the group, shown whole
+        keep = {v.id for line, v, _t, it in rows if (item and it.id == item) or (stock_group and it.group_id == stock_group)}
+    vouchers: dict = {}
+    for line, v, vtype, it in rows:
+        if keep is not None and v.id not in keep:
+            continue
+        rec = vouchers.setdefault(v.id, {"id": str(v.id), "date": str(v.voucher_date), "voucher_type": vtype,
+                                         "voucher_number": v.voucher_number, "narration": v.narration, "in": [], "out": []})
+        inward = line.quantity > 0 or (line.quantity == 0 and line.inward)
+        rec["in" if inward else "out"].append({
+            "item_id": str(it.id), "item": it.name, "item_group": groups.get(it.group_id), "quantity": _qty(abs(line.quantity)),
+            "unit": line.unit, "rate": m(line.rate), "amount": m(abs(line.amount)), "godown": line.godown, "batch": line.batch})
+
+    def total(lines):
+        units = {x["unit"] for x in lines}
+        return {"quantity": _qty(sum((Decimal(x["quantity"]) for x in lines), ZERO)) if len(units) == 1 else None,
+                "unit": next(iter(units)) if len(units) == 1 else None,
+                "amount": m(sum((Decimal(x["amount"]) for x in lines), ZERO)), "items": len(lines)}
+    out = []
+    for rec in vouchers.values():
+        rec["in_total"], rec["out_total"] = total(rec["in"]), total(rec["out"])
+        out.append(rec)
+    return {"from": str(from_date), "to": str(to_date), "voucher_type": chosen or "all",
+            "voucher_types": [t.name for t in types], "vouchers": out,
+            "total": {"vouchers": len(out),
+                      "in_amount": m(sum((Decimal(r["in_total"]["amount"]) for r in out), ZERO)),
+                      "out_amount": m(sum((Decimal(r["out_total"]["amount"]) for r in out), ZERO))}}

@@ -17,8 +17,7 @@
     <button data-tab="entry" data-perm="voucher.write">New voucher</button>
     <button data-tab="conflicts" data-perm="sync.read">Conflicts <span id="conflict-badge" class="badge" hidden></span></button>
     <button data-tab="reports" data-perm="report">Reports</button>
-    <button data-tab="masters" data-perm="masters.read">Ledgers</button>
-    <button data-tab="items" data-perm="masters.read">Stock items</button>
+    <button data-tab="masters" data-perm="masters.read">Masters</button>
     <button data-tab="settings" data-perm="sync.read">Connector</button>
     <button data-tab="audit" data-perm="audit.read">Audit</button>
     <button data-tab="users" data-perm="users.manage">Users</button>
@@ -165,10 +164,19 @@
       <option value="purchase-analysis" data-report="purchase-analysis">Purchase analysis</option>
       <option value="sales-rm-cost" data-report="sales-rm-cost">Sales with raw-material cost</option>
       <option value="sales-fifo-cost" data-report="sales-fifo-cost">Sales register with FIFO cost</option>
+      <option value="sales-group-wise" data-report="sales-group-wise">Item group-wise sales</option>
+      <option value="material-transfer-wip" data-report="material-transfer-wip">Material transfer to WIP</option>
+      <option value="stock-journal" data-report="stock-journal">Stock journal register (in / out)</option>
+      <option value="mis-finance-sheet" data-report="mis-finance-sheet">MIS: Monthly finance sheet (P&amp;L)</option>
+      <option value="mis-pl" data-report="mis-pl">MIS: P&amp;L by division</option>
+      <option value="mis-expense" data-report="mis-expense">MIS: Expenses by division</option>
+      <option value="mis-exp-breakup" data-report="mis-exp-breakup">MIS: Expense breakup</option>
+      <option value="mis-deferred" data-report="mis-deferred">MIS: Deferred expenses</option>
       <option value="fifo-costing" data-report="fifo-costing">Stock costing (FIFO)</option>
     </select>
     <input type="date" id="r-from"><input type="date" id="r-to"><button>Show</button>
     <a id="r-csv" class="button secondary" href="#">CSV</a>
+    <a id="r-xlsx" class="button secondary" href="#">Excel</a>
   </form>
   <div id="ra-filters" class="row filters wrap" hidden>
     <label id="ra-by-label">View by<select id="ra-by">
@@ -176,7 +184,7 @@
       <option value="item">Item</option><option value="category">Item category</option>
       <option value="stock_group">Stock group</option><option value="voucher">Each voucher</option></select></label>
     <label id="ra-party-label">Party<input id="ra-party" list="ra-parties" placeholder="all parties"></label>
-    <label>Item<input id="ra-item" list="ra-items" placeholder="all items"></label>
+    <label id="ra-item-label">Item<input id="ra-item" list="ra-items" placeholder="all items"></label>
     <label>Item category<select id="ra-cat"><option value="">all</option></select></label>
     <label>Stock group<select id="ra-group"><option value="">all</option></select></label>
     <label class="check" id="ra-returns-label"><input type="checkbox" id="ra-returns" checked> Deduct returns</label>
@@ -186,17 +194,47 @@
 </section>
 
 <section id="masters" class="tab" hidden>
-  <div class="row between"><h2>Ledgers</h2>
-    <span><input id="lq" placeholder="Search ledgers"> <button type="button" id="l-new">Create ledger</button></span></div>
-  <datalist id="group-names"></datalist>
-  <table id="ltable"></table>
+  <h2>Masters</h2>
+  <nav id="m-nav" class="subnav">
+    <span class="muted small">Inventory</span>
+    <button type="button" data-m="items">Stock item</button>
+    <button type="button" data-m="stock-groups">Stock group</button>
+    <button type="button" data-m="stock-categories">Stock category</button>
+    <button type="button" data-m="units">UOM</button>
+    <span class="muted small">Accounts</span>
+    <button type="button" data-m="ledgers">Ledger master</button>
+    <button type="button" data-m="ledger-groups">Ledger group</button>
+    <button type="button" data-m="ledger-categories">Ledger categories</button>
+    <span class="muted small">MIS</span>
+    <button type="button" data-m="mis">MIS divisions</button>
+  </nav>
+  <div id="mp-ledgers" class="mpanel" hidden>
+    <div class="row between"><h3>Ledger master <span id="l-filter" class="small muted"></span></h3>
+      <span><input id="lq" placeholder="Search ledgers"> <button type="button" id="l-new">Create ledger</button></span></div>
+    <datalist id="group-names"></datalist>
+    <table id="ltable"></table>
+  </div>
+  <div id="mp-items" class="mpanel" hidden>
+    <div class="row between"><h3>Stock item</h3><input id="iq" placeholder="Search items, group, category or HSN"></div>
+    <p class="muted small" id="icount"></p>
+    <table id="itable"></table>
+  </div>
+  <div id="mp-mis" class="mpanel" hidden></div>
+  <div id="mp-list" class="mpanel" hidden>
+    <div class="row between"><h3 id="ml-title"></h3><input id="ml-q" placeholder="Search"></div>
+    <p class="muted small" id="ml-note"></p>
+    <table id="ml-table"></table>
+  </div>
 </section>
 
-<section id="items" class="tab" hidden>
-  <div class="row between"><h2>Stock items</h2><input id="iq" placeholder="Search items, group or HSN"></div>
-  <p class="muted small" id="icount"></p>
-  <table id="itable"></table>
-</section>
+<dialog id="mis-dlg" class="wide">
+  <form id="mis-form" method="dialog" novalidate>
+    <div class="row between"><h2 id="mis-title"></h2>
+      <span><button id="mis-save">Save</button> <button type="button" id="mis-cancel" class="secondary">Cancel</button></span></div>
+    <p id="mis-msg" class="error"></p>
+    <div id="mis-body"></div>
+  </form>
+</dialog>
 
 <dialog id="item-dlg">
   <div class="row between"><h2 id="id-name"></h2><button type="button" id="id-close" class="secondary">Close</button></div>
@@ -285,9 +323,14 @@
     </div>
     <div class="row wrap">
       <label class="check"><input type="checkbox" id="c-enabled"> Connector enabled</label>
-      <label class="check"><input type="checkbox" id="c-in"> Inbound (Tally → ERP)</label>
-      <label class="check"><input type="checkbox" id="c-out"> Outbound (ERP → Tally)</label>
     </div>
+    <fieldset><legend>Sync mode</legend>
+      <label class="check"><input type="radio" name="c-mode" value="one_way" id="c-mode-one"> <span><b>One way</b> – Tally → software.
+        Data is only read from Tally; nothing is written into Tally.</span></label>
+      <label class="check"><input type="radio" name="c-mode" value="bidirectional" id="c-mode-both"> <span><b>Bidirectional</b> – both ways.
+        Vouchers entered or changed in the software are also written into Tally.</span></label>
+      <p class="small muted" id="c-waiting"></p>
+    </fieldset>
     <fieldset><legend>Emergency freeze</legend>
       <label class="check"><input type="checkbox" id="c-fout"> Freeze outbound</label>
       <label class="check"><input type="checkbox" id="c-fin"> Freeze inbound</label>

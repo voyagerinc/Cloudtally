@@ -26,9 +26,11 @@ REPO = Path(__file__).resolve().parents[3]
 
 # Never in a package: secrets, environments, build output, caches.
 SKIP_DIRS = {".git", ".github", ".venv", "venv", "dist", "updates", "__pycache__", ".pytest_cache", "node_modules",
-             "pgdata", "logs"}
+             "pgdata", "logs", "localdb"}
 SKIP_FILES = {".env"}
-SKIP_SUFFIXES = (".pyc", ".pyo", ".docx", ".log", ".pem", ".key", ".zip", ".part")
+# Office documents and spreadsheets in the folder are the user's business files, never part of the software.
+SKIP_SUFFIXES = (".pyc", ".pyo", ".docx", ".doc", ".xlsx", ".xlsm", ".xls", ".csv", ".pdf", ".log", ".pem", ".key",
+                 ".zip", ".part")
 
 INSTALL_CMD = """@echo off\r
 rem Installs Tally Cloud. Right-click this file and choose "Run as administrator".\r
@@ -52,7 +54,7 @@ def package_files(root: Path = REPO):
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith("."))
         for name in sorted(filenames):
-            if name in SKIP_FILES or name.startswith(".env") or name.lower().endswith(SKIP_SUFFIXES):
+            if name in SKIP_FILES or name.startswith((".env", "~$")) or name.lower().endswith(SKIP_SUFFIXES):
                 continue
             path = Path(dirpath) / name
             yield path, path.relative_to(root).as_posix()

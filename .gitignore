@@ -10,3 +10,8 @@ Cloud_Licensing_Integration_PRD*.docx
 dist/
 updates/
 localdb/
+
+# business files kept next to the project (never committed or packaged)
+*.xlsx
+*.xls
+~$*

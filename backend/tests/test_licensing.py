@@ -577,3 +577,12 @@ def test_portal_publishes_its_own_installer_for_customers(db, admin, portal, tmp
         assert "app/backend/requirements.txt" in z.namelist() and not any(n.endswith("/.env") for n in z.namelist())
     r = api.post(f"{V1}/admin/releases/build-current", headers=admin)
     assert r.status_code == 409 and "already released" in r.json()["detail"]
+
+
+def test_installer_never_packs_business_files(tmp_path):
+    from app.licensing.package import package_files
+    for name in ("Monthly P&L Oct-26.xlsx", "~$Monthly P&L Oct-26.xlsx", "ledger.csv", "notes.pdf", "run.bat"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "localdb").mkdir()
+    (tmp_path / "localdb" / "pg.conf").write_text("x")
+    assert [rel for _, rel in package_files(tmp_path)] == ["run.bat"]

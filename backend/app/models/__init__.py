@@ -5,6 +5,7 @@ from app.models.licensing import (
 from app.models.masters import (
     CostCentre, Godown, Ledger, LedgerGroup, StockGroup, StockItem, TaxCode, Unit, VoucherType,
 )
+from app.models.mis import DeferredExpense, MisSettings
 from app.models.sync import (
     Attachment, AuditEvent, ImportBatch, OutboxStatus, ReconciliationRun, SyncAttempt, SyncConflict,
     SyncInbox, SyncOutbox, SyncProgress, TallyConnector, TallyMapping,
@@ -15,6 +16,7 @@ from app.models.vouchers import (
 )
 
 __all__ = [
+    "DeferredExpense", "MisSettings",
     "Attachment", "AuditEvent", "Customer", "DownloadEvent", "Installation", "License", "LicenseEvent",
     "LicenseState", "SoftwareRelease", "UserInvite", "BankAllocation", "BillAllocation", "Company", "CostAllocation", "CostCentre",
     "FinancialYear", "Godown", "ImportBatch", "Ledger", "LedgerGroup", "OutboxStatus", "ReconciliationRun",

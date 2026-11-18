@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app import audit
 from app.api.deps import DB, CurrentUser, actor_of, authorize
@@ -37,8 +37,69 @@ def _ledger_out(db, led: Ledger, reveal: bool) -> dict:
 def list_groups(company_id: uuid.UUID, db: DB, user: CurrentUser):
     authorize(db, user, company_id, Perm.MASTERS_READ)
     groups = db.scalars(select(LedgerGroup).where(LedgerGroup.company_id == company_id).order_by(LedgerGroup.name)).all()
+    counts = dict(db.execute(select(Ledger.group_id, func.count()).where(Ledger.company_id == company_id)
+                             .group_by(Ledger.group_id)).all())
     return [{"id": g.id, "name": g.name, "parent": g.parent.name if g.parent else None, "nature": g.nature,
-             "is_revenue": g.is_revenue, "affects_gross_profit": g.affects_gross_profit} for g in groups]
+             "is_revenue": g.is_revenue, "affects_gross_profit": g.affects_gross_profit,
+             "is_reserved": g.is_reserved, "ledgers": counts.get(g.id, 0)} for g in groups]
+
+
+NATURES = {"asset": "Assets", "liability": "Liabilities", "income": "Income", "expense": "Expenses"}
+
+
+@router.get("/ledger-categories")
+def ledger_categories(company_id: uuid.UUID, db: DB, user: CurrentUser):
+    """Tally's four kinds of ledger (assets, liabilities, income, expenses), with their primary groups."""
+    authorize(db, user, company_id, Perm.MASTERS_READ)
+    groups = db.scalars(select(LedgerGroup).where(LedgerGroup.company_id == company_id)).all()
+    by_id = {g.id: g for g in groups}
+    counts = dict(db.execute(select(Ledger.group_id, func.count()).where(Ledger.company_id == company_id)
+                             .group_by(Ledger.group_id)).all())
+
+    def primary(g):
+        seen = set()
+        while g.parent_id in by_id and g.id not in seen:
+            seen.add(g.id)
+            g = by_id[g.parent_id]
+        return g
+    out = {k: {"key": k, "name": v, "primary_groups": set(), "groups": 0, "ledgers": 0} for k, v in NATURES.items()}
+    for g in groups:
+        row = out.setdefault(g.nature, {"key": g.nature, "name": g.nature, "primary_groups": set(), "groups": 0, "ledgers": 0})
+        row["primary_groups"].add(primary(g).name)
+        row["groups"] += 1
+        row["ledgers"] += counts.get(g.id, 0)
+    return [{**r, "primary_groups": sorted(r["primary_groups"])} for r in out.values()]
+
+
+@router.get("/stock-groups")
+def list_stock_groups(company_id: uuid.UUID, db: DB, user: CurrentUser):
+    authorize(db, user, company_id, Perm.MASTERS_READ)
+    groups = db.scalars(select(StockGroup).where(StockGroup.company_id == company_id).order_by(StockGroup.name)).all()
+    names = {g.id: g.name for g in groups}
+    counts = dict(db.execute(select(StockItem.group_id, func.count()).where(StockItem.company_id == company_id)
+                             .group_by(StockItem.group_id)).all())
+    return [{"id": g.id, "name": g.name, "parent": names.get(g.parent_id), "hsn_code": g.hsn_code,
+             "gst_rate": g.gst_rate, "taxability": g.taxability, "items": counts.get(g.id, 0)} for g in groups]
+
+
+@router.get("/stock-categories")
+def list_stock_categories(company_id: uuid.UUID, db: DB, user: CurrentUser):
+    authorize(db, user, company_id, Perm.MASTERS_READ)
+    rows = db.execute(select(StockItem.category, func.count()).where(StockItem.company_id == company_id,
+                                                                     StockItem.category.is_not(None))
+                      .group_by(StockItem.category).order_by(StockItem.category)).all()
+    return [{"name": name, "items": n} for name, n in rows]
+
+
+@router.get("/units")
+def list_units(company_id: uuid.UUID, db: DB, user: CurrentUser):
+    authorize(db, user, company_id, Perm.MASTERS_READ)
+    units = db.scalars(select(Unit).where(Unit.company_id == company_id).order_by(Unit.symbol)).all()
+    counts = dict(db.execute(select(StockItem.unit, func.count()).where(StockItem.company_id == company_id)
+                             .group_by(StockItem.unit)).all())
+    return [{"id": u.id, "symbol": u.symbol, "formal_name": u.formal_name, "decimals": u.decimals,
+             "base_unit": u.base_unit, "additional_unit": u.additional_unit, "conversion": u.conversion,
+             "items": counts.get(u.symbol, 0)} for u in units]
 
 
 @router.post("/groups", status_code=201)

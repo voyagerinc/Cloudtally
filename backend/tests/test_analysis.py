@@ -1,4 +1,5 @@
 """Sales and purchase analysis, FIFO costing, and raw-material cost from production vouchers."""
+import uuid
 from datetime import date
 from decimal import Decimal
 
@@ -122,3 +123,40 @@ def test_sales_fifo_cost_api(db, books):
     r = TestClient(app).get(f"/api/v1/reports/sales-fifo-cost?company_id={books.id}&from_date=2026-04-01&to_date=2027-03-31",
                             headers={"X-API-Key": "k-boss2"}).json()
     assert r["by"] == "voucher" and r["total"]["cost"] == "200.00" and r["total"]["margin"] == "300.00"
+    line = r["lines"][0]
+    assert list(line)[list(line).index("item") + 1] == "item_group"
+    assert list(line)[list(line).index("value") + 1] == "tax" and "tax" in r["total"]
+
+
+def test_sales_fifo_cost_excel_export(db, books):
+    import io
+    import zipfile
+    from app.core.security import hash_key
+    db.add(User(username="boss3", api_key_hash=hash_key("k-boss3"), is_superadmin=True))
+    db.commit()
+    r = TestClient(app).get(f"/api/v1/reports/sales-fifo-cost?company_id={books.id}&from_date=2026-04-01&to_date=2027-03-31"
+                            "&format=xlsx", headers={"X-API-Key": "k-boss3"})
+    assert r.status_code == 200 and r.headers["content-type"].startswith("application/vnd.openxmlformats")
+    sheet = zipfile.ZipFile(io.BytesIO(r.content)).read("xl/worksheets/sheet1.xml").decode()
+    assert "Item group" in sheet and "FIFO cost" in sheet and "Gross profit" in sheet and ">Total<" in sheet and "voucher_id" not in sheet.lower()
+
+
+def test_group_wise_sales_rolls_items_up_the_group_tree(db, books):
+    from app.models import StockGroup
+    top = StockGroup(company_id=books.id, name="FINISHED GOODS")
+    db.add(top)
+    db.flush()
+    sub = StockGroup(company_id=books.id, name="OIL COOLER-ACE", parent_id=top.id)
+    db.add(sub)
+    db.flush()
+    db.query(StockItem).filter_by(company_id=books.id, name="Finished Cooler").one().group_id = sub.id
+    db.commit()
+    r = analysis.group_wise(db, books.id, "sales", *SPAN)
+    [root] = r["tree"]
+    [child] = root["children"]
+    [item] = child["children"]
+    assert (root["name"], child["name"], item["name"]) == ("FINISHED GOODS", "OIL COOLER-ACE", "Finished Cooler")
+    assert (root["value"], root["cost"], root["margin"], root["quantity"], root["unit"]) == ("500.00", "200.00", "300.00", "1", "Nos")
+    assert r["total"]["value"] == "500.00" and [x["level"] for x in r["rows"]] == [1, 2, 3]
+    assert analysis.group_wise(db, books.id, "sales", *SPAN, stock_group=sub.id)["total"]["value"] == "500.00"
+    assert analysis.group_wise(db, books.id, "sales", *SPAN, stock_group=uuid.uuid4())["tree"] == []

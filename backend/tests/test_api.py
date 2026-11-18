@@ -200,6 +200,21 @@ def test_connector_rejects_public_tally_host(books, admin):
     assert r.status_code == 200 and r.json()["outbound_enabled"] is False
 
 
+def test_sync_mode_one_way_or_bidirectional(books, admin):
+    url, base = f"/api/v1/sync/connectors/{books}", {"host": "192.168.1.20", "tally_company_name": "X"}
+    r = client.put(url, json={**base, "sync_mode": "one_way"}, headers=admin).json()
+    assert (r["sync_mode"], r["inbound_enabled"], r["outbound_enabled"]) == ("one_way", True, False)
+    voucher(books, admin)   # entered in the software while one way: queued, not sent
+    assert client.get(url, headers=admin).json()["waiting_for_tally"] == 1
+    r = client.put(url, json={**base, "sync_mode": "bidirectional"}, headers=admin)
+    assert r.status_code == 409 and "waiting for Tally" in r.json()["detail"]
+    r = client.put(url, json={**base, "sync_mode": "bidirectional", "queued_changes": "discard"}, headers=admin).json()
+    assert (r["sync_mode"], r["outbound_enabled"], r["queued_changes_discarded"], r["waiting_for_tally"]) == \
+        ("bidirectional", True, 1, 0)
+    r = client.put(url, json={**base, "sync_mode": "one_way"}, headers=admin).json()
+    assert r["outbound_enabled"] is False
+
+
 def test_correlation_id_round_trips(books, admin):
     r = client.get(f"/api/v1/companies/{books}", headers={**admin, "X-Correlation-ID": "abc123"})
     assert r.headers["X-Correlation-ID"] == "abc123"
@@ -330,3 +345,23 @@ def test_page_loads_the_current_version_of_its_script():
     r = client.get("/")
     assert r.headers["cache-control"] == "no-cache"
     assert f'/static/app.js?v={__version__}"' in r.text and f'/static/app.css?v={__version__}"' in r.text
+
+
+def test_masters_menu_lists(db, books, admin):
+    from app.models import StockGroup, StockItem, Unit
+    g = StockGroup(company_id=books, name="OIL COOLER-ACE")
+    db.add_all([g, Unit(company_id=books, symbol="Nos", formal_name="Numbers", decimals=0)])
+    db.flush()
+    db.add_all([StockItem(company_id=books, name="AH 1012", unit="Nos", group_id=g.id, category="FINISH GOODS"),
+                StockItem(company_id=books, name="Loose part", unit="Nos")])
+    db.commit()
+    base = f"/api/v1/companies/{books}/masters"
+    get = lambda p: client.get(f"{base}/{p}", headers=admin).json()
+    assert [(x["name"], x["items"]) for x in get("stock-groups")] == [("OIL COOLER-ACE", 1)]
+    assert get("stock-categories") == [{"name": "FINISH GOODS", "items": 1}]
+    assert [(u["symbol"], u["items"]) for u in get("units")] == [("Nos", 2)]
+    debtors = next(x for x in get("groups") if x["name"] == "Sundry Debtors")
+    assert debtors["ledgers"] >= 1 and debtors["nature"] == "asset"
+    cats = {c["key"]: c for c in get("ledger-categories")}
+    assert set(cats) == {"asset", "liability", "income", "expense"} and "Current Assets" in cats["asset"]["primary_groups"]
+    assert sum(c["ledgers"] for c in cats.values()) == len(client.get(f"{base}/ledgers", headers=admin).json())

@@ -2,12 +2,16 @@ import uuid
 from datetime import date
 from typing import Literal
 
+from decimal import Decimal
+
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response
 from sqlalchemy import func, or_, select
 
 from app.api.deps import DB, CurrentUser, actor_of, authorize
 from app.core.security import Perm
-from app.models import Ledger, SyncOutbox, Voucher, VoucherStatus, VoucherType, VoucherVersion
+from app import audit
+from app.models import Ledger, StockGroup, SyncOutbox, Voucher, VoucherStatus, VoucherType, VoucherVersion
 from app.schemas.vouchers import TransitionIn, VoucherCreate, VoucherOut, VoucherSummary, VoucherUpdate
 from app.services import canonical
 from app.services.accounting import vouchers as engine
@@ -31,8 +35,14 @@ def _out(db, v: Voucher) -> VoucherOut:
     last = db.scalar(select(SyncOutbox).where(SyncOutbox.entity_id == v.id).order_by(SyncOutbox.created_at.desc()).limit(1))
     if last and last.last_error:
         tally = {**(tally or {}), "last_error": last.last_error, "error_code": last.error_code}
-    return VoucherOut(**{k: getattr(v, k) for k in VoucherOut.model_fields if k not in ("doc", "tally")},
-                      doc=engine.to_doc(v), tally=tally)
+    return VoucherOut(**{k: getattr(v, k) for k in VoucherOut.model_fields if k not in ("doc", "tally", "item_groups")},
+                      doc=engine.to_doc(v), tally=tally, item_groups=_item_groups(db, v))
+
+
+def _item_groups(db, v: Voucher) -> dict:
+    ids = {i.stock_item.group_id for i in v.inventory_lines if i.stock_item.group_id}
+    names = dict(db.execute(select(StockGroup.id, StockGroup.name).where(StockGroup.id.in_(ids))).all()) if ids else {}
+    return {i.stock_item.name: names.get(i.stock_item.group_id) for i in v.inventory_lines}
 
 
 def _load(db, user, voucher_id: uuid.UUID, perm: str) -> Voucher:
@@ -93,6 +103,70 @@ def count_vouchers(company_id: uuid.UUID, db: DB, user: CurrentUser):
 @router.get("/vouchers/{voucher_id}", response_model=VoucherOut)
 def get_voucher(voucher_id: uuid.UUID, db: DB, user: CurrentUser):
     return _out(db, _load(db, user, voucher_id, Perm.VOUCHER_READ))
+
+
+def _is_in(line: dict) -> bool:
+    q = Decimal(line["quantity"])
+    return q > 0 or (q == 0 and line.get("direction") == "in")
+
+
+def voucher_grid(doc: dict, groups: dict) -> list[list]:
+    """A voucher as a sheet: its details, the stock coming in and the stock going out as separate tables
+    (Item, Item group, Qty ...), each with a total, then the ledger entries."""
+    from app.reports.xlsx import HEAD  # noqa: F401  (style names below)
+    head = ["Item", "Item group", "Quantity", "Unit", "Rate", "Amount", "Godown", "Batch"]
+
+    def band(text, width=len(head)):
+        return [(text, "head")] + [("", "head")] * (width - 1)
+
+    def num(v, style="num"):
+        return (Decimal(v) if v not in (None, "") else None, style)
+    grid = [[(f"{doc['voucher_type']} {doc['voucher_number']}", "bold")],
+            ["Date", doc["date"]]]
+    if doc.get("party_ledger"):
+        grid.append(["Party", doc["party_ledger"]])
+    if doc.get("narration"):
+        grid.append(["Narration", doc["narration"]])
+    grid.append([])
+    lines = doc.get("inventory") or []
+    ins, outs = [x for x in lines if _is_in(x)], [x for x in lines if not _is_in(x)]
+    parts = [("In (produced / received)", ins), ("Out (consumed / issued)", outs)] if ins and outs else [("Inventory", lines)]
+    for title, part in parts:
+        if not part:
+            continue
+        grid.append(band(title))
+        grid.append([(h, "head") for h in head])
+        for x in part:
+            grid.append([x["item"], groups.get(x["item"]), num(abs(Decimal(x["quantity"])), "num") if Decimal(x["quantity"]) else "value only",
+                         x.get("unit"), num(x.get("rate")), num(x["amount"]), x.get("godown"), x.get("batch")])
+        units = {x.get("unit") for x in part}
+        qty = sum((abs(Decimal(x["quantity"])) for x in part), Decimal(0))
+        grid.append([(f"Total {title.split(' (')[0].lower()}", "bold"), None,
+                     (qty, "boldnum") if len(units) == 1 else None, (next(iter(units)), "bold") if len(units) == 1 else None, None,
+                     (sum((Decimal(x["amount"]) for x in part), Decimal(0)), "boldnum")])
+        grid.append([])
+    if doc.get("entries"):
+        grid.append(band("Ledger entries", 3))
+        grid.append([(h, "head") for h in ("Ledger", "Debit", "Credit")])
+        for e in doc["entries"]:
+            a = Decimal(e["amount"])
+            grid.append([e["ledger"], num(a) if a > 0 else None, num(-a) if a < 0 else None])
+    return grid
+
+
+@router.get("/vouchers/{voucher_id}/xlsx")
+def voucher_xlsx(voucher_id: uuid.UUID, db: DB, user: CurrentUser):
+    """The voucher as an Excel sheet; stock journals show the stock in and out as separate tables."""
+    from app.api.reports import XLSX
+    from app.reports import xlsx
+    v = _load(db, user, voucher_id, Perm.VOUCHER_READ)
+    authorize(db, user, v.company_id, Perm.EXPORT)
+    doc = engine.to_doc(v)
+    audit.record(db, actor_of(user), "voucher.export", "voucher", v.id, company_id=v.company_id, after={"format": "xlsx"})
+    db.commit()
+    name = f"{doc['voucher_type']} {doc['voucher_number']}".replace("/", "-")
+    body = xlsx.build_grid(voucher_grid(doc, _item_groups(db, v)), name, widths=[42, 28, 12, 8, 14, 16, 18, 14])
+    return Response(body, media_type=XLSX, headers={"Content-Disposition": f'attachment; filename="{name}.xlsx"'})
 
 
 @router.patch("/vouchers/{voucher_id}", response_model=VoucherOut)

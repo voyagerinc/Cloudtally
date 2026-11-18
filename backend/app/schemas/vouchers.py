@@ -113,6 +113,7 @@ class VoucherOut(BaseModel):
     posted_at: datetime | None
     doc: dict
     tally: dict | None = None
+    item_groups: dict[str, str | None] = {}   # stock item name -> its stock group
 
 
 class VoucherSummary(BaseModel):

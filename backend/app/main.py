@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from app import __version__, audit
-from app.api import audit_log, companies, licence, licensing, masters, reports, sync, system, users, vouchers
+from app.api import audit_log, companies, licence, licensing, masters, mis, reports, sync, system, users, vouchers
 from app.core.config import settings
 from app.core.db import engine
 from app.services.accounting.vouchers import VoucherError
@@ -57,7 +57,7 @@ app = FastAPI(
 )
 
 API = "/api/v1"
-for module in (users, companies, masters, vouchers, reports, sync, audit_log, system, licence, licensing):
+for module in (users, companies, masters, vouchers, reports, mis, sync, audit_log, system, licence, licensing):
     app.include_router(module.router, prefix=API)
 
 
