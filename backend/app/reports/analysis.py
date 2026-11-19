@@ -33,6 +33,19 @@ def _group_names(db: Session, company_id) -> dict:
     return {g.id: g.name for g in db.scalars(select(StockGroup).where(StockGroup.company_id == company_id))}
 
 
+def _main_groups(db: Session, company_id) -> dict:
+    """Each stock group's main group: the one straight under Primary that it sits in (itself when it is one)."""
+    groups = {g.id: g for g in db.scalars(select(StockGroup).where(StockGroup.company_id == company_id))}
+    out = {}
+    for gid in groups:
+        top, seen = gid, set()
+        while groups[top].parent_id in groups and top not in seen:
+            seen.add(top)
+            top = groups[top].parent_id
+        out[gid] = groups[top].name
+    return out
+
+
 # ------------------------------------------------------------------ raw-material cost from production vouchers
 
 def production_costs(db: Session, company_id: uuid.UUID, to_date: date) -> dict[uuid.UUID, list]:
@@ -262,13 +275,16 @@ def trade_analysis(db: Session, company_id: uuid.UUID, side: str, from_date: dat
 
 # ------------------------------------------------------------------ FIFO costing
 
-def _fifo_moves(db: Session, company_id: uuid.UUID, to_date: date, item_ids) -> dict[uuid.UUID, list]:
+def _fifo_moves(db: Session, company_id: uuid.UUID, to_date: date, item_ids,
+                exclude_voucher: uuid.UUID | None = None) -> dict[uuid.UUID, list]:
     """Stock movements per item up to `to_date`: [(date, line, base type)]. Memo vouchers move no stock."""
-    rows = db.execute(
-        select(VoucherInventoryLine, Voucher.voucher_date, VoucherType.base_type, VoucherType.name)
-        .join(Voucher, Voucher.id == VoucherInventoryLine.voucher_id).join(VoucherType)
-        .where(Voucher.company_id == company_id, Voucher.status == POSTED, VoucherType.affects_stock.is_(True),
-               Voucher.voucher_date <= to_date, VoucherInventoryLine.stock_item_id.in_(list(item_ids) or [None]))).all()
+    stmt = (select(VoucherInventoryLine, Voucher.voucher_date, VoucherType.base_type, VoucherType.name)
+            .join(Voucher, Voucher.id == VoucherInventoryLine.voucher_id).join(VoucherType)
+            .where(Voucher.company_id == company_id, Voucher.status == POSTED, VoucherType.affects_stock.is_(True),
+                   Voucher.voucher_date <= to_date, VoucherInventoryLine.stock_item_id.in_(list(item_ids) or [None])))
+    if exclude_voucher:
+        stmt = stmt.where(Voucher.id != exclude_voucher)
+    rows = db.execute(stmt).all()
     moves: dict[uuid.UUID, list] = defaultdict(list)
     for line, d, base, vtype in rows:
         if not MEMO_TYPE.search(vtype):
@@ -344,6 +360,35 @@ def _run_fifo(it: StockItem, moves: list, from_date: date):
     if snap is None:
         snap = (sum((q for q, _ in layers), ZERO), sum((v for _, v in layers), ZERO))
     return snap, layers, acc, line_cost
+
+
+def fifo_rates(db: Session, company_id: uuid.UUID, as_of: date, names: list[str],
+               exclude_voucher: uuid.UUID | None = None) -> dict[str, dict]:
+    """Each item's FIFO closing rate on `as_of` (closing value / closing quantity of the stock on hand),
+    the rate a voucher entered that day takes by default. With nothing on hand: the last inward rate
+    (basis "last receipt"), else the opening rate; None when the item has never had a value."""
+    items = {i.id: i for i in db.scalars(select(StockItem).where(StockItem.company_id == company_id,
+                                                               StockItem.name.in_(list(names) or [""])))}
+    moves = _fifo_moves(db, company_id, as_of, items, exclude_voucher)
+    out = {}
+    for iid, it in items.items():
+        _snap, layers, _acc, _ = _run_fifo(it, moves.get(iid, []), date.min)
+        qty, value = sum((q for q, _ in layers), ZERO), sum((v for _, v in layers), ZERO)
+        if qty > 0 and value > 0:
+            out[it.name] = {"rate": m(value / qty), "qty": _qty(qty), "value": m(value), "basis": "FIFO closing"}
+            continue
+        receipts = [line for d, line, base in sorted(moves.get(iid, []), key=lambda x: x[0])
+                    if _inward(line) and line.quantity and base != "Credit Note" and line.amount]
+        if receipts:
+            last = receipts[-1]
+            out[it.name] = {"rate": m(last.amount / abs(last.quantity)), "qty": _qty(qty), "value": m(value),
+                            "basis": "last receipt (no stock on hand)"}
+        elif it.opening_qty and it.opening_value:
+            out[it.name] = {"rate": m(Decimal(it.opening_value) / Decimal(it.opening_qty)), "qty": _qty(qty),
+                            "value": m(value), "basis": "opening rate (no stock on hand)"}
+        else:
+            out[it.name] = {"rate": None, "qty": _qty(qty), "value": m(value), "basis": "no rate yet"}
+    return out
 
 
 def fifo_line_costs(db: Session, company_id: uuid.UUID, to_date: date, item_ids) -> dict[uuid.UUID, Decimal]:
@@ -499,21 +544,28 @@ def fifo_costing(db: Session, company_id: uuid.UUID, from_date: date, to_date: d
 
 JOURNAL_BASES = ("Stock Journal", "Manufacturing Journal")
 DEFAULT_JOURNAL = "Material Transfer to WIP"
+WO_MANUFACTURING = ("WO Manufacturing Vouchers", "Manufacturing Journal")
+WO_DIVISIONS = ("hydraulic", "coc", "cooler")   # columns Hydraulic, COC, OC; anything else is "other"
 
 
 def stock_journal_register(db: Session, company_id: uuid.UUID, from_date: date, to_date: date, *,
-                           voucher_type: str | None = None, item: uuid.UUID | None = None,
+                           voucher_type: str | tuple | None = None, item: uuid.UUID | None = None,
                            stock_group: uuid.UUID | None = None) -> dict:
     """Stock journals (material transfer to WIP, manufacturing ...) with what came in and what went out of
     each, as two lists side by side. voucher_type "all" takes every stock journal type; none takes
-    Material Transfer to WIP when the company has it."""
+    Material Transfer to WIP when the company has it; a tuple takes those types."""
     types = list(db.scalars(select(VoucherType).where(VoucherType.company_id == company_id,
                                                       VoucherType.base_type.in_(JOURNAL_BASES)).order_by(VoucherType.name)))
     names = {t.name for t in types}
-    chosen = voucher_type if voucher_type and voucher_type != "all" else (
-        DEFAULT_JOURNAL if voucher_type is None and DEFAULT_JOURNAL in names else None)
-    ids = [t.id for t in types if chosen is None or t.name == chosen]
+    if isinstance(voucher_type, tuple):
+        ids = [t.id for t in types if t.name in voucher_type]
+        chosen = ", ".join(voucher_type)
+    else:
+        chosen = voucher_type if voucher_type and voucher_type != "all" else (
+            DEFAULT_JOURNAL if voucher_type is None and DEFAULT_JOURNAL in names else None)
+        ids = [t.id for t in types if chosen is None or t.name == chosen]
     groups = _group_names(db, company_id)
+    mains = _main_groups(db, company_id)
     rows = db.execute(
         select(VoucherInventoryLine, Voucher, VoucherType.name, StockItem)
         .join(Voucher, Voucher.id == VoucherInventoryLine.voucher_id)
@@ -533,7 +585,8 @@ def stock_journal_register(db: Session, company_id: uuid.UUID, from_date: date, 
                                          "voucher_number": v.voucher_number, "narration": v.narration, "in": [], "out": []})
         inward = line.quantity > 0 or (line.quantity == 0 and line.inward)
         rec["in" if inward else "out"].append({
-            "item_id": str(it.id), "item": it.name, "item_group": groups.get(it.group_id), "quantity": _qty(abs(line.quantity)),
+            "item_id": str(it.id), "item": it.name, "item_group": groups.get(it.group_id),
+            "main_group": mains.get(it.group_id), "group_id": str(it.group_id) if it.group_id else None, "quantity": _qty(abs(line.quantity)),
             "unit": line.unit, "rate": m(line.rate), "amount": m(abs(line.amount)), "godown": line.godown, "batch": line.batch})
 
     def total(lines):
@@ -550,3 +603,42 @@ def stock_journal_register(db: Session, company_id: uuid.UUID, from_date: date, 
             "total": {"vouchers": len(out),
                       "in_amount": m(sum((Decimal(r["in_total"]["amount"]) for r in out), ZERO)),
                       "out_amount": m(sum((Decimal(r["out_total"]["amount"]) for r in out), ZERO))}}
+
+
+def wo_manufacturing(db: Session, company_id: uuid.UUID, from_date: date, to_date: date, *,
+                     item: uuid.UUID | None = None, stock_group: uuid.UUID | None = None) -> dict:
+    """WO Manufacturing vouchers: the item produced (quantity, item group) and what was consumed for it,
+    item-wise under each consumed item group with group totals. The consumption is also split by division
+    (Hydraulic, COC, OC) from the stock-group divisions in the MIS settings."""
+    from app.reports import mis   # mis builds on this module
+    sg_div = {str(k): d for k, (d, _kind) in mis.stock_group_map(mis.load_settings(db, company_id)).items()}
+    data = stock_journal_register(db, company_id, from_date, to_date, voucher_type=WO_MANUFACTURING, item=item,
+                                  stock_group=stock_group)
+
+    def split(lines):
+        out = {k: ZERO for k in (*WO_DIVISIONS, "other")}
+        for x in lines:
+            out[x["division"]] += Decimal(x["amount"])
+        return {k: m(v) for k, v in out.items()}
+    period = []
+    for v in data["vouchers"]:
+        for x in v["out"]:
+            d = sg_div.get(x["group_id"])
+            x["division"] = d if d in WO_DIVISIONS else "other"
+        v["divisions"] = split(v["out"])
+        period += v["out"]
+        by_group: dict = {}
+        for x in v["out"]:
+            g = by_group.setdefault(x["item_group"] or "(no group)", {"group": x["item_group"] or "(no group)", "items": []})
+            g["items"].append(x)
+        groups = []
+        for g in sorted(by_group.values(), key=lambda g: g["group"]):
+            units = {x["unit"] for x in g["items"]}
+            g["quantity"] = _qty(sum((Decimal(x["quantity"]) for x in g["items"]), ZERO)) if len(units) == 1 else None
+            g["unit"] = next(iter(units)) if len(units) == 1 else None
+            g["amount"] = m(sum((Decimal(x["amount"]) for x in g["items"]), ZERO))
+            g["divisions"] = split(g["items"])
+            groups.append(g)
+        v["consumed_groups"] = groups
+    data["total"]["divisions"] = split(period)
+    return data

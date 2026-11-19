@@ -94,7 +94,9 @@ class TallyClient:
     def _send(self, xml: str, gate: _Gate) -> str:
         started = time.monotonic()
         try:
-            resp = self._http.post(self.url, content=xml.encode("utf-8"),
+            # Plain ASCII with character references (Ø -> &#216;): Tally does not read UTF-8 bytes as such,
+            # so a name like "STICKER (Ø57 mm)" sent as UTF-8 is "not found" (checked live, Nov 2026).
+            resp = self._http.post(self.url, content=xml.encode("ascii", "xmlcharrefreplace"),
                                    headers={"Content-Type": "text/xml;charset=utf-8"})
         except httpx.ConnectError as exc:
             raise TallyError(ErrorCode.CONNECTIVITY, f"Cannot reach Tally at {self.url}: {exc}", request_xml=xml)
@@ -160,6 +162,16 @@ class TallyClient:
         if name is not None:
             formula = '$Name = "' + name.replace('"', "") + '"'
         return [codec.parse_master(el) for el in self._collection(ctype, ctype.upper().replace(" ", ""), fetch, formula)]
+
+    def stock_item_boms(self) -> dict[str, list[dict]]:
+        """Every stock item that has a BOM, with its BOMs (one request; items without one are not sent)."""
+        els = self._collection("StockItem", "STOCKITEM", ["NAME", "MULTICOMPONENTLIST"], "$$NumItems:MultiComponentList > 0")
+        out = {}
+        for el in els:
+            name, bom = X.clean_name(el.get("NAME") or X.txt(el, "NAME")), codec.parse_bom(el)
+            if name and bom:
+                out[name] = bom
+        return out
 
     def vouchers(self, *, master_id: int | None = None, remote_id: str | None = None,
                  formula: str | None = None, fetch: list[str] | None = None) -> list[codec.TallyVoucher]:

@@ -126,13 +126,63 @@
       <label>Type<select id="ve-type" required></select></label>
       <label>Number<input id="ve-number" placeholder="auto"></label>
       <label>Date<input id="ve-date" type="date" required></label>
-      <label>Party<input id="ve-party" list="ledger-names"></label>
+      <label id="ve-party-label"><span id="ve-party-text">Party A/c name</span><input id="ve-party" list="ledger-names"></label>
       <label>Reference<input id="ve-ref"></label>
+      <label id="ve-ledger-label" hidden><span id="ve-ledger-text">Sales ledger</span><input id="ve-itemledger" list="ledger-names"></label>
     </div>
+    <p class="muted small" id="ve-mode-note"></p>
+    <label id="ve-mode-toggle" class="small" hidden><input type="checkbox" id="ve-acc-mode"> Accounting invoice (ledgers only, no items)</label>
+    <!-- accounting vouchers: ledger Dr / Cr -->
+    <div id="ve-acc">
     <table class="lines"><thead><tr><th>Ledger</th><th class="num">Debit</th><th class="num">Credit</th><th>Bill ref</th><th></th></tr></thead>
       <tbody id="ve-lines"></tbody>
       <tfoot><tr><td><button type="button" id="ve-add" class="secondary">+ Line</button></td>
         <td class="num" id="ve-dr">0.00</td><td class="num" id="ve-cr">0.00</td><td colspan="2" id="ve-diff"></td></tr></tfoot></table>
+    </div>
+    <!-- item invoice: sales, purchase, notes, orders -->
+    <div id="ve-inv" hidden>
+      <table class="lines"><thead><tr><th>Name of item</th><th>Godown</th><th>Batch</th><th class="num">Quantity</th><th class="num">Rate</th><th>per</th><th class="num">Amount</th><th></th></tr></thead>
+        <tbody id="ve-items"></tbody>
+        <tfoot><tr><td><button type="button" class="secondary" data-add-item="ve-items">+ Item</button></td><td colspan="5" class="num">Items total</td>
+          <td class="num" id="ve-items-total">0.00</td><td></td></tr></tfoot></table>
+      <div id="ve-extra-box">
+      <table class="lines"><thead><tr><th>Additional ledger (GST, freight, discount …)</th><th class="num">Rate %</th><th class="num">Amount</th><th></th></tr></thead>
+        <tbody id="ve-extra"></tbody>
+        <tfoot><tr><td><button type="button" class="secondary" id="ve-add-extra">+ Ledger</button></td><td class="num">Invoice total</td>
+          <td class="num" id="ve-inv-total">0.00</td><td></td></tr></tfoot></table>
+      </div>
+    </div>
+    <!-- stock journal: source (consumption) and destination (production) -->
+    <div id="ve-sj" class="sj-pair" hidden>
+      <div><h4>Source (Consumption)</h4>
+        <table class="lines"><thead><tr><th>Name of item</th><th>Godown</th><th>Batch</th><th class="num">Quantity</th><th class="num">Rate</th><th>per</th><th class="num">Amount</th><th></th></tr></thead>
+          <tbody id="ve-src"></tbody>
+          <tfoot><tr><td><button type="button" class="secondary" data-add-item="ve-src">+ Item</button></td><td colspan="5" class="num">Total</td><td class="num" id="ve-src-total">0.00</td><td></td></tr></tfoot></table></div>
+      <div><h4>Destination (Production)</h4>
+        <table class="lines"><thead><tr><th>Name of item</th><th>Godown</th><th>Batch</th><th class="num">Quantity</th><th class="num">Rate</th><th>per</th><th class="num">Amount</th><th></th></tr></thead>
+          <tbody id="ve-dst"></tbody>
+          <tfoot><tr><td><button type="button" class="secondary" data-add-item="ve-dst">+ Item</button></td><td colspan="5" class="num">Total</td><td class="num" id="ve-dst-total">0.00</td><td></td></tr></tfoot></table></div>
+    </div>
+    <!-- manufacturing journal: product, BOM components, co-products / by-products / scrap -->
+    <div id="ve-mfg" hidden>
+      <div class="grid">
+        <label>Name of product<input id="vm-item" list="item-names"></label>
+        <label>BOM name<select id="vm-bom"></select></label>
+        <label>Godown<input id="vm-godown" list="godown-names"></label>
+        <label>Batch<input id="vm-batch"></label>
+        <label>Quantity<input id="vm-qty" class="num" inputmode="decimal"></label>
+      </div>
+      <h4>Components (Consumption)</h4>
+      <table class="lines"><thead><tr><th>Name of item</th><th>Godown</th><th>Batch</th><th class="num">Quantity</th><th class="num">Rate</th><th>per</th><th class="num">Amount</th><th></th></tr></thead>
+        <tbody id="vm-comp"></tbody>
+        <tfoot><tr><td><button type="button" class="secondary" data-add-item="vm-comp">+ Item</button></td><td colspan="5" class="num">Total</td><td class="num" id="vm-comp-total">0.00</td><td></td></tr></tfoot></table>
+      <h4>Co-product / By-product / Scrap</h4>
+      <table class="lines"><thead><tr><th>Name of item</th><th>Godown</th><th>Batch</th><th class="num">Quantity</th><th class="num">Rate</th><th>per</th><th class="num">Amount</th><th></th></tr></thead>
+        <tbody id="vm-by"></tbody>
+        <tfoot><tr><td><button type="button" class="secondary" data-add-item="vm-by">+ Item</button></td><td colspan="5" class="num">Total</td><td class="num" id="vm-by-total">0.00</td><td></td></tr></tfoot></table>
+      <p id="vm-cost" class="small"></p>
+    </div>
+    <datalist id="item-names"></datalist><datalist id="godown-names"></datalist>
     <label>Narration<textarea id="ve-narration" rows="2"></textarea></label>
     <div class="row"><select id="ve-action"><option value="post">Save &amp; post</option><option value="draft">Save as draft</option><option value="submit">Submit for approval</option></select>
       <button>Save</button> <span id="ve-msg"></span></div>
@@ -166,6 +216,8 @@
       <option value="sales-fifo-cost" data-report="sales-fifo-cost">Sales register with FIFO cost</option>
       <option value="sales-group-wise" data-report="sales-group-wise">Item group-wise sales</option>
       <option value="material-transfer-wip" data-report="material-transfer-wip">Material transfer to WIP</option>
+      <option value="material-transfer-wip-main" data-report="material-transfer-wip-main">Material transfer to WIP (main group)</option>
+      <option value="wo-manufacturing" data-report="wo-manufacturing">WO manufacturing &amp; manufacturing journal</option>
       <option value="stock-journal" data-report="stock-journal">Stock journal register (in / out)</option>
       <option value="mis-finance-sheet" data-report="mis-finance-sheet">MIS: Monthly finance sheet (P&amp;L)</option>
       <option value="mis-pl" data-report="mis-pl">MIS: P&amp;L by division</option>
@@ -201,6 +253,7 @@
     <button type="button" data-m="stock-groups">Stock group</button>
     <button type="button" data-m="stock-categories">Stock category</button>
     <button type="button" data-m="units">UOM</button>
+    <button type="button" data-m="bom">BOM</button>
     <span class="muted small">Accounts</span>
     <button type="button" data-m="ledgers">Ledger master</button>
     <button type="button" data-m="ledger-groups">Ledger group</button>
@@ -220,6 +273,14 @@
     <table id="itable"></table>
   </div>
   <div id="mp-mis" class="mpanel" hidden></div>
+  <div id="mp-bom" class="mpanel" hidden>
+    <div class="row between"><h3>BOM (bill of materials)</h3>
+      <span><input id="bq" placeholder="Search item, group or component">
+        <button type="button" class="secondary" id="b-xlsx">Excel</button>
+        <button type="button" class="secondary" id="b-refresh" title="Read every item's BOM from Tally now">Read BOMs from Tally</button></span></div>
+    <p class="muted small" id="bcount"></p>
+    <div id="btree"></div>
+  </div>
   <div id="mp-list" class="mpanel" hidden>
     <div class="row between"><h3 id="ml-title"></h3><input id="ml-q" placeholder="Search"></div>
     <p class="muted small" id="ml-note"></p>

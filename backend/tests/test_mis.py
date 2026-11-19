@@ -227,3 +227,105 @@ def test_material_transfer_to_wip_report(db, books):  # noqa: F811
     sheet = zipfile.ZipFile(io.BytesIO(x.content)).read("xl/worksheets/sheet1.xml").decode()
     assert ">2 Nos<" in sheet and ">4 Nos<" in sheet          # quantity with its unit, as on the sheet
     assert '<c r="H4" t="inlineStr" s="4"><is><t xml:space="preserve">Out (consumed / issued) 1 item' in sheet
+
+
+def test_wo_manufacturing_report(db, books):  # noqa: F811
+    from app.models import Voucher, VoucherType
+    _setup(db, books)
+    wo = VoucherType(company_id=books.id, name="WO Manufacturing Vouchers", base_type="Stock Journal", affects_stock=True)
+    db.add(wo)
+    db.flush()
+    db.query(Voucher).filter_by(company_id=books.id, voucher_number="MJ-1").one().voucher_type_id = wo.id
+    db.add(User(username="wo-boss", api_key_hash=hash_key("k-wo"), is_superadmin=True))
+    db.commit()
+    api, h = TestClient(app), {"X-API-Key": "k-wo"}
+    q = f"company_id={books.id}&from_date=2026-04-01&to_date=2027-03-31"
+    r = api.get(f"/api/v1/reports/wo-manufacturing?{q}", headers=h).json()
+    [v] = r["vouchers"]
+    assert (v["in"][0]["item"], v["in"][0]["quantity"], v["in"][0]["item_group"]) == ("Finished Cooler", "2", "FINISHED GOODS OC")
+    [g] = v["consumed_groups"]
+    assert (g["group"], [x["item"] for x in g["items"]], g["amount"]) == ("RAW MATERIAL COOLER", ["Component A"], "400.00")
+    assert r["rows"][0]["produced_item"] == "Finished Cooler" and r["rows"][0]["consumed_item_group"] == "RAW MATERIAL COOLER"
+    x = api.get(f"/api/v1/reports/wo-manufacturing?{q}&format=xlsx", headers=h)
+    sheet = zipfile.ZipFile(io.BytesIO(x.content)).read("xl/worksheets/sheet1.xml").decode()
+    assert "Total RAW MATERIAL COOLER" in sheet and ">Finished Cooler<" in sheet and ">2 Nos<" in sheet
+    assert '<c r="E3" t="inlineStr" s="4"><is><t xml:space="preserve">Batch' in sheet
+    assert '<c r="A3" t="inlineStr" s="4"><is><t xml:space="preserve">Voucher no' in sheet   # voucher number before the date
+    assert '<c r="B3" t="inlineStr" s="4"><is><t xml:space="preserve">Voucher type' in sheet
+    assert '<c r="O3" t="inlineStr" s="4"><is><t xml:space="preserve">OC' in sheet
+    assert r["total"]["divisions"]["cooler"] == "400.00"        # RAW MATERIAL COOLER is the OC (cooler) division
+    assert '<c r="H3" t="inlineStr" s="4"><is><t xml:space="preserve">Consumed item group' in sheet
+
+
+def test_material_transfer_main_group(db, books):  # noqa: F811
+    from app.models import StockGroup, Voucher, VoucherType
+    _setup(db, books)
+    top = StockGroup(company_id=books.id, name="FINISHED GOODS")
+    db.add(top)
+    db.flush()
+    db.query(StockGroup).filter_by(company_id=books.id, name="FINISHED GOODS OC").one().parent_id = top.id
+    mt = VoucherType(company_id=books.id, name="Material Transfer to WIP", base_type="Stock Journal", affects_stock=True)
+    db.add(mt)
+    db.flush()
+    db.query(Voucher).filter_by(company_id=books.id, voucher_number="MJ-1").one().voucher_type_id = mt.id
+    db.add(User(username="mtm-boss", api_key_hash=hash_key("k-mtm"), is_superadmin=True))
+    db.commit()
+    api, h = TestClient(app), {"X-API-Key": "k-mtm"}
+    q = f"company_id={books.id}&from_date=2026-04-01&to_date=2027-03-31"
+    [v] = api.get(f"/api/v1/reports/material-transfer-wip-main?{q}", headers=h).json()["vouchers"]
+    assert (v["in"][0]["item_group"], v["in"][0]["main_group"]) == ("FINISHED GOODS OC", "FINISHED GOODS")
+    assert v["out"][0]["main_group"] == "RAW MATERIAL COOLER"     # a group straight under Primary is its own main group
+    x = api.get(f"/api/v1/reports/material-transfer-wip-main?{q}&format=xlsx", headers=h)
+    sheet = zipfile.ZipFile(io.BytesIO(x.content)).read("xl/worksheets/sheet1.xml").decode()
+    assert '<c r="C5" t="inlineStr" s="4"><is><t xml:space="preserve">Main group' in sheet
+    assert '<c r="I4" t="inlineStr" s="4"><is><t xml:space="preserve">Out (consumed / issued) 1 item' in sheet
+
+
+def test_any_table_downloads_as_excel(db, books):  # noqa: F811
+    db.add(User(username="xl-boss", api_key_hash=hash_key("k-xl"), is_superadmin=True))
+    db.commit()
+    body = {"title": "Trial balance - Nov", "widths": [30, 14],
+            "rows": [[{"v": "Particulars", "s": "head"}, {"v": "Amount", "s": "head"}],
+                     [{"v": "   Cash"}, {"v": "-1234.50", "s": "num"}],
+                     [{"v": "Total", "s": "bold"}, {"v": "2 Nos", "s": "boldnum"}], [None, "text"]]}
+    x = TestClient(app).post(f"/api/v1/export/table?company_id={books.id}", json=body, headers={"X-API-Key": "k-xl"})
+    assert x.status_code == 200 and 'filename="Trial balance - Nov.xlsx"' in x.headers["content-disposition"]
+    sheet = zipfile.ZipFile(io.BytesIO(x.content)).read("xl/worksheets/sheet1.xml").decode()
+    assert '<c r="A1" t="inlineStr" s="4"><is><t xml:space="preserve">Particulars' in sheet   # heading bold on yellow
+    assert '<c r="B2" s="2"><v>-1234.50</v></c>' in sheet                                     # amount as a number
+    assert '<c r="B3" t="inlineStr" s="1"><is><t xml:space="preserve">2 Nos' in sheet        # not a number: bold text
+    assert '>   Cash<' in sheet                                                                 # tree level kept
+
+
+BOM_XML = """<STOCKITEM NAME="AH 0608-C-F-N-024-DC-01"><PARENT>OIL COOLER-ACE</PARENT>
+ <MULTICOMPONENTLIST.LIST><COMPONENTLISTNAME>AH0608CF024DN</COMPONENTLISTNAME><COMPONENTBASICQTY> 1 Nos</COMPONENTBASICQTY>
+  <MULTICOMPONENTITEMLIST.LIST><NATUREOFITEM>Component</NATUREOFITEM><STOCKITEMNAME>Radiator AH-0608 (ACE-020)</STOCKITEMNAME>
+   <GODOWNNAME>BASEMENT</GODOWNNAME><ACTUALQTY> 1 Nos</ACTUALQTY></MULTICOMPONENTITEMLIST.LIST>
+  <MULTICOMPONENTITEMLIST.LIST><NATUREOFITEM>Component</NATUREOFITEM><STOCKITEMNAME>Plain Washer 4X8MM C</STOCKITEMNAME>
+   <GODOWNNAME>BASEMENT</GODOWNNAME><ACTUALQTY> 2 Nos</ACTUALQTY></MULTICOMPONENTITEMLIST.LIST>
+ </MULTICOMPONENTLIST.LIST></STOCKITEM>"""
+
+
+def test_bom_is_read_from_tally_and_listed_with_excel(db, books):  # noqa: F811
+    from lxml import etree
+    from app.connectors.tally import codec
+    [bom] = codec.parse_bom(etree.fromstring(BOM_XML))
+    assert (bom["name"], bom["basic_qty"], bom["unit"]) == ("AH0608CF024DN", "1", "Nos")
+    assert [(c["item"], c["qty"], c["unit"], c["godown"]) for c in bom["components"]] == [
+        ("Radiator AH-0608 (ACE-020)", "1", "Nos", "BASEMENT"), ("Plain Washer 4X8MM C", "2", "Nos", "BASEMENT")]
+    assert codec.parse_bom(etree.fromstring("<STOCKITEM NAME='x'/>")) is None
+    _setup(db, books)
+    fg = db.query(StockItem).filter_by(company_id=books.id, name="Finished Cooler").one()
+    fg.bom = [{"name": "Std", "basic_qty": "1", "unit": "Nos",
+               "components": [{"nature": "Component", "item": "Component A", "godown": "Main", "qty": "2", "unit": "Nos"}]}]
+    db.add(User(username="bom-boss", api_key_hash=hash_key("k-bom"), is_superadmin=True))
+    db.commit()
+    api, h = TestClient(app), {"X-API-Key": "k-bom"}
+    [row] = api.get(f"/api/v1/companies/{books.id}/masters/bom", headers=h).json()
+    assert row["item"] == "Finished Cooler" and row["item_group"] == row["primary_group"] == "FINISHED GOODS OC"
+    assert row["boms"][0]["components"][0]["item_group"] == "RAW MATERIAL COOLER"
+    assert api.get(f"/api/v1/companies/{books.id}/masters/bom?q=component%20a", headers=h).json()   # found by component
+    assert api.get(f"/api/v1/companies/{books.id}/masters/bom?q=nothing", headers=h).json() == []
+    x = api.get(f"/api/v1/companies/{books.id}/masters/bom/xlsx", headers=h)
+    sheet = zipfile.ZipFile(io.BytesIO(x.content)).read("xl/worksheets/sheet1.xml").decode()
+    assert '<c r="C4" t="inlineStr" s="4"><is><t xml:space="preserve">Primary group</t></is></c>' in sheet and '<c r="F4" t="inlineStr" s="4"><is><t xml:space="preserve">Component' in sheet and ">Component A<" in sheet

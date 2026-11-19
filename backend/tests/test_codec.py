@@ -102,3 +102,18 @@ def test_import_response_and_error_classification():
     assert not bad.ok and classify_tally_message(bad.line_errors[0]) == "missing_master"
     assert classify_tally_message("Voucher date is out of period") == "period_locked"
     assert classify_tally_message("Something odd") == "tally_rejection"
+
+
+def test_names_with_symbols_reach_tally_as_character_references(monkeypatch):
+    """Tally does not read UTF-8: 'Ø' must go as &#216; or the item is 'not found'."""
+    import httpx
+    from app.connectors.tally.client import TallyClient
+    sent = {}
+
+    def fake_post(self, url, content=None, headers=None, **kw):
+        sent["body"] = content
+        return httpx.Response(200, content=b"<ENVELOPE></ENVELOPE>")
+    monkeypatch.setattr(httpx.Client, "post", fake_post)
+    client = TallyClient("127.0.0.1", 9, "Demo")
+    client.post('<ENVELOPE><X>STICKER ACE ROUND (Ø57 mm)</X></ENVELOPE>')
+    assert b"(&#216;57 mm)" in sent["body"] and all(b < 128 for b in sent["body"])

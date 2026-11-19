@@ -892,3 +892,112 @@ def test_long_texts_from_tally_do_not_block_an_item(db, company):
     db.commit()
     db.refresh(item)
     assert item.name == "AH 1012-C-F-012-DC-01" and len(item.gst_source) == 250
+
+
+def test_tally_filling_in_party_and_on_account_bill_is_not_a_mismatch():
+    from app.services.canonical import with_tally_defaults
+    erp = {"voucher_type": "Amazon Sales Invoice", "voucher_number": "1", "date": "2026-11-19", "party_ledger": None,
+           "entries": [{"ledger": "2S SEALS SERVICES", "amount": "1180.00", "bills": [], "cost": []},
+                       {"ledger": "Sales", "amount": "-1000.00", "bills": [], "cost": []},
+                       {"ledger": "IGST", "amount": "-180.00", "bills": [], "cost": []}]}
+    tally = {**erp, "party_ledger": "2S SEALS SERVICES",
+             "entries": [{**erp["entries"][0], "bills": [{"type": "On Account", "name": "", "amount": "1180.00"}]},
+                         *erp["entries"][1:]]}
+    assert content_hash(erp) != content_hash(tally)
+    assert content_hash(with_tally_defaults(erp, tally)) == content_hash(tally)
+    # a real change made in Tally still shows: another party, a named bill, a different amount
+    for other in ({**tally, "party_ledger": "Someone Else"},
+                  {**tally, "entries": [{**tally["entries"][0], "bills": [{"type": "New Ref", "name": "X1", "amount": "1180.00"}]},
+                                        *tally["entries"][1:]]},
+                  {**tally, "entries": [{**tally["entries"][0], "bills": [{"type": "On Account", "name": "", "amount": "100.00"}]},
+                                        *tally["entries"][1:]]}):
+        assert content_hash(with_tally_defaults(erp, other)) != content_hash(other)
+
+
+def test_deleting_in_erp_a_voucher_already_deleted_in_tally_sends_nothing(db, company, tc, mock):
+    from app.models import SyncOutbox
+    v = post(db, company)
+    sync()
+    mapping = db.scalar(select(TallyMapping).where(TallyMapping.erp_id == v.id))
+    del tc.vouchers[mapping.tally_master_id]          # deleted in Tally; Tally does not report it
+    engine.transition(db, v, "delete", USER, reason="deleted in Tally")
+    db.commit()
+    before = len(tc.vouchers)
+    sync()
+    db.refresh(v)
+    job = db.scalar(select(SyncOutbox).where(SyncOutbox.entity_id == v.id, SyncOutbox.operation == "delete"))
+    assert job.status == "completed" and v.sync_status == SyncStatus.SYNCED and len(tc.vouchers) == before
+
+
+def test_voucher_deleted_in_tally_is_deleted_in_the_software_on_sync(db, company, tc, mock):
+    from app.models import SyncOutbox
+    post(db, company)                     # a second voucher stays in Tally (an empty list is never trusted)
+    sync()                                                                    # brings Tally's vouchers in
+    demo_v = db.scalar(select(Voucher).where(Voucher.narration == "April rent"))
+    dm = db.scalar(select(TallyMapping).where(TallyMapping.erp_id == demo_v.id))
+    del tc.vouchers[dm.tally_master_id]
+    stats = sync_worker.run_company(SessionLocal, company.id, force=True)      # Sync now
+    db.refresh(demo_v)
+    assert demo_v.status == VoucherStatus.DELETED and demo_v.sync_status == SyncStatus.SYNCED
+    assert stats["inbound"]["deleted_in_tally"] == 1
+    assert db.scalar(select(func.count()).select_from(SyncOutbox).where(SyncOutbox.entity_id == demo_v.id)) == 0
+
+
+def test_many_vouchers_missing_in_tally_are_not_deleted(db, company, tc, mock, monkeypatch):
+    from app.connectors.tally import TallyClient
+    sync()
+    assert db.scalar(select(func.count()).select_from(TallyMapping).where(TallyMapping.entity_type == "voucher")) > 0
+    monkeypatch.setattr(TallyClient, "voucher_index", lambda self, formula=None: [])   # e.g. the wrong company open
+    stats = sync_worker.run_company(SessionLocal, company.id, force=True)
+    assert "deleted_in_tally" not in stats["inbound"] and stats["inbound"]["deleted_in_tally_held"] > 0
+    assert db.scalar(select(func.count()).select_from(Voucher).where(Voucher.status == VoucherStatus.DELETED)) == 0
+
+
+def test_only_an_admin_deletes_and_only_software_vouchers_with_remarks(db, company, tc):
+    from fastapi.testclient import TestClient
+    from app.core.security import hash_key
+    from app.main import app
+    from app.models import User, UserCompanyAccess
+    erp_v = post(db, company)
+    sync()
+    tally_v = db.scalar(select(Voucher).where(Voucher.narration == "April rent"))
+    clerk = User(username="del-clerk", api_key_hash=hash_key("k-clerk"))
+    db.add_all([User(username="del-boss", api_key_hash=hash_key("k-boss"), is_superadmin=True), clerk])
+    db.flush()
+    db.add(UserCompanyAccess(user_id=clerk.id, company_id=company.id, role="accountant",
+                             permissions=["voucher.read", "voucher.delete"]))
+    db.commit()
+    api = TestClient(app)
+    boss, staff = {"X-API-Key": "k-boss"}, {"X-API-Key": "k-clerk"}
+    assert api.delete(f"/api/v1/vouchers/{erp_v.id}?reason=entered%20twice", headers=staff).status_code == 403
+    assert api.delete(f"/api/v1/vouchers/{erp_v.id}", headers=boss).status_code == 422
+    r = api.delete(f"/api/v1/vouchers/{tally_v.id}?reason=not%20needed", headers=boss)
+    assert r.status_code == 409 and "delete it in Tally" in r.json()["detail"]
+    r = api.delete(f"/api/v1/vouchers/{erp_v.id}?reason=entered%20twice", headers=boss)
+    assert r.status_code == 200 and r.json()["status"] == "deleted"
+
+
+def test_stock_journal_made_in_the_software_goes_to_tally_as_consumption_and_production(db, company, tc, mock):
+    from app.connectors.tally import codec
+    tc.add_item("Granules", "Kg")
+    tc.add_item("Spool", "Nos")
+    sync()
+    doc = {"voucher_type": "Stock Journal", "date": "2026-04-25", "narration": "moulding", "entries": [],
+           "inventory": [{"item": "Granules", "quantity": "-50", "unit": "Kg", "rate": "100", "amount": "5000"},
+                         {"item": "Spool", "quantity": "100", "unit": "Nos", "rate": "50", "amount": "5000"}]}
+    xml = codec.voucher_xml({**doc, "stock_view": "Consumption Voucher View"}, action="Create", erp_id="x")
+    assert 'OBJVIEW="Consumption Voucher View"' in xml and xml.index("INVENTORYENTRIESIN.LIST") < xml.index("INVENTORYENTRIESOUT.LIST")
+    assert "<STOCKITEMNAME>Spool</STOCKITEMNAME>" in xml.split("INVENTORYENTRIESOUT")[0]      # production in the in-list
+    import app.core.config as cfg
+    old, cfg.settings.allow_negative_stock = cfg.settings.allow_negative_stock, True
+    try:
+        v = engine.create_voucher(db, company, doc, USER, action="post")
+        db.commit()
+    finally:
+        cfg.settings.allow_negative_stock = old
+    sync()
+    db.refresh(v)
+    assert v.sync_status == SyncStatus.SYNCED, db.scalar(select(SyncOutbox.last_error).where(SyncOutbox.entity_id == v.id))
+    m = db.scalar(select(TallyMapping).where(TallyMapping.erp_id == v.id))
+    stored = tc.vouchers[m.tally_master_id]
+    assert stored.find("INVENTORYENTRIESIN.LIST") is not None and stored.find("INVENTORYENTRIESOUT.LIST") is not None

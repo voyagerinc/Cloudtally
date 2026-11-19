@@ -170,7 +170,7 @@ def _ledger_entry_xml(e: dict, list_tag: str, party_ledger: str | None) -> str:
     return f"<{list_tag}>{''.join(parts)}</{list_tag}>"
 
 
-def _inventory_xml(i: dict) -> str:
+def _inventory_xml(i: dict, tag: str = "ALLINVENTORYENTRIES.LIST") -> str:
     qty = Decimal(i["quantity"])
     inward = qty > 0 if qty else i.get("direction") == "in"
     value = abs(Decimal(i.get("amount") or 0))
@@ -191,12 +191,12 @@ def _inventory_xml(i: dict) -> str:
             "</ACCOUNTINGALLOCATIONS.LIST>"
         )
     return (
-        "<ALLINVENTORYENTRIES.LIST>" + X.tag("STOCKITEMNAME", i["item"])
+        f"<{tag}>" + X.tag("STOCKITEMNAME", i["item"])
         + f"<ISDEEMEDPOSITIVE>{X.yes_no(inward)}</ISDEEMEDPOSITIVE>"
         + (f"<RATE>{X.esc(m(i['rate']))}/{X.esc(unit)}</RATE>" if i.get("rate") else "")
         + (X.tag("DISCOUNT", i.get("discount_pct")) if i.get("discount_pct") else "")
         + f"<AMOUNT>{m(signed)}</AMOUNT><ACTUALQTY>{X.esc(qty_txt)}</ACTUALQTY><BILLEDQTY>{X.esc(qty_txt)}</BILLEDQTY>"
-        + batch + alloc + "</ALLINVENTORYENTRIES.LIST>"
+        + batch + alloc + f"</{tag}>"
     )
 
 
@@ -215,8 +215,11 @@ def voucher_xml(doc: dict, *, action: str, erp_id: str, ref: TallyRef | None = N
         head = f'<VOUCHER {ref.tag_attrs()} VCHTYPE={X.attr(vtype)} ACTION="Alter"'
 
     inventory = doc.get("inventory") or []
-    invoice_mode = bool(inventory)
-    view = "Invoice Voucher View" if invoice_mode else "Accounting Voucher View"
+    # Stock and manufacturing journals: Tally keeps what comes in and what goes out in two lists
+    # (Consumption / Multi Consumption view, as Tally itself exports them).
+    stock_view = doc.get("stock_view") if inventory and not doc.get("entries") else None
+    invoice_mode = bool(inventory) and not stock_view
+    view = stock_view or ("Invoice Voucher View" if invoice_mode else "Accounting Voucher View")
     head += f' OBJVIEW="{view}">'
 
     parts = [
@@ -232,6 +235,12 @@ def voucher_xml(doc: dict, *, action: str, erp_id: str, ref: TallyRef | None = N
         f"<PERSISTEDVIEW>{view}</PERSISTEDVIEW>",
         f"<ISINVOICE>{X.yes_no(invoice_mode or bool(doc.get('is_invoice')))}</ISINVOICE>",
     ]
+    if stock_view:
+        def inward(i):
+            return Decimal(i["quantity"]) > 0 if Decimal(i["quantity"]) else i.get("direction") == "in"
+        parts.extend(_inventory_xml(i, "INVENTORYENTRIESIN.LIST") for i in inventory if inward(i))
+        parts.extend(_inventory_xml(i, "INVENTORYENTRIESOUT.LIST") for i in inventory if not inward(i))
+        return head + "".join(p for p in parts if p) + "</VOUCHER>"
     if doc.get("is_reverse_charge"):
         parts.append("<ISREVERSECHARGEAPPLICABLE>Yes</ISREVERSECHARGEAPPLICABLE>")
 
@@ -328,6 +337,9 @@ def parse_voucher(el: etree._Element) -> TallyVoucher:
     all_entries = [e for e in el.findall("ALLLEDGERENTRIES.LIST") if X.txt(e, "LEDGERNAME")]
     led_entries = [e for e in el.findall("LEDGERENTRIES.LIST") if X.txt(e, "LEDGERNAME")]
     inv_entries = [e for e in el.findall("ALLINVENTORYENTRIES.LIST") if X.txt(e, "STOCKITEMNAME")]
+    if not inv_entries:   # a stock journal with only its in / out lists (the full list normally comes too)
+        inv_entries = [e for tag in ("INVENTORYENTRIESIN.LIST", "INVENTORYENTRIESOUT.LIST")
+                       for e in el.findall(tag) if X.txt(e, "STOCKITEMNAME")]
 
     entries: list[dict] = []
     inventory: list[dict] = []
@@ -400,7 +412,8 @@ STOCK_ITEM_FETCH = ["NAME", "PARENT", "GUID", "MASTERID", "ALTERID", "BASEUNITS"
                     "OPENINGVALUE", "BATCHALLOCATIONS", "CLOSINGBALANCE", "CLOSINGRATE", "CLOSINGVALUE",
                     "GSTAPPLICABLE", "GSTTYPEOFSUPPLY", "GSTDETAILS", "HSNDETAILS", "HSNCODE",
                     "STANDARDCOSTLIST", "STANDARDPRICELIST", "COSTINGMETHOD", "VALUATIONMETHOD", "ISBATCHWISEON",
-                    "HASMFGDATE", "ISPERISHABLEON", "IGNORENEGATIVESTOCK", "REORDERBASE", "ENTEREDBY"]
+                    "HASMFGDATE", "ISPERISHABLEON", "IGNORENEGATIVESTOCK", "REORDERBASE", "ENTEREDBY",
+                    "MULTICOMPONENTLIST"]
 UNIT_FETCH = ["NAME", "GUID", "MASTERID", "ALTERID", "ORIGINALNAME", "DECIMALPLACES", "ISSIMPLEUNIT",
               "BASEUNITS", "ADDITIONALUNITS", "CONVERSION"]
 GODOWN_FETCH = ["NAME", "PARENT", "GUID", "MASTERID", "ALTERID"]
@@ -502,7 +515,28 @@ def stock_item_details(el: etree._Element) -> dict:
         "closing_value": -X.amount(X.txt(el, "CLOSINGVALUE")) if X.txt(el, "CLOSINGVALUE") else None,
         "opening_allocations": openings or None,
         "entered_by": X.txt(el, "ENTEREDBY"),
+        "bom": parse_bom(el),
     }
+
+
+def parse_bom(el: etree._Element) -> list[dict] | None:
+    """The item's BOMs (Tally: Components / Bill of Materials), each for a basic quantity of the item:
+    [{"name", "basic_qty", "unit", "components": [{"nature", "item", "godown", "qty", "unit"}]}]."""
+    out = []
+    for b in el.findall("MULTICOMPONENTLIST.LIST"):
+        lines = []
+        for c in b.findall("MULTICOMPONENTITEMLIST.LIST"):
+            item = X.clean_name(X.txt(c, "STOCKITEMNAME"))
+            if not item:
+                continue
+            qty, unit = X.quantity(X.txt(c, "ACTUALQTY"))
+            lines.append({"nature": X.txt(c, "NATUREOFITEM") or "Component", "item": item,
+                          "godown": X.txt(c, "GODOWNNAME"), "qty": str(qty), "unit": unit})
+        basic, unit = X.quantity(X.txt(b, "COMPONENTBASICQTY"))
+        if lines:
+            out.append({"name": X.txt(b, "COMPONENTLISTNAME") or "", "basic_qty": str(basic or 1), "unit": unit,
+                        "components": lines})
+    return out or None
 
 
 def _latest(el: etree._Element, list_tag: str, date_tag: str) -> etree._Element | None:

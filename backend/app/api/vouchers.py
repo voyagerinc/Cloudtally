@@ -9,7 +9,7 @@ from fastapi.responses import Response
 from sqlalchemy import func, or_, select
 
 from app.api.deps import DB, CurrentUser, actor_of, authorize
-from app.core.security import Perm
+from app.core.security import Perm, role_for
 from app import audit
 from app.models import Ledger, StockGroup, SyncOutbox, Voucher, VoucherStatus, VoucherType, VoucherVersion
 from app.schemas.vouchers import TransitionIn, VoucherCreate, VoucherOut, VoucherSummary, VoucherUpdate
@@ -19,6 +19,7 @@ from app.services.sync.common import mapping_for_erp
 
 router = APIRouter(tags=["vouchers"])
 
+ADMIN_ROLES = ("owner", "accounts_admin")   # company admin, accounts admin (a system admin counts as owner)
 ACTION_PERMS = {
     "submit": Perm.VOUCHER_WRITE, "approve": Perm.VOUCHER_APPROVE, "reject": Perm.VOUCHER_APPROVE,
     "post": Perm.VOUCHER_POST, "cancel": Perm.VOUCHER_POST, "delete": Perm.VOUCHER_DELETE,
@@ -192,8 +193,16 @@ def voucher_action(voucher_id: uuid.UUID, action: Literal["submit", "approve", "
 
 @router.delete("/vouchers/{voucher_id}", response_model=VoucherOut)
 def delete_voucher(voucher_id: uuid.UUID, db: DB, user: CurrentUser, reason: str | None = None):
+    """Only an admin, with remarks, and only a voucher made in the software; the delete then goes to Tally.
+    A voucher that came from Tally is deleted in Tally: the next sync removes it here."""
     v = _load(db, user, voucher_id, Perm.VOUCHER_DELETE)
-    engine.transition(db, v, "delete", actor_of(user), reason=reason)
+    if role_for(db, user, v.company_id) not in ADMIN_ROLES:
+        raise HTTPException(403, "Only an admin can delete vouchers")
+    if len((reason or "").strip()) < 3:
+        raise HTTPException(422, "Enter remarks: why the voucher is deleted")
+    if v.source_system != "erp":
+        raise HTTPException(409, "This voucher came from Tally: delete it in Tally, and the next sync removes it here")
+    engine.transition(db, v, "delete", actor_of(user), reason=reason.strip())
     db.commit()
     return _out(db, v)
 

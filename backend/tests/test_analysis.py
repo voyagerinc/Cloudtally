@@ -160,3 +160,27 @@ def test_group_wise_sales_rolls_items_up_the_group_tree(db, books):
     assert r["total"]["value"] == "500.00" and [x["level"] for x in r["rows"]] == [1, 2, 3]
     assert analysis.group_wise(db, books.id, "sales", *SPAN, stock_group=sub.id)["total"]["value"] == "500.00"
     assert analysis.group_wise(db, books.id, "sales", *SPAN, stock_group=uuid.uuid4())["tree"] == []
+
+
+def test_fifo_closing_rate_on_a_date_is_the_default_rate_of_a_stock_line(db, books):
+    def rate(day, item="Component A", **kw):
+        return analysis.fifo_rates(db, books.id, date.fromisoformat(day), [item], **kw)[item]
+    assert rate("2026-04-01")["rate"] is None                       # nothing bought yet
+    assert rate("2026-04-10")["rate"] == "100.00"                   # 10 @ 100
+    assert rate("2026-05-10")["rate"] == "110.00"                   # 10 @ 100 + 10 @ 120
+    r = rate("2026-06-05")                                          # 4 issued from the oldest lot: 6 @ 100 + 10 @ 120
+    assert (r["rate"], r["qty"], r["basis"]) == ("112.50", "16", "FIFO closing")
+    assert rate("2026-06-20", "Finished Cooler")["rate"] == "200.00"
+    from sqlalchemy import select
+    from app.models import Voucher
+    mj = db.scalar(select(Voucher.id).where(Voucher.voucher_number == "MJ-1"))
+    assert rate("2026-06-05", exclude_voucher=mj)["rate"] == "110.00"   # editing MJ-1: its own issue left out
+    from fastapi.testclient import TestClient
+    from app.core.security import hash_key
+    from app.main import app
+    from app.models import User
+    db.add(User(username="fifo-boss", api_key_hash=hash_key("k-fifo"), is_superadmin=True))
+    db.commit()
+    r = TestClient(app).get(f"/api/v1/companies/{books.id}/masters/fifo-rates?as_of=2026-06-05&item=Component%20A&item=Finished%20Cooler",
+                            headers={"X-API-Key": "k-fifo"}).json()
+    assert r["Component A"]["rate"] == "112.50" and r["Finished Cooler"]["rate"] == "200.00"

@@ -14,7 +14,8 @@ from app.connectors.tally import codec
 from app.connectors.tally import xmlutil as X
 from app.core.config import settings
 from app.models import (
-    Company, SyncInbox, SyncStatus, TallyConnector, TallyMapping, Voucher, VoucherStatus, VoucherType, VoucherVersion,
+    Company, OutboxStatus, SyncInbox, SyncOutbox, SyncStatus, TallyConnector, TallyMapping, Voucher, VoucherStatus,
+    VoucherType, VoucherVersion,
 )
 from app.models.base import utcnow
 from app.services.accounting import vouchers as engine
@@ -73,6 +74,8 @@ def poll(db: Session, company: Company, conn: TallyConnector, client: TallyClien
                       state="skipped")
     else:
         _pull_vouchers(db, company, conn, client, counters["alt_vch_id"], stats, progress)
+    if force:   # Sync now: also find vouchers deleted in Tally (a full list costs Tally a scan, so not every pass)
+        _remove_deleted_in_tally(db, company, conn, client, stats, progress)
     conn.last_inbound_at = utcnow()
     db.commit()
     return stats
@@ -119,6 +122,49 @@ def _pull_vouchers(db: Session, company: Company, conn: TallyConnector, client: 
     progress.step(2, f"{stats['received']} voucher change(s) saved"
                   + (f"; {stats['remaining']} more on the next sync" if stats["remaining"] else ""),
                   done=total, total=total, state="done")
+
+
+def _remove_deleted_in_tally(db: Session, company: Company, conn: TallyConnector, client: TallyClient,
+                             stats: dict, progress) -> None:
+    """Tally does not report deletions: a deleted voucher just stops being listed. Every synced voucher
+    missing from Tally's list (and not found when looked up on its own) is deleted in the software too.
+    A software change still waiting to go to Tally is left to the outbound step, which raises a conflict.
+    If very many go missing at once (a wrong or restored company, say) nothing is deleted."""
+    mapped = db.execute(
+        select(TallyMapping.erp_id, TallyMapping.tally_master_id).join(Voucher, Voucher.id == TallyMapping.erp_id)
+        .where(TallyMapping.company_id == company.id, TallyMapping.entity_type == "voucher",
+               TallyMapping.tally_master_id.is_not(None), Voucher.status != S.DELETED,
+               Voucher.voucher_date >= voucher_from(company, conn))).all()
+    if not mapped:
+        return
+    progress.step(2, "Checking for vouchers deleted in Tally")
+    alive = {r.master_id for r in client.voucher_index(None)}
+    gone = [(erp_id, mid) for erp_id, mid in mapped if mid not in alive]
+    if not gone:
+        return
+    if not alive or len(gone) > max(25, len(mapped) // 50):
+        stats["deleted_in_tally_held"] = len(gone)
+        log.warning("%s: %d synced vouchers missing in Tally; not deleting them automatically", company.name, len(gone))
+        progress.step(2, f"{len(gone)} vouchers are missing in Tally - too many to delete automatically; "
+                         "check the company in Tally and the reconciliation", state="done")
+        return
+    pending = set(db.scalars(select(SyncOutbox.entity_id).where(
+        SyncOutbox.entity_type == "voucher", SyncOutbox.entity_id.in_([e for e, _ in gone]),
+        SyncOutbox.status.in_([OutboxStatus.PENDING, OutboxStatus.FAILED]))))
+    removed = 0
+    for erp_id, mid in gone:
+        if erp_id in pending or client.vouchers(master_id=mid):
+            continue
+        v = db.get(Voucher, erp_id)
+        engine.transition(db, v, "delete", TALLY, reason="Deleted in Tally", source="tally")
+        mapping = common.mapping_for_erp(db, company.id, "voucher", v.id)
+        mapping.last_synced_hash, mapping.erp_version_synced = "deleted", v.version
+        v.sync_status = SyncStatus.SYNCED
+        removed += 1
+        db.commit()
+    stats["deleted_in_tally"] = removed
+    if removed:
+        progress.step(2, f"{removed} voucher(s) deleted in Tally removed from the software", state="done")
 
 
 def _unseen(db: Session, company_id: uuid.UUID, changes: list[tuple[int, int]]) -> list[tuple[int, int]]:

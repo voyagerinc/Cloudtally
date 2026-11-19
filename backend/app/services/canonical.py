@@ -72,6 +72,30 @@ def normalize(doc: dict) -> dict:
     }
 
 
+def with_tally_defaults(erp: dict, tally: dict) -> dict:
+    """The ERP document with what Tally fills in by itself when a voucher is saved without it, taken
+    from Tally's copy: the party ledger (one of the voucher's own ledgers) when ERP left it blank, and
+    the single "On Account" bill of the full amount on a party line that had no bill references.
+    Anything else Tally changed still counts as a difference."""
+    out = dict(erp)
+    ledgers = {_s(e["ledger"]) for e in erp.get("entries", [])}
+    if not _s(erp.get("party_ledger")) and _s(tally.get("party_ledger")) in ledgers:
+        out["party_ledger"] = tally["party_ledger"]
+    tally_bills = {}
+    for e in tally.get("entries", []):
+        tally_bills.setdefault((_s(e["ledger"]), m(e["amount"])), []).append(e.get("bills") or [])
+    entries = []
+    for e in erp.get("entries", []):
+        found = tally_bills.get((_s(e["ledger"]), m(e["amount"])), [])
+        bills = found[0] if len(found) == 1 else None
+        if not e.get("bills") and bills and len(bills) == 1 and _s(bills[0].get("type")) == "On Account" \
+                and not _s(bills[0].get("name")) and abs(Decimal(bills[0]["amount"])) == abs(Decimal(e["amount"])):
+            e = {**e, "bills": bills}
+        entries.append(e)
+    out["entries"] = entries
+    return out
+
+
 def content_hash(doc: dict) -> str:
     payload = json.dumps(normalize(doc), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

@@ -92,6 +92,11 @@ function myPerms() {
   const a = (state.user?.companies || []).find((c) => c.company_id === state.company);
   return new Set(a ? a.permissions : []);
 }
+function isAdmin() {   // company admin or accounts admin in the selected company, or the system admin
+  if (state.user?.is_superadmin) return true;
+  const a = (state.user?.companies || []).find((c) => c.company_id === state.company);
+  return !!a && ["owner", "accounts_admin"].includes(a.role);
+}
 function can(perm) {
   const p = myPerms();
   return p === null || p.has(perm) || (perm.startsWith("report.") && p.has("reports.read"));
@@ -471,7 +476,8 @@ async function openVoucher(id) {
   const v = await api(`/vouchers/${id}`);
   const d = v.doc;
   const acts = { draft: ["post", "submit", "cancel", "delete"], pending_approval: ["approve", "reject", "cancel"], approved: ["post", "cancel"],
-    posted: ["cancel", "delete"], rejected: ["submit", "cancel", "delete"], cancelled: ["delete"] }[v.status] || [];
+    posted: ["cancel", "delete"], rejected: ["submit", "cancel", "delete"], cancelled: ["delete"] }[v.status]
+    ?.filter((a) => a !== "delete" || (isAdmin() && v.source_system === "erp")) || [];   // delete: admin, software vouchers only
   const el = $("#vdetail"); el.hidden = false;
   el.innerHTML = `<div class="row between"><h3>${esc(d.voucher_type)} ${esc(d.voucher_number)} · ${esc(d.date)}</h3>
     <div>${chip(v.status)} ${chip(v.sync_status)} <span class="muted small">v${v.version} · by ${esc(v.updated_by)} · origin ${esc(v.source_system)}</span></div></div>
@@ -488,8 +494,10 @@ async function openVoucher(id) {
       <button class="secondary" data-dup>Duplicate</button>${can("export") ? `<button class="secondary" data-xlsx>Excel</button>` : ""}
       <button class="link" data-hist>History</button></div><div id="vhist" hidden></div>`;
   el.querySelectorAll("[data-act]").forEach((b) => (b.onclick = async () => {
-    const reason = ["cancel", "delete", "reject"].includes(b.dataset.act) ? prompt(`Reason to ${b.dataset.act}?`) : null;
+    const reason = ["cancel", "delete", "reject"].includes(b.dataset.act)
+      ? prompt(b.dataset.act === "delete" ? "Remarks: why is this voucher deleted? (it is deleted in Tally too)" : `Reason to ${b.dataset.act}?`) : null;
     if (reason === null && ["cancel", "delete", "reject"].includes(b.dataset.act)) return;
+    if (b.dataset.act === "delete" && reason.trim().length < 3) return alert("Enter remarks to delete the voucher");
     try {
       if (b.dataset.act === "delete") await api(`/vouchers/${id}?reason=${encodeURIComponent(reason)}`, { method: "DELETE" });
       else await api(`/vouchers/${id}/${b.dataset.act}`, { method: "POST", body: { reason, expected_version: v.version } });
@@ -535,45 +543,330 @@ function totals() {
   $("#ve-diff").innerHTML = diff ? `<span class="error">Difference ${money(Math.abs(diff))} ${diff > 0 ? "Dr" : "Cr"}</span>` : `<span class="okmsg">Balanced</span>`;
   return diff;
 }
+// The entry screen changes with the voucher type, like Tally: ledger Dr/Cr for accounting vouchers, party +
+// items + additional ledgers for invoices, source / destination for a stock journal, and product + BOM
+// components for a manufacturing journal.
+const INVOICE_BASES = ["Sales", "Purchase", "Credit Note", "Debit Note", "Sales Order", "Purchase Order", "Delivery Note",
+  "Receipt Note", "Rejections In", "Rejections Out", "Material In", "Material Out", "Job Work In Order", "Job Work Out Order"];
+const INWARD_BASES = ["Purchase", "Credit Note", "Purchase Order", "Receipt Note", "Rejections In", "Material In", "Job Work In Order"];
+const PARTY_DR_BASES = ["Sales", "Debit Note"];   // party debited; Purchase and Credit Note credit it
+const ACC_INVOICE_BASES = ["Sales", "Purchase", "Credit Note", "Debit Note"];   // may also be entered as accounting invoices
+function vtOf(name) { return state.vtypes.find((v) => v.name === name) || { name, base_type: name, affects_accounts: true, affects_stock: true }; }
+function layoutOf(vt) {
+  const b = vt.base_type || "";
+  if (["Stock Journal", "Manufacturing Journal"].includes(b) && (/manufactur/i.test(b) || /manufactur/i.test(vt.name))) return "mfg";
+  if (["Stock Journal", "Physical Stock"].includes(b)) return "sj";
+  if (INVOICE_BASES.includes(b)) return ACC_INVOICE_BASES.includes(b) && $("#ve-acc-mode").checked ? "acc" : "inv";
+  return "acc";
+}
+let entryLayout = "acc";
+let entryItems = null;   // { company, byName } for rates, units and BOMs
+async function loadEntryItems() {
+  if (entryItems && entryItems.company === state.company) return entryItems;
+  const [items, godowns] = await Promise.all([api(`/companies/${state.company}/masters/stock-items`),
+    api(`/companies/${state.company}/masters/godowns`).catch(() => [])]);
+  entryItems = { company: state.company, byName: Object.fromEntries(items.map((i) => [i.name, i])) };
+  $("#item-names").innerHTML = items.map((i) => `<option value="${esc(i.name)}">`).join("");
+  $("#godown-names").innerHTML = godowns.map((g) => `<option value="${esc(g.name)}">`).join("");
+  return entryItems;
+}
+const itemInfo = (name) => (entryItems && entryItems.byName[name]) || null;
+const num2 = (v) => Math.round((+v || 0) * 100) / 100;
+
+// Rates of stock lines in stock / manufacturing journals and job-work or rejection vouchers default to the
+// item's FIFO closing rate on the voucher date (the cost of the stock on hand). A rate typed over is kept.
+const FIFO_INV_BASES = ["Material In", "Material Out", "Rejections In", "Rejections Out"];
+function usesFifo() {
+  return entryLayout === "sj" || entryLayout === "mfg"
+    || (entryLayout === "inv" && FIFO_INV_BASES.includes(vtOf($("#ve-type").value).base_type));
+}
+const fifoCache = {};
+async function fifoRates(names) {
+  const day = $("#ve-date").value || today(), ex = $("#ve-id").value;
+  const want = [...new Set(names.filter(Boolean))].filter((n) => !(`${state.company}|${day}|${ex}|${n}` in fifoCache));
+  if (want.length) {
+    const p = new URLSearchParams({ as_of: day });
+    want.forEach((n) => p.append("item", n));
+    if (ex) p.set("exclude_voucher", ex);
+    const r = await api(`/companies/${state.company}/masters/fifo-rates?${p}`);
+    want.forEach((n) => (fifoCache[`${state.company}|${day}|${ex}|${n}`] = r[n] || null));
+  }
+  return Object.fromEntries(names.map((n) => [n, fifoCache[`${state.company}|${day}|${ex}|${n}`]]));
+}
+function setFifoRate(tr, info) {
+  if (tr.dataset.rateEdited) return;
+  const input = tr.querySelector(".i-rate");
+  input.value = info && info.rate != null ? (+info.rate).toFixed(2) : "";
+  input.title = info ? `${info.basis} on ${$("#ve-date").value}${info.qty ? ` · on hand ${info.qty}` : ""} · type over to change` : "";
+  input.classList.toggle("auto-rate", !!(info && info.rate != null));
+  tr._recalc && tr._recalc();
+}
+async function refreshFifoRates() {
+  if (!usesFifo()) return;
+  const rows = [...document.querySelectorAll("#ve-items tr, #ve-src tr, #ve-dst tr, #vm-comp tr, #vm-by tr")]
+    .filter((tr) => !tr.dataset.rateEdited && tr.querySelector(".i-item").value.trim());
+  if (!rows.length) return;
+  const r = await fifoRates(rows.map((tr) => tr.querySelector(".i-item").value.trim()));
+  rows.forEach((tr) => setFifoRate(tr, r[tr.querySelector(".i-item").value.trim()]));
+}
+$("#ve-date").addEventListener("change", () => refreshFifoRates().catch((e) => ($("#ve-msg").textContent = e.message)));
+
+// One item line (Name of item, Godown, Batch, Quantity, Rate, per, Amount). Amount follows quantity x rate
+// until it is typed over.
+function addItemLine(tbodyId, l = {}) {
+  const tr = document.createElement("tr");
+  const qty = l.quantity == null ? "" : Math.abs(+l.quantity);
+  tr.innerHTML = `<td><input class="i-item" list="item-names" value="${esc(l.item || "")}"></td>
+    <td><input class="i-godown" list="godown-names" value="${esc(l.godown || "")}"></td>
+    <td><input class="i-batch" value="${esc(l.batch || "")}"></td>
+    <td><input class="i-qty num" inputmode="decimal" value="${qty === 0 ? "" : qty}"></td>
+    <td><input class="i-rate num" inputmode="decimal" value="${l.rate && +l.rate ? +l.rate : ""}"></td>
+    <td class="i-unit small">${esc(l.unit || "")}</td>
+    <td><input class="i-amount num" inputmode="decimal" value="${l.amount && +l.amount ? Math.abs(+l.amount) : ""}"></td>
+    <td><button type="button" class="link" tabindex="-1" title="Remove line">✕</button></td>`;
+  tr.dataset.unit = l.unit || "";
+  if (l.rate && +l.rate) tr.dataset.rateEdited = "1";   // a rate already on the voucher stays
+  tr.dataset.manual = l.amount && +l.amount && Math.abs(num2((+l.quantity || 0) * (+l.rate || 0))) !== Math.abs(num2(l.amount)) ? "1" : "";
+  const $q = (c) => tr.querySelector(c);
+  const recalc = () => { if (!tr.dataset.manual) { const a = num2(Math.abs(+$q(".i-qty").value || 0) * (+$q(".i-rate").value || 0)); $q(".i-amount").value = a ? a.toFixed(2) : ""; } entryTotals(); };
+  tr._recalc = recalc;
+  $q(".i-item").addEventListener("change", () => {
+    const it = itemInfo($q(".i-item").value);
+    if (!it) return;
+    tr.dataset.unit = it.unit || ""; $q(".i-unit").textContent = it.unit || "";
+    if (usesFifo()) { delete tr.dataset.rateEdited; fifoRates([it.name]).then((r) => setFifoRate(tr, r[it.name])).catch(() => {}); }
+    recalc();
+  });
+  $q(".i-qty").addEventListener("input", recalc);
+  $q(".i-rate").addEventListener("input", () => { tr.dataset.rateEdited = $q(".i-rate").value ? "1" : ""; $q(".i-rate").classList.remove("auto-rate"); recalc(); });
+  $q(".i-amount").addEventListener("input", () => { tr.dataset.manual = $q(".i-amount").value ? "1" : ""; entryTotals(); });
+  $q("button").onclick = () => { tr.remove(); entryTotals(); };
+  $(`#${tbodyId}`).appendChild(tr);
+  return tr;
+}
+function itemLines(tbodyId) {
+  return [...$(`#${tbodyId}`).querySelectorAll("tr")].map((tr) => ({
+    item: tr.querySelector(".i-item").value.trim(), godown: tr.querySelector(".i-godown").value.trim() || null,
+    batch: tr.querySelector(".i-batch").value.trim() || null, qty: Math.abs(+tr.querySelector(".i-qty").value || 0),
+    rate: +tr.querySelector(".i-rate").value || 0, amount: num2(tr.querySelector(".i-amount").value), unit: tr.dataset.unit || null,
+  })).filter((l) => l.item);
+}
+const linesTotal = (id) => itemLines(id).reduce((s, l) => s + l.amount, 0);
+
+function addExtraLine(l = {}) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `<td><input class="x-ledger" list="ledger-names" value="${esc(l.ledger || "")}"></td>
+    <td><input class="x-rate num" inputmode="decimal" placeholder="%" value="${l.rate || ""}"></td>
+    <td><input class="x-amount num" inputmode="decimal" value="${l.amount == null ? "" : l.amount}"></td>
+    <td><button type="button" class="link" tabindex="-1" title="Remove line">✕</button></td>`;
+  tr.querySelector(".x-rate").addEventListener("input", entryTotals);
+  tr.querySelector(".x-amount").addEventListener("input", () => { tr.querySelector(".x-rate").value = ""; entryTotals(); });
+  tr.querySelector("button").onclick = () => { tr.remove(); entryTotals(); };
+  $("#ve-extra").appendChild(tr);
+  return tr;
+}
+function extraLines() {   // additional ledgers; a rate % works out the amount on the items total
+  const items = linesTotal("ve-items");
+  return [...$("#ve-extra").querySelectorAll("tr")].map((tr) => {
+    const rate = tr.querySelector(".x-rate").value;
+    if (rate !== "") tr.querySelector(".x-amount").value = num2(items * (+rate) / 100).toFixed(2);
+    return { ledger: tr.querySelector(".x-ledger").value.trim(), amount: num2(tr.querySelector(".x-amount").value) };
+  }).filter((l) => l.ledger && l.amount);
+}
+
+// Manufacturing journal: the product's BOM fills the components (and co/by-products, scrap) for the quantity.
+function mfgBoms() { const it = itemInfo($("#vm-item").value.trim()); return (it && it.bom) || []; }
+function mfgFillBom() {
+  const boms = mfgBoms();
+  $("#vm-bom").innerHTML = boms.length ? boms.map((b, i) => `<option value="${i}">${esc(b.name || `BOM ${i + 1}`)} (for ${esc(qtyText(b.basic_qty, b.unit))})</option>`).join("")
+    : `<option value="">No BOM: enter the components</option>`;
+  mfgApplyBom();
+}
+function mfgApplyBom() {
+  const b = mfgBoms()[+$("#vm-bom").value];
+  if (!b) { entryTotals(); return; }
+  const per = (+$("#vm-qty").value || 0) / (+b.basic_qty || 1);
+  $("#vm-comp").innerHTML = ""; $("#vm-by").innerHTML = "";
+  for (const c of b.components) {
+    const it = itemInfo(c.item) || {};
+    const qty = Math.round(+c.qty * per * 10000) / 10000;
+    addItemLine(c.nature === "Component" ? "vm-comp" : "vm-by", { item: c.item, godown: c.godown, quantity: qty, unit: c.unit || it.unit });
+  }
+  if (!$("#vm-comp").children.length) addItemLine("vm-comp");
+  entryTotals();
+  refreshFifoRates().catch((e) => ($("#ve-msg").textContent = e.message));   // components at FIFO cost
+}
+$("#vm-item").addEventListener("change", () => {
+  const it = itemInfo($("#vm-item").value.trim());
+  if (it && !$("#vm-qty").value) { const b = (it.bom || [])[0]; $("#vm-qty").value = b ? +b.basic_qty : 1; }
+  mfgFillBom();
+});
+$("#vm-bom").onchange = mfgApplyBom;
+$("#vm-qty").addEventListener("change", mfgApplyBom);
+
+function entryTotals() {
+  if (entryLayout === "acc") return totals();
+  if (entryLayout === "inv") {
+    const items = linesTotal("ve-items"), extra = extraLines().reduce((s, l) => s + l.amount, 0);
+    $("#ve-items-total").textContent = money(items); $("#ve-inv-total").textContent = money(items + extra);
+  } else if (entryLayout === "sj") {
+    $("#ve-src-total").textContent = money(linesTotal("ve-src")); $("#ve-dst-total").textContent = money(linesTotal("ve-dst"));
+  } else {
+    const comp = linesTotal("vm-comp"), by = linesTotal("vm-by"), qty = +$("#vm-qty").value || 0;
+    $("#vm-comp-total").textContent = money(comp); $("#vm-by-total").textContent = money(by);
+    const cost = comp - by;
+    $("#vm-cost").innerHTML = `Cost of production <b>${money(cost)}</b>` + (qty ? ` · rate <b>${money(cost / qty)}</b> per ${esc(itemInfo($("#vm-item").value.trim())?.unit || "unit")}` : "")
+      + ` <span class="muted">(components less co-products / by-products / scrap)</span>`;
+  }
+  return 0;
+}
+
+// Show the layout of the chosen voucher type.
+function applyLayout(keep = false) {
+  const vt = vtOf($("#ve-type").value);
+  const b = vt.base_type;
+  $("#ve-mode-toggle").hidden = !ACC_INVOICE_BASES.includes(b);
+  entryLayout = layoutOf(vt);
+  for (const [id, lay] of [["#ve-acc", "acc"], ["#ve-inv", "inv"], ["#ve-sj", "sj"], ["#ve-mfg", "mfg"]]) $(id).hidden = entryLayout !== lay;
+  const books = vt.affects_accounts !== false;
+  $("#ve-party-label").hidden = entryLayout === "sj" || entryLayout === "mfg";
+  $("#ve-party-text").textContent = entryLayout === "inv" ? "Party A/c name" : "Party";
+  $("#ve-ledger-label").hidden = !(entryLayout === "inv" && books);
+  $("#ve-ledger-text").textContent = INWARD_BASES.includes(b) && b !== "Credit Note" || b === "Debit Note" ? "Purchase ledger" : "Sales ledger";
+  $("#ve-extra-box").hidden = !books;
+  $("#ve-mode-note").textContent = {
+    acc: "", sj: "Stock journal: what is consumed on the left, what is produced on the right. Rates: FIFO closing rate on the voucher date (type over to change).",
+    mfg: "Manufacturing journal: pick the product and quantity; its BOM fills the components at their FIFO closing rate.",
+    inv: books ? (PARTY_DR_BASES.includes(b) ? "Items go out; the party is debited with the invoice total." : "Items come in; the party is credited with the invoice total.")
+      : `${b}: items and quantities only (no accounting entries).`,
+  }[entryLayout];
+  if (!keep) {
+    if (entryLayout === "inv" && !$("#ve-items").children.length) { addItemLine("ve-items"); }
+    if (entryLayout === "sj") { if (!$("#ve-src").children.length) addItemLine("ve-src"); if (!$("#ve-dst").children.length) addItemLine("ve-dst"); }
+    if (entryLayout === "mfg" && !$("#vm-comp").children.length) mfgFillBom();
+    if (entryLayout === "acc" && !$("#ve-lines").children.length) { addLine(); addLine(); }
+  }
+  if (entryLayout !== "acc") loadEntryItems().catch(() => {});
+  entryTotals();
+}
+$("#ve-type").addEventListener("change", () => applyLayout());
+$("#ve-acc-mode").addEventListener("change", () => applyLayout());
+document.querySelectorAll("[data-add-item]").forEach((b) => (b.onclick = () => addItemLine(b.dataset.addItem).querySelector("input").focus()));
+$("#ve-add-extra").onclick = () => addExtraLine().querySelector("input").focus();
+
+function clearEntryTables() {
+  for (const id of ["#ve-lines", "#ve-items", "#ve-extra", "#ve-src", "#ve-dst", "#vm-comp", "#vm-by"]) $(id).innerHTML = "";
+  for (const id of ["#vm-item", "#vm-godown", "#vm-batch", "#vm-qty", "#ve-itemledger"]) $(id).value = "";
+  $("#vm-bom").innerHTML = "";
+}
 function resetEntry(type) {
-  $("#vform").reset(); $("#ve-lines").innerHTML = ""; $("#ve-id").value = ""; $("#ve-version").value = "";
+  const acc = $("#ve-acc-mode").checked;
+  $("#vform").reset(); clearEntryTables(); $("#ve-id").value = ""; $("#ve-version").value = "";
+  $("#ve-acc-mode").checked = acc;
   $("#entry-title").textContent = "New voucher"; $("#ve-date").value = today(); $("#ve-msg").textContent = "";
   if (type && state.vtypes.some((v) => v.name === type)) $("#ve-type").value = type;
-  addLine(); addLine(); totals();
+  applyLayout();
 }
-renderers.entry = async () => { if (!$("#ve-lines").children.length) resetEntry(); $("#ve-type").focus(); };
+renderers.entry = async () => { if (!$("#ve-lines").children.length && !$("#ve-items").children.length && !$("#ve-src").children.length && !$("#vm-comp").children.length) resetEntry(); $("#ve-type").focus(); };
 $("#ve-add").onclick = () => addLine().querySelector("input").focus();
 
-function editVoucher(v) {
-  show("entry"); resetEntry(); $("#ve-lines").innerHTML = "";
+async function editVoucher(v) {
+  show("entry"); resetEntry();
   const d = v.doc;
   $("#entry-title").textContent = `Edit ${d.voucher_type} ${d.voucher_number}`;
   $("#ve-id").value = v.id; $("#ve-version").value = v.version;
   $("#ve-type").value = d.voucher_type; $("#ve-number").value = d.voucher_number; $("#ve-date").value = d.date;
   $("#ve-party").value = d.party_ledger || ""; $("#ve-ref").value = d.reference_no || ""; $("#ve-narration").value = d.narration || "";
-  d.entries.forEach(addLine); totals();
+  const vt = vtOf(d.voucher_type);
+  // An invoice saved with ledgers only (no items) opens as an accounting invoice.
+  $("#ve-acc-mode").checked = ACC_INVOICE_BASES.includes(vt.base_type) && !d.inventory.length;
+  clearEntryTables();
+  applyLayout(true);
+  await loadEntryItems().catch(() => {});
+  const inward = (i) => (+i.quantity ? +i.quantity > 0 : i.direction === "in");
+  if (entryLayout === "acc") d.entries.forEach(addLine);
+  else if (entryLayout === "inv") {
+    const s = PARTY_DR_BASES.includes(vt.base_type) ? 1 : -1;
+    const itemLedger = (d.inventory.find((i) => i.ledger) || {}).ledger || "";
+    $("#ve-itemledger").value = itemLedger;
+    d.inventory.forEach((i) => addItemLine("ve-items", i));
+    d.entries.filter((e) => e.ledger !== d.party_ledger && e.ledger !== itemLedger)
+      .forEach((e) => addExtraLine({ ledger: e.ledger, amount: num2(-s * +e.amount) }));
+  } else if (entryLayout === "sj") {
+    d.inventory.forEach((i) => addItemLine(inward(i) ? "ve-dst" : "ve-src", i));
+  } else {
+    const ins = d.inventory.filter(inward), outs = d.inventory.filter((i) => !inward(i));
+    const p = ins[0] || {};
+    $("#vm-item").value = p.item || ""; $("#vm-godown").value = p.godown || ""; $("#vm-batch").value = p.batch || "";
+    $("#vm-qty").value = p.quantity ? Math.abs(+p.quantity) : "";
+    const boms = mfgBoms();
+    $("#vm-bom").innerHTML = boms.map((b, i) => `<option value="${i}">${esc(b.name || `BOM ${i + 1}`)}</option>`).join("") || `<option value="">No BOM</option>`;
+    outs.forEach((i) => addItemLine("vm-comp", i));
+    ins.slice(1).forEach((i) => addItemLine("vm-by", i));
+  }
+  entryTotals();
   $("#ve-action").value = v.status === "posted" ? "post" : "draft";
   editing = d;
 }
 let editing = null;
 
+// What the voucher sends, by layout. Quantities: inward positive, outward negative.
+function entryBody(prev) {
+  const vt = vtOf($("#ve-type").value), b = vt.base_type, books = vt.affects_accounts !== false;
+  const head = {
+    voucher_type: $("#ve-type").value, voucher_number: $("#ve-number").value || null, date: $("#ve-date").value,
+    party_ledger: $("#ve-party").value || null, reference_no: $("#ve-ref").value || null, narration: $("#ve-narration").value,
+  };
+  const inv = (l, inward, ledger = null) => ({ item: l.item, quantity: (inward ? l.qty : -l.qty).toString(), unit: l.unit, rate: l.rate.toString(),
+    amount: l.amount.toFixed(2), godown: l.godown, batch: l.batch, ledger, ...(l.qty ? {} : { direction: inward ? "in" : "out" }) });
+  if (entryLayout === "acc") {
+    if (totals() !== 0) throw new Error("Debits and credits must match");
+    const entries = [...$("#ve-lines").querySelectorAll("tr")].map((tr, i) => {
+      const dr = +tr.querySelector(".l-dr").value || 0, cr = +tr.querySelector(".l-cr").value || 0;
+      const amount = (dr - cr).toFixed(2), billText = tr.querySelector(".l-bill").value.trim();
+      const old = prev && prev.entries[i] && prev.entries[i].ledger === tr.querySelector(".l-ledger").value ? prev.entries[i] : {};
+      const bills = billText ? [{ type: billText.startsWith("Agst ") ? "Agst Ref" : "New Ref", name: billText.replace(/^Agst /, ""), amount }]
+        : (old.bills && old.bills.length === 1 ? [{ ...old.bills[0], amount }] : []);
+      return { ledger: tr.querySelector(".l-ledger").value, amount, bills, cost: old.cost || [], bank: old.bank || [] };
+    }).filter((l) => +l.amount !== 0);
+    return { ...head, entries, inventory: prev ? prev.inventory : [] };
+  }
+  if (entryLayout === "inv") {
+    const lines = itemLines("ve-items");
+    if (!lines.length) throw new Error("Enter at least one item");
+    if (!head.party_ledger) throw new Error("Enter the Party A/c name");
+    const inward = INWARD_BASES.includes(b);
+    if (!books) return { ...head, entries: [], inventory: lines.map((l) => inv(l, inward)) };
+    const itemLedger = $("#ve-itemledger").value.trim();
+    if (!itemLedger) throw new Error(`Enter the ${$("#ve-ledger-text").textContent.toLowerCase()}`);
+    const s = PARTY_DR_BASES.includes(b) ? 1 : -1;
+    const items = num2(lines.reduce((t, l) => t + l.amount, 0)), extras = extraLines();
+    const total = num2(items + extras.reduce((t, l) => t + l.amount, 0));
+    const entries = [{ ledger: head.party_ledger, amount: (s * total).toFixed(2) },
+      { ledger: itemLedger, amount: (-s * items).toFixed(2) },
+      ...extras.map((x) => ({ ledger: x.ledger, amount: (-s * x.amount).toFixed(2) }))];
+    return { ...head, entries, inventory: lines.map((l) => inv(l, inward, itemLedger)) };
+  }
+  if (entryLayout === "sj") {
+    const src = itemLines("ve-src"), dst = itemLines("ve-dst");
+    if (!src.length && !dst.length) throw new Error("Enter the items consumed and / or produced");
+    return { ...head, party_ledger: null, entries: [], inventory: [...src.map((l) => inv(l, false)), ...dst.map((l) => inv(l, true))] };
+  }
+  const product = $("#vm-item").value.trim(), qty = Math.abs(+$("#vm-qty").value || 0);
+  if (!product || !qty) throw new Error("Enter the name of the product and its quantity");
+  const comp = itemLines("vm-comp"), by = itemLines("vm-by");
+  if (!comp.length) throw new Error("Enter the components consumed");
+  const cost = num2(comp.reduce((t, l) => t + l.amount, 0) - by.reduce((t, l) => t + l.amount, 0));
+  const made = { item: product, qty, rate: num2(cost / qty), amount: cost, unit: itemInfo(product)?.unit || null,
+                 godown: $("#vm-godown").value.trim() || null, batch: $("#vm-batch").value.trim() || null };
+  return { ...head, party_ledger: null, entries: [], inventory: [inv(made, true), ...comp.map((l) => inv(l, false)), ...by.map((l) => inv(l, true))] };
+}
+
 $("#vform").onsubmit = async (e) => {
   e.preventDefault();
-  if (totals() !== 0) { $("#ve-msg").innerHTML = `<span class="error">Debits and credits must match</span>`; return; }
   const prev = editing && $("#ve-id").value ? editing : null;
-  const entries = [...$("#ve-lines").querySelectorAll("tr")].map((tr, i) => {
-    const dr = +tr.querySelector(".l-dr").value || 0, cr = +tr.querySelector(".l-cr").value || 0;
-    const amount = (dr - cr).toFixed(2), billText = tr.querySelector(".l-bill").value.trim();
-    const old = prev && prev.entries[i] && prev.entries[i].ledger === tr.querySelector(".l-ledger").value ? prev.entries[i] : {};
-    const bills = billText ? [{ type: billText.startsWith("Agst ") ? "Agst Ref" : "New Ref", name: billText.replace(/^Agst /, ""), amount }]
-      : (old.bills && old.bills.length === 1 ? [{ ...old.bills[0], amount }] : []);
-    return { ledger: tr.querySelector(".l-ledger").value, amount, bills, cost: old.cost || [], bank: old.bank || [] };
-  }).filter((l) => +l.amount !== 0);
-  const body = {
-    voucher_type: $("#ve-type").value, voucher_number: $("#ve-number").value || null, date: $("#ve-date").value,
-    party_ledger: $("#ve-party").value || null, reference_no: $("#ve-ref").value || null, narration: $("#ve-narration").value, entries,
-    inventory: prev ? prev.inventory : [],
-  };
+  let body;
+  try { body = entryBody(prev); } catch (err) { $("#ve-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; return; }
   try {
     let v;
     if ($("#ve-id").value) {
@@ -582,14 +875,25 @@ $("#vform").onsubmit = async (e) => {
     } else v = await api(`/companies/${state.company}/vouchers`, { method: "POST", body: { ...body, action: $("#ve-action").value } });
     $("#ve-msg").innerHTML = `<span class="okmsg">Saved ${esc(v.doc.voucher_type)} ${esc(v.doc.voucher_number)} (${esc(v.status)}, sync ${esc(v.sync_status)})</span>`;
     const type = $("#ve-type").value; editing = null; resetEntry(type);
+    $("#ve-msg").innerHTML = `<span class="okmsg">Saved ${esc(v.doc.voucher_type)} ${esc(v.doc.voucher_number)} (${esc(v.status)}, sync ${esc(v.sync_status)})</span>`;
   } catch (err) { $("#ve-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; }
 };
 const FKEYS = { F4: "Contra", F5: "Payment", F6: "Receipt", F7: "Journal", F8: "Sales", F9: "Purchase" };
 document.addEventListener("keydown", (e) => {
   if (currentTab !== "entry") return;
-  if (FKEYS[e.key]) { e.preventDefault(); $("#ve-type").value = FKEYS[e.key]; $("#ve-date").focus(); }
+  if (FKEYS[e.key] || (e.key === "F7" && e.altKey)) {   // Alt+F7 stock journal, as in Tally
+    e.preventDefault();
+    const want = e.altKey ? "Stock Journal" : FKEYS[e.key];
+    const vt = state.vtypes.find((v) => v.is_active && v.name === want) || state.vtypes.find((v) => v.is_active && v.base_type === want);
+    if (vt) { $("#ve-type").value = vt.name; resetEntry(vt.name); }
+    $("#ve-date").focus();
+  }
   if (e.key === "Enter" && e.ctrlKey) { e.preventDefault(); $("#vform").requestSubmit(); }
-  if (e.key.toLowerCase() === "n" && e.altKey) { e.preventDefault(); addLine().querySelector("input").focus(); }
+  if (e.key.toLowerCase() === "n" && e.altKey) {
+    e.preventDefault();
+    const target = { acc: null, inv: "ve-items", sj: "ve-src", mfg: "vm-comp" }[entryLayout];
+    (target ? addItemLine(target) : addLine()).querySelector("input").focus();
+  }
 });
 
 // ------------------------------------------------------------------ conflicts
@@ -627,7 +931,7 @@ function reportUrl(fmt) {
   if (name.startsWith("register-")) { path = "register"; p.set("base_type", name.split("-")[1]); }
   if (["balance-sheet", "outstanding"].includes(path)) { if (t) p.set("as_of", t); }
   else { if (f) p.set("from_date", f); if (t) p.set("to_date", t); }
-  if (name === "stock-journal" || name === "material-transfer-wip") {
+  if (name === "stock-journal" || name.startsWith("material-transfer-wip") || name === "wo-manufacturing") {
     const f2 = analysisParams();
     for (const k of ["item", "stock_group"]) if (f2[k]) p.set(k, f2[k]);
     if (sjType && name === "stock-journal") p.set("voucher_type", sjType);
@@ -660,7 +964,7 @@ async function loadAnalysisFilters() {
 function showAnalysisControls() {
   const name = $("#r-name").value;
   const trade = name in ANALYSIS, fifo = name === "fifo-costing", grouped = name === "sales-group-wise";
-  const journal = name === "stock-journal" || name === "material-transfer-wip";
+  const journal = name === "stock-journal" || name.startsWith("material-transfer-wip") || name === "wo-manufacturing";
   $("#ra-filters").hidden = !(trade || fifo || grouped || journal);
   $("#ra-cat").closest("label").hidden = journal;
   $("#ra-by-label").hidden = !trade;
@@ -776,12 +1080,14 @@ async function stockJournalView(el, report = "stock-journal") {
   if (sjType && !fixedType) p.set("voucher_type", sjType);
   const r = await api(`/reports/${report}?${p}`);
   const qtyT = (q, u) => (q == null ? "" : qtyText(q, u));
+  const mainCol = report === "material-transfer-wip-main";   // the group under Primary, after the item group
   const side = (title, lines, t) => `<div><h4>${esc(title)} <span class="muted small">${lines.length} item${lines.length === 1 ? "" : "s"}</span></h4>
-    <table><thead><tr><th>Item</th><th>Item group</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th><th>Godown</th><th>Batch</th></tr></thead><tbody>
+    <table><thead><tr><th>Item</th><th>Item group</th>${mainCol ? "<th>Main group</th>" : ""}<th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th><th>Godown</th><th>Batch</th></tr></thead><tbody>
     ${lines.map((x) => `<tr class="click" data-item="${esc(x.item_id)}" data-name="${esc(x.item)}"><td>${esc(x.item)}</td><td>${esc(x.item_group || "")}</td>
+      ${mainCol ? `<td>${esc(x.main_group || "")}</td>` : ""}
       <td class="num">${qtyT(x.quantity, x.unit)}</td><td class="num">${money(x.rate)}</td><td class="num">${money(x.amount)}</td>
-      <td>${esc(x.godown || "")}</td><td>${esc(x.batch || "")}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">Nothing</td></tr>`}
-    <tr class="total"><td>Total</td><td></td><td class="num">${qtyT(t.quantity, t.unit)}</td><td></td><td class="num">${money(t.amount)}</td><td></td><td></td></tr></tbody></table></div>`;
+      <td>${esc(x.godown || "")}</td><td>${esc(x.batch || "")}</td></tr>`).join("") || `<tr><td colspan="${mainCol ? 8 : 7}" class="muted">Nothing</td></tr>`}
+    <tr class="total"><td>Total</td><td></td>${mainCol ? "<td></td>" : ""}<td class="num">${qtyT(t.quantity, t.unit)}</td><td></td><td class="num">${money(t.amount)}</td><td></td><td></td></tr></tbody></table></div>`;
   const shown = r.vouchers.slice(0, 300);
   el.innerHTML = (fixedType ? "" : `<div class="row wrap"><label>Voucher type<select id="sj-type"><option value="all">All stock journals</option>
       ${r.voucher_types.map((t) => `<option ${t === r.voucher_type ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label></div>`) + `
@@ -798,6 +1104,47 @@ async function stockJournalView(el, report = "stock-journal") {
   el.querySelectorAll("[data-sj]").forEach((b) => (b.onclick = () => el.querySelectorAll("details.fs-block").forEach((d) => (d.open = b.dataset.sj === "1"))));
   el.querySelectorAll("button[data-v]").forEach((b) => (b.onclick = (e) => { e.preventDefault(); drillVoucher(b.dataset.v, b.dataset.t); }));
   el.querySelectorAll("tr[data-item]").forEach((tr) => (tr.onclick = () => drillTo(tr.dataset.name, (e2) => stockItemView(e2, tr.dataset.item))));
+}
+
+// WO Manufacturing vouchers: each produced item expands into the consumed item groups, and those into items.
+async function woManufacturingView(el) {
+  await loadAnalysisFilters();
+  const f = analysisParams();
+  const p = rParams();
+  for (const k of ["item", "stock_group"]) if (f[k]) p.set(k, f[k]);
+  const r = await api(`/reports/wo-manufacturing?${p}`);
+  const qtyT = (q, u) => (q == null ? "" : qtyText(q, u));
+  const itemOpen = (x) => () => drillTo(x.item, (e2) => stockItemView(e2, x.item_id));
+  const roots = r.vouchers.map((v) => {
+    const made = v.in[0] || {};
+    return {
+      label: v.in.map((x) => x.item).join(", ") || "(nothing produced)",
+      row: { batch: v.in.map((x) => x.batch || "").filter(Boolean).join(", "), voucher: v.voucher_number, vtype: v.voucher_type, date: v.date, group: v.in.map((x) => x.item_group || "").join(", "),
+             qty: v.in.length === 1 ? qtyT(made.quantity, made.unit) : qtyT(v.in_total.quantity, v.in_total.unit),
+             amount: v.out_total.amount, div: v.divisions },
+      children: v.consumed_groups.map((g) => ({
+        label: g.group, cls: "", row: { qty: qtyT(g.quantity, g.unit), amount: g.amount, items: g.items.length, div: g.divisions },
+        children: g.items.map((x) => ({ label: x.item, row: { batch: x.batch, qty: qtyT(x.quantity, x.unit), rate: x.rate, amount: x.amount, div: { [x.division]: x.amount } }, open: itemOpen(x) })),
+      })),
+    };
+  });
+  if (roots.length) roots.push({ label: "Total consumed", cls: "total", row: { amount: r.total.out_amount, div: r.total.divisions } });
+  el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · ${r.total.vouchers} voucher${r.total.vouchers === 1 ? "" : "s"}
+    · consumed ${money(r.total.out_amount)} · click a produced item for what it consumed, group-wise</p>
+    <p class="small muted">Hydraulic, COC and OC split the consumption by the division of each consumed item's stock group (MIS settings)${
+      Number(r.total.divisions.other) ? ` · ${money(r.total.divisions.other)} is in groups with none of these divisions` : ""}.</p><div id="t"></div>`;
+  treeTable($("#t"), [
+    { label: "Batch", get: (x) => esc(x.row.batch || "") },
+    { label: "Voucher", get: (x) => esc(x.row.voucher || "") },
+    { label: "Voucher type", get: (x) => esc(x.row.vtype || "") },
+    { label: "Date", get: (x) => esc(x.row.date || "") },
+    { label: "Item group", get: (x) => esc(x.row.group || "") },
+    { label: "Quantity", num: true, get: (x) => x.row.qty || "" },
+    { label: "Rate", num: true, get: (x) => (x.row.rate == null ? "" : money(x.row.rate)) },
+    { label: "Consumed", num: true, get: (x) => (x.row.amount == null ? "" : money(x.row.amount)) },
+    ...[["hydraulic", "Hydraulic"], ["coc", "COC"], ["cooler", "OC"]].map(([k, label]) => (
+      { label, num: true, get: (x) => (x.row.div && Number(x.row.div[k]) ? money(x.row.div[k]) : "") })),
+  ], roots, { title: "Produced item / consumed group / item" });
 }
 
 // Item group-wise sales: stock groups expand into sub-groups and items; an item opens its invoices.
@@ -1296,6 +1643,8 @@ renderers.reports = async () => {
     "sales-rm-cost": (el) => analysisView(el, "sales-rm-cost"),
     "sales-fifo-cost": (el) => analysisView(el, "sales-fifo-cost"),
     "sales-group-wise": groupWiseView, "stock-journal": (el) => stockJournalView(el), "material-transfer-wip": (el) => stockJournalView(el, "material-transfer-wip"),
+    "material-transfer-wip-main": (el) => stockJournalView(el, "material-transfer-wip-main"),
+    "wo-manufacturing": woManufacturingView,
     "mis-finance-sheet": misSheetView, "mis-pl": misPlView, "mis-expense": misExpenseView, "mis-exp-breakup": (el) => misBreakupView(el),
     "mis-deferred": misDeferredView,
     "fifo-costing": fifoView,
@@ -1505,7 +1854,7 @@ function detailBlock(title, pairs) {
 }
 
 // ------------------------------------------------------------------ masters menu
-const MASTER_VIEWS = ["items", "stock-groups", "stock-categories", "units", "ledgers", "ledger-groups", "ledger-categories", "mis"];
+const MASTER_VIEWS = ["items", "stock-groups", "stock-categories", "units", "bom", "ledgers", "ledger-groups", "ledger-categories", "mis"];
 let masterView = (() => { try { const v = localStorage.getItem("erp_master"); return MASTER_VIEWS.includes(v) ? v : "items"; } catch (_) { return "items"; } })();
 let ledgerGroup = null;   // set when a ledger group is opened from the Ledger group list
 const listCache = {};
@@ -1514,8 +1863,10 @@ renderers.masters = async () => {
   $("#mp-ledgers").hidden = masterView !== "ledgers";
   $("#mp-items").hidden = masterView !== "items";
   $("#mp-mis").hidden = masterView !== "mis";
-  $("#mp-list").hidden = ["ledgers", "items", "mis"].includes(masterView);
+  $("#mp-bom").hidden = masterView !== "bom";
+  $("#mp-list").hidden = ["ledgers", "items", "mis", "bom"].includes(masterView);
   if (masterView === "mis") return misSettingsView($("#mp-mis"));
+  if (masterView === "bom") return renderBom();
   if (masterView === "ledgers") return renderLedgers();
   if (masterView === "items") return renderItems();
   return renderMasterList();
@@ -1573,6 +1924,51 @@ async function renderMasterList() {
   table($("#ml-table"), cfg.cols, rows, cfg.open);
 }
 let mlTimer; $("#ml-q").oninput = () => { clearTimeout(mlTimer); mlTimer = setTimeout(renderMasterList, 200); };
+
+// BOM: every item that has one; an item expands into its BOM(s) and their components.
+async function renderBom() {
+  const q = $("#bq").value.trim();
+  const rows = await api(`/companies/${state.company}/masters/bom${q ? `?q=${encodeURIComponent(q)}` : ""}`);
+  const comps = rows.reduce((n, r) => n + r.boms.reduce((m, b) => m + b.components.length, 0), 0);
+  $("#bcount").textContent = rows.length
+    ? `${rows.length} item${rows.length === 1 ? "" : "s"} with a BOM · ${comps} component lines · click an item for its components`
+    : (q ? "No BOM matches the search" : "No BOMs yet: click Read BOMs from Tally");
+  const itemOpen = (name, id) => (id ? () => { $("#iq").value = name; itemFilter = null; openMaster("items"); } : undefined);
+  const comp = (c) => ({ label: c.item, row: { group: c.item_group, primary: c.primary_group, nature: c.nature, qty: qtyText(c.qty, c.unit), godown: c.godown },
+    open: itemOpen(c.item, c.item_id) });
+  const roots = rows.map((r) => {
+    const one = r.boms.length === 1 ? r.boms[0] : null;
+    return {
+      label: r.item,
+      row: { group: r.item_group, primary: r.primary_group, bom: one ? one.name : `${r.boms.length} BOMs`, per: one ? qtyText(one.basic_qty, one.unit) : "",
+             count: r.boms.reduce((m, b) => m + b.components.length, 0) },
+      children: one ? one.components.map(comp)
+        : r.boms.map((b) => ({ label: b.name || "(BOM)", row: { per: qtyText(b.basic_qty, b.unit), count: b.components.length },
+                               children: b.components.map(comp) })),
+    };
+  });
+  treeTable($("#btree"), [
+    { label: "Item group", get: (x) => esc(x.row.group || "") },
+    { label: "Primary group", get: (x) => esc(x.row.primary || "") },
+    { label: "BOM", get: (x) => esc(x.row.bom || "") },
+    { label: "For qty", num: true, get: (x) => x.row.per || "" },
+    { label: "Components", num: true, get: (x) => x.row.count ?? "" },
+    { label: "Nature", get: (x) => esc(x.row.nature || "") },
+    { label: "Qty", num: true, get: (x) => x.row.qty || "" },
+    { label: "Godown", get: (x) => esc(x.row.godown || "") },
+  ], roots, { title: "Item / component", expandDepth: q ? 2 : 0 });
+}
+let bqTimer; $("#bq").oninput = () => { clearTimeout(bqTimer); bqTimer = setTimeout(() => renderBom().catch((e) => alert(e.message)), 250); };
+$("#b-xlsx").onclick = () => download(`/companies/${state.company}/masters/bom/xlsx${$("#bq").value.trim() ? `?q=${encodeURIComponent($("#bq").value.trim())}` : ""}`, "Bill of materials.xlsx");
+$("#b-refresh").onclick = async () => {
+  const b = $("#b-refresh"); b.disabled = true; b.textContent = "Reading from Tally…";
+  try {
+    const r = await api(`/companies/${state.company}/masters/bom/refresh`, { method: "POST" });
+    alert(`${r.items_with_bom} items have a BOM in Tally; ${r.updated} updated here.`
+      + (r.not_in_software.length ? `\nNot in the software yet (sync masters first): ${r.not_in_software.slice(0, 10).join(", ")}` : ""));
+    await renderBom();
+  } catch (e) { alert(e.message); } finally { b.disabled = false; b.textContent = "Read BOMs from Tally"; }
+};
 
 async function renderLedgers() {
   const q = $("#lq").value;
@@ -2529,6 +2925,85 @@ $("#fr-form").onsubmit = async (e) => {
     $("#login-form").requestSubmit();
   } catch (err) { $("#fr-msg").textContent = err.message; } finally { btn.disabled = false; btn.textContent = "Activate and create manager"; }
 };
+
+// ------------------------------------------------------------------ Excel button on every table
+// Each table gets an "Excel" button that downloads it as it is shown: the same columns, the rows that are
+// open, headings bold on yellow, totals and groups bold, amounts as numbers, tree levels indented.
+function tableTitle(t) {
+  const crumb = t.closest("#r-out") && nav.length ? nav.map((n) => n.title).join(" - ") : "";
+  let sub = "";
+  for (let n = t; n && n !== document.body && !sub; n = n.parentElement) {
+    if (n.tagName === "DETAILS") { sub = (n.querySelector(":scope > summary h3") || n.querySelector(":scope > summary"))?.textContent.trim() || ""; break; }
+    for (let s = n.previousElementSibling; s && !sub; s = s.previousElementSibling) {
+      const h = s.matches("h2,h3,h4") ? s : s.querySelector && s.querySelector("h2,h3,h4");
+      if (h && h.textContent.trim()) sub = h.textContent.trim();
+    }
+    if (crumb && n.id === "r-body") break;
+  }
+  const tab = document.querySelector("#tabs button.active")?.textContent.trim() || "Table";
+  return [crumb || (sub ? "" : tab), sub].filter(Boolean).join(" - ").replace(/\s+/g, " ").slice(0, 110) || tab;
+}
+function tableGrid(t) {
+  const NUM = /^\(?-?[\d,]+(\.\d+)?\)?$/;
+  const rows = [], widths = [];
+  for (const tr of t.querySelectorAll(":scope > thead > tr, :scope > tbody > tr, :scope > tfoot > tr, :scope > tr")) {
+    if (tr.hidden) continue;
+    const head = tr.parentElement.tagName === "THEAD";
+    const bold = head || /\b(total|group)\b/.test(tr.className) || tr.querySelector("th") !== null;
+    const row = [];
+    tr.querySelectorAll(":scope > td, :scope > th").forEach((td, i) => {
+      const field = td.querySelector("select, input:not([type=checkbox]), textarea");
+      let text = (field ? (field.tagName === "SELECT" ? field.selectedOptions[0]?.textContent : field.value) : td.innerText || "").replace(/\s+/g, " ").trim();
+      if (i === 0 && td.querySelector(".tw")) {   // tree level as indentation
+        const level = Math.max(0, Math.round((parseFloat(td.style.paddingLeft) - 8) / 18) || 0);
+        text = " ".repeat(level * 3) + text.replace(/^[▸▾]\s*/, "");
+      }
+      let cell;
+      if (td.classList.contains("num") && NUM.test(text) && !head) {
+        const neg = text.startsWith("(") || text.startsWith("-");
+        cell = { v: (neg ? "-" : "") + text.replace(/[(),-]/g, ""), s: bold ? "boldnum" : "num" };
+      } else cell = text === "" && !head ? null : { v: text, s: head ? "head" : bold ? "bold" : null };
+      row.push(cell);
+      const span = +td.getAttribute("colspan") || 1;
+      for (let k = 1; k < span; k++) row.push(head ? { v: "", s: "head" } : null);
+      widths[row.length - span] = Math.max(widths[row.length - span] || 8, Math.min(60, text.length + 2));
+    });
+    rows.push(row);
+  }
+  return { rows, widths: widths.map((w) => w || 10) };
+}
+async function exportTable(t) {
+  const title = tableTitle(t);
+  const { rows, widths } = tableGrid(t);
+  const res = await fetch(`${API}/export/table?${cq()}`, {
+    method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ title, rows: [[{ v: title, s: "bold" }], [], ...rows], widths }),
+  });
+  if (!res.ok) return alert((await res.json().catch(() => ({}))).detail || res.statusText);
+  const a = document.createElement("a"); a.href = URL.createObjectURL(await res.blob()); a.download = `${title.replace(/[\\/:*?"<>|]+/g, " ")}.xlsx`; a.click();
+}
+function addExcelButtons() {
+  if (!state.company || !can("export")) return;
+  document.querySelectorAll("main table:not([data-xl]), dialog table:not([data-xl])").forEach((t) => {
+    if (t.closest("[data-no-xl]") || t.querySelector("table")) return;
+    t.dataset.xl = "1";
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "link"; b.title = "Download this table as shown, in Excel"; b.textContent = "⬇ Excel";
+    b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); exportTable(t).catch((err) => alert(err.message)); };
+    const tools = t.previousElementSibling;
+    if (tools && tools.classList.contains("tree-tools")) { tools.prepend(b); return; }   // beside Expand all
+    const bar = document.createElement("div");
+    bar.className = "xl-bar";
+    bar.append(b);
+    t.before(bar);
+  });
+}
+let xlQueued = false;
+new MutationObserver(() => {
+  if (xlQueued) return;
+  xlQueued = true;
+  requestAnimationFrame(() => { xlQueued = false; addExcelButtons(); });
+}).observe(document.body, { childList: true, subtree: true });
 
 if (location.hash.startsWith("#setup=")) { signOut(); setupFromLink(location.hash.slice(7)); }
 else if (state.token || state.key) start().catch(() => { signOut(); firstRunCheck(); });

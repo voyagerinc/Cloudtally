@@ -1,6 +1,7 @@
 import uuid
+from datetime import date
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
 
 from app import audit
@@ -151,7 +152,8 @@ def list_voucher_types(company_id: uuid.UUID, db: DB, user: CurrentUser):
     rows = db.scalars(select(VoucherType).where(VoucherType.company_id == company_id).order_by(VoucherType.name))
     return [{"id": v.id, "name": v.name, "base_type": v.base_type, "numbering": v.numbering, "prefix": v.prefix,
              "suffix": v.suffix, "next_number": v.next_number, "requires_approval": v.requires_approval,
-             "approval_threshold": v.approval_threshold, "is_active": v.is_active} for v in rows]
+             "approval_threshold": v.approval_threshold, "is_active": v.is_active,
+             "affects_accounts": v.affects_accounts, "affects_stock": v.affects_stock} for v in rows]
 
 
 @router.post("/voucher-types", status_code=201)
@@ -227,3 +229,106 @@ _simple(Godown, "godown")
 _simple(Unit, "unit", "symbol")
 _simple(CostCentre, "cost_centre")
 _simple(StockGroup, "stock_group")
+
+
+# ------------------------------------------------------------------ BOM (bill of materials)
+
+def _bom_rows(db, company_id: uuid.UUID, q: str | None = None) -> list[dict]:
+    """Every item with a BOM, its components with their item group, primary group (the group straight
+    under Primary) and the unit of the component."""
+    from app.reports.analysis import _main_groups
+    groups = dict(db.execute(select(StockGroup.id, StockGroup.name).where(StockGroup.company_id == company_id)).all())
+    mains = _main_groups(db, company_id)
+    items = db.scalars(select(StockItem).where(StockItem.company_id == company_id)).all()
+    info = {i.name: (groups.get(i.group_id), i.unit, str(i.id), mains.get(i.group_id)) for i in items}
+    q = (q or "").strip().lower()
+    out = []
+    for i in sorted((i for i in items if i.bom), key=lambda i: i.name.lower()):
+        boms = []
+        for b in i.bom:
+            comps = []
+            for c in b["components"]:
+                group, _unit, item_id, main = info.get(c["item"], (None, None, None, None))
+                comps.append({**c, "item_group": group, "primary_group": main, "item_id": item_id})
+            boms.append({**b, "components": comps})
+        if q and not (q in i.name.lower() or q in (groups.get(i.group_id) or "").lower()
+                      or any(q in c["item"].lower() for b in boms for c in b["components"])):
+            continue
+        out.append({"id": str(i.id), "item": i.name, "item_group": groups.get(i.group_id),
+                    "primary_group": mains.get(i.group_id), "unit": i.unit, "boms": boms})
+    return out
+
+
+@router.get("/bom")
+def list_bom(company_id: uuid.UUID, db: DB, user: CurrentUser, q: str | None = None):
+    authorize(db, user, company_id, Perm.MASTERS_READ)
+    return _bom_rows(db, company_id, q)
+
+
+@router.get("/bom/xlsx")
+def bom_xlsx(company_id: uuid.UUID, db: DB, user: CurrentUser, q: str | None = None):
+    """All BOMs in one sheet: each item with its components under it, headings bold on yellow."""
+    from fastapi.responses import Response
+    from app.reports import xlsx
+    from app.api.reports import XLSX
+    authorize(db, user, company_id, Perm.MASTERS_READ)
+    authorize(db, user, company_id, Perm.EXPORT)
+    rows = _bom_rows(db, company_id, q)
+    head = ["Item", "Item group", "Primary group", "BOM", "For qty", "Component", "Component group",
+            "Component primary group", "Nature", "Qty", "Unit", "Godown"]
+    grid = [[("Bill of materials (BOM)", "bold")], [f"{len(rows)} items"], [], [(h, "head") for h in head]]
+    for r in rows:
+        for b in r["boms"]:
+            first = True
+            for c in b["components"]:
+                grid.append([(r["item"], "bold") if first else None, r["item_group"] if first else None,
+                             r["primary_group"] if first else None, b["name"] if first else None,
+                             (f"{b['basic_qty']} {b['unit'] or ''}".strip(), "bold") if first else None,
+                             c["item"], c["item_group"], c["primary_group"], c["nature"], (c["qty"], "num"), c["unit"],
+                             c["godown"]])
+                first = False
+            grid.append([])
+    audit.record(db, actor_of(user), "report.export", "report", "bom", company_id=company_id,
+                 after={"format": "xlsx", "rows": len(rows)})
+    db.commit()
+    body = xlsx.build_grid(grid, "BOM", widths=[34, 22, 22, 18, 10, 40, 24, 24, 12, 10, 8, 16])
+    return Response(body, media_type=XLSX, headers={"Content-Disposition": 'attachment; filename="Bill of materials.xlsx"'})
+
+
+@router.post("/bom/refresh")
+def refresh_bom(company_id: uuid.UUID, db: DB, user: CurrentUser):
+    """Read every item's BOM from Tally now (read only). Later master syncs keep them up to date."""
+    from app.connectors.tally import TallyError
+    from app.models import TallyConnector
+    from app.services.sync.common import client_for
+    authorize(db, user, company_id, Perm.SYNC_READ)
+    conn = db.get(TallyConnector, company_id)
+    if conn is None or not conn.enabled:
+        raise HTTPException(409, "This company is not connected to Tally")
+    try:
+        boms = client_for(conn).stock_item_boms()
+    except TallyError as exc:
+        raise HTTPException(502, f"Tally: {exc.message}")
+    items = db.scalars(select(StockItem).where(StockItem.company_id == company_id)).all()
+    by_name = {i.name: i for i in items}
+    updated = 0
+    for i in items:
+        new = boms.get(i.name)
+        if (i.bom or None) != new:
+            i.bom = new
+            updated += 1
+    missing = sorted(n for n in boms if n not in by_name)
+    audit.record(db, actor_of(user), "masters.bom.refresh", "company", company_id, company_id=company_id,
+                 after={"items_with_bom": len(boms), "updated": updated, "not_in_software": len(missing)})
+    db.commit()
+    return {"items_with_bom": len(boms), "updated": updated, "not_in_software": missing[:50]}
+
+
+@router.get("/fifo-rates")
+def fifo_rates(company_id: uuid.UUID, db: DB, user: CurrentUser, as_of: date, item: list[str] = Query(default=[]),
+               exclude_voucher: uuid.UUID | None = None):
+    """FIFO closing rate of the given items on a date: the default rate of a stock line typed for that day.
+    exclude_voucher leaves out the voucher being edited (its own lines would change the rate)."""
+    from app.reports.analysis import fifo_rates as rates
+    authorize(db, user, company_id, Perm.MASTERS_READ)
+    return rates(db, company_id, as_of, item[:500], exclude_voucher)

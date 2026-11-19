@@ -97,7 +97,7 @@ dialog::backdrop { background: rgba(0, 0, 0, .4); }
 .details dt { color: var(--muted); } .details dd { margin: 0; white-space: pre-line; overflow-wrap: anywhere; }
 .crumbs { margin: 4px 0 10px; } .crumbs a { color: var(--accent); }
 .tree-tools { display: flex; gap: 8px; justify-content: flex-end; margin-bottom: 4px; }
-table.tree tr.group td { font-weight: 600; }
+.xl-bar { display: flex; justify-content: flex-end; margin: 2px 0; font-size: 12px; }table.tree tr.group td { font-weight: 600; }
 table.tree tr.leaf.click td:first-child { color: var(--accent); }
 table.tree .tw { display: inline-block; width: 16px; color: var(--muted); }
 table.tree tr.total td { border-top: 1px solid var(--line); }
@@ -152,3 +152,4 @@ tr.muted td { color: var(--muted); }
 .chip.active, .chip.published, .chip.ok { background: var(--chip-ok); color: var(--ok); }
 .chip.expired, .chip.suspended, .chip.revoked, .chip.blocked, .chip.withdrawn, .chip.denied, .chip.read_only, .chip.not_activated { background: var(--chip-bad); color: var(--bad); }
 .chip.grace, .chip.cancelled, .chip.deactivated, .chip.archived { background: var(--chip-warn); color: var(--warn); }
+.lines input.auto-rate { background: color-mix(in srgb, var(--accent, #2b6cb0) 8%, transparent); }

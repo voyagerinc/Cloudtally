@@ -54,6 +54,8 @@ REPORTS: dict[str, str] = {
     "sales-group-wise": "Item group-wise sales",
     "stock-journal": "Stock journal register (in / out)",
     "material-transfer-wip": "Material transfer to WIP",
+    "material-transfer-wip-main": "Material transfer to WIP (main group)",
+    "wo-manufacturing": "WO manufacturing & manufacturing journal",
     "mis-pl": "MIS: P&L by division",
     "mis-finance-sheet": "MIS: Monthly finance sheet (P&L)",
     "mis-expense": "MIS: Expenses by division",

@@ -18,7 +18,7 @@ from app.models import (
 from app.models.base import utcnow
 from app.services.accounting.masters import ledger_doc
 from app.services.accounting.vouchers import to_doc
-from app.services.canonical import content_hash, diff
+from app.services.canonical import content_hash, diff, with_tally_defaults
 from app.services.sync import common
 from app.services.sync.progress import NoProgress
 
@@ -155,6 +155,14 @@ def _handle_error(db: Session, ev: SyncOutbox, exc: TallyError) -> str:
 
 # ------------------------------------------------------------------ vouchers
 
+def stock_view_of(vt) -> str | None:
+    """Tally's entry screen for a stock / manufacturing journal (None for every other voucher)."""
+    if vt is None or vt.base_type not in ("Stock Journal", "Manufacturing Journal"):
+        return None
+    manufacturing = "manufactur" in f"{vt.base_type} {vt.name}".lower()
+    return "Multi Consumption Voucher View" if manufacturing else "Consumption Voucher View"
+
+
 def _ref(conn: TallyConnector, mapping: TallyMapping, erp_id) -> codec.TallyRef:
     return codec.TallyRef(master_id=mapping.tally_master_id, guid=mapping.tally_guid, remote_id=str(erp_id),
                           alter_by=conn.alter_by)
@@ -171,6 +179,7 @@ def _sync_voucher(db: Session, ev: SyncOutbox, conn: TallyConnector, client: Tal
         raise TallyError(ErrorCode.VALIDATION, "Voucher no longer exists in ERP")
     mapping = common.mapping_for_erp(db, v.company_id, "voucher", v.id)
     doc = to_doc(v)
+    doc["stock_view"] = stock_view_of(v.voucher_type)
 
     if mapping is None and (ev.outcome_unknown or ev.attempts > 1):
         # A previous attempt may have created it: look it up by our REMOTEID before creating again.
@@ -187,6 +196,14 @@ def _sync_voucher(db: Session, ev: SyncOutbox, conn: TallyConnector, client: Tal
             v.sync_status = SyncStatus.NOT_SYNCED   # never reached Tally: nothing to undo
             return
         action = "Cancel" if ev.operation == "cancel" else "Delete"
+        if action == "Delete" and _read_back(client, v, master_id=mapping.tally_master_id) is None \
+                and _read_back(client, v, remote_id=str(v.id)) is None:
+            # Already deleted in Tally (Tally does not report deletions): nothing to send.
+            common.save_mapping(db, conn, "voucher", v.id, guid=mapping.tally_guid, master_id=mapping.tally_master_id,
+                                alter_id=mapping.tally_alter_id, content_hash="deleted", erp_version=v.version,
+                                direction="outbound", mapping=mapping)
+            v.sync_status = SyncStatus.SYNCED
+            return
         client.import_data("Vouchers", codec.voucher_xml(doc, action=action, erp_id=str(v.id), ref=_ref(conn, mapping, v.id)))
         after = None if action == "Delete" else _read_back(client, v, master_id=mapping.tally_master_id)
         common.save_mapping(db, conn, "voucher", v.id, guid=mapping.tally_guid, master_id=mapping.tally_master_id,
@@ -212,8 +229,8 @@ def _sync_voucher(db: Session, ev: SyncOutbox, conn: TallyConnector, client: Tal
         if current.alter_id != mapping.tally_alter_id and current_hash != mapping.last_synced_hash:
             # Tally was edited since our last sync and ERP was edited too.
             _raise_conflict(db, v, doc, mapping, current.doc, current.alter_id)
-        if current_hash == v.content_hash:
-            tv = current      # already identical (e.g. same edit made on both sides)
+        if current_hash in (v.content_hash, content_hash(with_tally_defaults(doc, current.doc))):
+            tv = current      # already identical (e.g. same edit made on both sides, or only Tally's defaults added)
         else:
             client.import_data("Vouchers", codec.voucher_xml(doc, action="Alter", erp_id=str(v.id),
                                                               ref=_ref(conn, mapping, v.id)))
@@ -227,8 +244,8 @@ def _sync_voucher(db: Session, ev: SyncOutbox, conn: TallyConnector, client: Tal
                         content_hash=tally_hash, erp_version=v.version, direction="outbound",
                         voucher_type=doc["voucher_type"], voucher_number=v.voucher_number, voucher_date=v.voucher_date,
                         mapping=mapping)
-    if tally_hash != v.content_hash:
-        changes = diff(doc, tv.doc)
+    if tally_hash != v.content_hash and tally_hash != content_hash(with_tally_defaults(doc, tv.doc)):
+        changes = diff(with_tally_defaults(doc, tv.doc), tv.doc)
         raise TallyError(ErrorCode.VERIFY_MISMATCH,
                          "Tally saved the voucher but its content differs from ERP: "
                          + "; ".join(f"{c['field']}: ERP={c['erp']} Tally={c['tally']}" for c in changes[:5]),

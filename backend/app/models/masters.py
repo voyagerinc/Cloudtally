@@ -185,6 +185,7 @@ class StockItem(IdMixin, TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     alias: Mapped[str | None] = mapped_column(String(200))
     category: Mapped[str | None] = mapped_column(String(100))
+    bom: Mapped[list | None] = mapped_column(JSON)   # Tally BOMs: codec.parse_bom
     # Alternate unit: `denominator` base units = `conversion` alternate units (e.g. 1 PCS = 0.265 KGS)
     conversion: Mapped[Decimal | None] = mapped_column(Qty)
     denominator: Mapped[Decimal | None] = mapped_column(Qty)
