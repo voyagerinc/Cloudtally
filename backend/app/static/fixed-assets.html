@@ -47,6 +47,8 @@ th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertic
 th{background:#f3f5f8;font-size:12px;font-weight:600;color:#3b4252;position:sticky;top:0;white-space:nowrap}
 td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 tr.tot td{font-weight:700;background:#f3f5f8}
+tr.grp td{background:#fafbfc;padding-top:8px}
+@media print{.no-print{display:none}}
 tr.sub td{font-weight:600;background:#f8f9fb}
 tbody tr:hover{background:var(--row)}
 td select{max-width:220px}
@@ -131,6 +133,7 @@ td select{max-width:220px}
   <section id="pageReports" class="hidden">
     <div class="toolbar">
       <select id="repSel">
+        <option value="statement">Statement of Fixed Assets (group-wise, gross / depreciation / net block)</option>
         <option value="schedule">Depreciation Schedule (Companies Act, class-wise)</option>
         <option value="register">Fixed Asset Register (asset-wise)</option>
         <option value="working">Asset-wise Depreciation Working</option>
@@ -628,6 +631,7 @@ function openEditor(id){
       <label class="field">Opening gross block (cost) <input id="eOG" type="number" step="0.01" value="${a.openingGross}"></label>
       <label class="field">Opening accumulated depreciation <input id="eOA" type="number" step="0.01" value="${a.openingAccDep}"></label>
       <label class="field">Income-tax opening WDV (blank = book WDV) <input id="eIO" type="number" step="0.01" value="${a.itOpening ?? ""}"></label>
+      <label class="field">Depreciation written back on sale (blank = in proportion to the cost sold) <input id="eDA" type="number" step="0.01" value="${a.depOnSale ?? ""}"></label>
       <label class="field">&nbsp;<span><input type="checkbox" id="eEx" ${a.excluded ? "checked" : ""}> Exclude from depreciation</span></label>
     </div>
     ${a.source === "tally" ? `<p class="small muted">Tally opening balance on ${dmy(S.from)}: <b>${fmt(a.tally?.opening || 0)}</b>. If your Tally ledger holds net WDV, keep gross = WDV and accumulated = 0. For SLM, enter original cost and accumulated depreciation.</p>` : ""}
@@ -658,6 +662,7 @@ function openEditor(id){
     const upd = {name, klass:$("#eClass").value, method:$("#eMethod").value, rate:num($("#eRate").value), itRate:num($("#eIt").value),
                  residualPct:num($("#eRes").value), depLedger:$("#eDep").value.trim(), accDepLedger:$("#eAcc").value.trim(),
                  openingGross:r2(num($("#eOG").value)), openingAccDep:r2(num($("#eOA").value)), itOpening:io === "" ? null : num(io),
+                 depOnSale:$("#eDA").value.trim() === "" ? null : r2(num($("#eDA").value)),
                  excluded:$("#eEx").checked};
     if(upd.excluded && !a.excluded) upd.excludeReason = "Excluded by user";
     const sig = x => JSON.stringify([x.openingGross, x.openingAccDep, x.itOpening, (x.txns || []).map(t => [t.date, t.type, +t.amount])]);
@@ -879,7 +884,63 @@ function renderReport(){
       <button class="primary" onclick="openTagModal()">Tag ledgers now</button></div>`;
     return;
   }
-  ({schedule:repSchedule, register:repRegister, working:repWorking, it:repIT, compare:repCompare, exceptions:repExceptions})[rep](out);
+  ({statement:repStatement, schedule:repSchedule, register:repRegister, working:repWorking, it:repIT, compare:repCompare, exceptions:repExceptions})[rep](out);
+}
+
+// Statement of Fixed Assets as in the accounts: groups of assets (Tally's groups), tangible then intangible, gross
+// block / depreciation (with what is written back on sales) / net block, in lakhs or rupees.
+const INTANGIBLE = /software|intangible|goodwill|trade ?mark|patent|copyright|licen[cs]e|website/i;
+function saleAdj(a, c){   // accumulated depreciation of what was sold: entered, else in proportion to the cost sold
+  if(a.depOnSale !== null && a.depOnSale !== undefined && a.depOnSale !== "") return r2(num(a.depOnSale));
+  if(!c.del || !c.openAcc) return 0;
+  const base = c.openGross + c.add;
+  return base > 0 ? r2(Math.min(c.openAcc, c.openAcc * Math.min(c.del, base) / base)) : 0;
+}
+function repStatement(out){
+  const unit = S.settings.statementUnit || "lakh";
+  const div = unit === "lakh" ? 100000 : 1;
+  const f = v => { const x = v / div; return Math.abs(x) < (div > 1 ? 0.005 : 0.5) ? "-" : x.toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2}); };
+  const keys = ["openGross","add","del","closeGross","openAcc","dep","adj","closeAcc","closeNet","openNet"];
+  const blank = () => Object.fromEntries(keys.map(k => [k, 0]));
+  const sections = {A:{}, B:{}};
+  let estimated = false;
+  for(const a of activeAssets()){
+    const c = computeBook(a);
+    const adj = saleAdj(a, c);
+    if(adj && (a.depOnSale === null || a.depOnSale === undefined || a.depOnSale === "")) estimated = true;
+    const row = {openGross:c.openGross, add:c.add, del:c.del, closeGross:c.closeGross, openAcc:c.openAcc, dep:c.dep, adj,
+                 closeAcc:r2(c.openAcc + c.dep - adj), openNet:c.openNet};
+    row.closeNet = r2(row.closeGross - row.closeAcc);
+    const name = a.group || a.klass || "Other assets";
+    const sec = INTANGIBLE.test(name) || a.klass === "Software / Intangibles" ? "B" : "A";
+    const g = sections[sec][name] ||= blank();
+    keys.forEach(k => g[k] += row[k]);
+  }
+  const line = (label, g, cls) => `<tr class="${cls || ""}"><td>${label}</td>${keys.map(k => `<td class="n">${f(g[k])}</td>`).join("")}</tr>`;
+  const rows = [], grand = blank(), totals = {};
+  for(const [sec, title] of [["A", "A. Tangible Assets"], ["B", "B. Intangible Assets"]]){
+    const groups = Object.entries(sections[sec]).sort((x, y) => x[0].localeCompare(y[0]));
+    if(!groups.length) continue;
+    rows.push(`<tr class="grp"><td colspan="${keys.length + 1}"><b>${title}</b></td></tr>`);
+    const t = blank();
+    groups.forEach(([name, g], i) => { rows.push(line(`${sec === "B" ? `${i + 1}. ` : ""}${esc(name)}`, g)); keys.forEach(k => t[k] += g[k]); });
+    rows.push(line(`<b>TOTAL(${sec})</b>`, t, "tot"));
+    keys.forEach(k => grand[k] += t[k]);
+    totals[sec] = true;
+  }
+  if(Object.keys(totals).length > 1) rows.push(line(`<b>TOTAL (${Object.keys(totals).join("+")})</b>`, grand, "tot"));
+  const eh = `<tr><th></th><th colspan="4" style="text-align:center">G R O S S &nbsp; B L O C K</th><th colspan="4" style="text-align:center">D E P R E C I A T I O N</th>
+    <th colspan="2" style="text-align:center">N E T &nbsp; B L O C K</th></tr>`;
+  out.innerHTML = `<div class="toolbar no-print"><label class="small">Amounts in <select id="stUnit"><option value="lakh" ${unit === "lakh" ? "selected" : ""}>Lakhs</option>
+      <option value="rupee" ${unit === "rupee" ? "selected" : ""}>Rupees</option></select></label></div>` +
+    repHeader(`Statement of Fixed Assets as on ${dmy(S.to)}${unit === "lakh" ? " (Rs. in lakhs)" : " (Rs.)"}`) +
+    tbl([{t:"Particulars"},{t:`As on ${dmy(S.from)}`,n:1},{t:"Additions during the year",n:1},{t:"Sale during the year",n:1},{t:`As on ${dmy(S.to)}`,n:1},
+         {t:`Up to ${dmy(S.from)}`,n:1},{t:"For the year",n:1},{t:"Adj'd (on sale)",n:1},{t:`As on ${dmy(S.to)}`,n:1},
+         {t:`As on ${dmy(S.to)}`,n:1},{t:`As on ${dmy(S.from)}`,n:1}], rows, eh) +
+    `<p class="small muted">Groups are the fixed-asset groups in Tally; software, licences and other intangibles are under B.
+      ${estimated ? "Depreciation written back on sales is estimated in proportion to the cost sold; enter the actual figure per asset (Assets → Edit) to replace it." : ""}
+      If a Tally ledger holds net WDV (depreciation credited to the asset), its gross block is that WDV: enter cost and accumulated depreciation per asset for a true gross block.</p>`;
+  $("#stUnit").onchange = e => { S.settings.statementUnit = e.target.value; changed(); renderReport(); };
 }
 
 function repSchedule(out){
