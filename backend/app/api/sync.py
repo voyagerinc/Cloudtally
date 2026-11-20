@@ -9,7 +9,7 @@ from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ValidationError, field_validator
 from sqlalchemy import func, select
 
 from app import audit
@@ -61,8 +61,23 @@ class ConnectorIn(BaseModel):
         except ValueError:
             return host
         if ip.is_global:
-            raise ValueError("Tally host must be on a private network or VPN, not a public IP")
+            raise ValueError(PUBLIC_TALLY.format(host=host, port="Tally's"))
         return host
+
+
+PUBLIC_TALLY = ("Tally host {host} is a public internet address. Tally's port has no password: anyone on the internet "
+                "could read and change these books through it, so Tally Cloud does not connect to it. Use Tally's "
+                "address on the office network (e.g. 192.168.x.x, or localhost when Tally runs on this computer), a VPN, "
+                "or the Tally tunnel (deploy/windows/setup-tally-tunnel.ps1). Also close port {port} to the internet "
+                "on the office router.")
+
+
+def _check_host(host: str, port: int) -> None:
+    """The private-network rule as a clear message (not a server error)."""
+    try:
+        ConnectorIn(host=host, tally_company_name="-")
+    except ValidationError:
+        raise HTTPException(422, PUBLIC_TALLY.format(host=host, port=port))
 
 
 WAITING = (OutboxStatus.PENDING, OutboxStatus.FAILED, OutboxStatus.PAUSED)
@@ -585,7 +600,7 @@ def discover(body: DiscoverIn, db: DB, user: CurrentUser):
     """List companies open in a Tally instance (read-only), marking those already linked to an ERP company."""
     if not user.is_superadmin:
         raise HTTPException(403, "Only a super admin can probe Tally servers")
-    ConnectorIn(host=body.host, tally_company_name="-")   # same private-network rule
+    _check_host(body.host, body.port)   # same private-network rule
     from app.connectors.tally import TallyClient
     with TallyClient(body.host, body.port, "") as client:
         try:
@@ -612,7 +627,7 @@ def link_company(body: LinkIn, background: BackgroundTasks, db: DB, user: Curren
     """Create an ERP company for a Tally company in shadow mode (inbound only; outbound off)."""
     if not user.is_superadmin:
         raise HTTPException(403, "Only a super admin can create companies")
-    ConnectorIn(host=body.host, tally_company_name=body.tally_company_name)
+    _check_host(body.host, body.port)
     from app.connectors.tally import TallyClient
     with TallyClient(body.host, body.port, body.tally_company_name) as client:
         try:

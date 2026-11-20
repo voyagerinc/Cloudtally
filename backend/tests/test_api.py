@@ -365,3 +365,14 @@ def test_masters_menu_lists(db, books, admin):
     cats = {c["key"]: c for c in get("ledger-categories")}
     assert set(cats) == {"asset", "liability", "income", "expense"} and "Current Assets" in cats["asset"]["primary_groups"]
     assert sum(c["ledgers"] for c in cats.values()) == len(client.get(f"{base}/ledgers", headers=admin).json())
+
+
+def test_a_public_tally_address_is_refused_with_a_message_not_a_server_error(admin):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    api = TestClient(app, raise_server_exceptions=False)
+    for path, body in (("/api/v1/import/tally/discover", {"host": "1.1.1.1", "port": 9898}),
+                       ("/api/v1/import/tally/link", {"host": "1.1.1.1", "port": 9898, "tally_company_name": "X"})):
+        r = api.post(path, headers=admin, json=body)
+        assert r.status_code == 422, r.text
+        assert "public internet address" in r.json()["detail"] and "9898" in r.json()["detail"]

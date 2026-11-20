@@ -24,7 +24,11 @@ async function api(path, opts = {}) {
     if (/licence seat/.test(d.detail || "")) { signOut(); $("#login-error").textContent = d.detail; throw new Error(d.detail); }
   }
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (_) {   // e.g. "Internal Server Error" as plain text
+    if (!res.ok) throw new Error(`The server could not do this (${res.status} ${text.slice(0, 120) || res.statusText}). See the server log.`);
+    throw new Error("The server's answer could not be read.");
+  }
   if (!res.ok) {
     const d = data && data.detail;
     throw new Error(Array.isArray(d) ? d.map((x) => `${x.loc.slice(1).join(".")}: ${x.msg}`).join("; ") : d || res.statusText);
