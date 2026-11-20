@@ -5,7 +5,7 @@ from app.models.licensing import (
 from app.models.masters import (
     CostCentre, Godown, Ledger, LedgerGroup, StockGroup, StockItem, TaxCode, Unit, VoucherType,
 )
-from app.models.mis import DeferredExpense, MisSettings
+from app.models.mis import DeferredExpense, FixedAssetState, MisSettings
 from app.models.sync import (
     Attachment, AuditEvent, ImportBatch, OutboxStatus, ReconciliationRun, SyncAttempt, SyncConflict,
     SyncInbox, SyncOutbox, SyncProgress, TallyConnector, TallyMapping,

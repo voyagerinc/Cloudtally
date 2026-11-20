@@ -1,9 +1,9 @@
 """Management (MIS) reports: how ledgers, cost centres and stock groups map to divisions, and deferred expenses."""
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Date, ForeignKey, Integer, String, Text
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -32,3 +32,13 @@ class DeferredExpense(IdMixin, TimestampMixin, Base):
     first_month: Mapped[date] = mapped_column(Date)          # always the 1st of a month
     months: Mapped[int] = mapped_column(Integer)
     created_by: Mapped[str | None] = mapped_column(String(200))
+
+
+class FixedAssetState(Base):
+    """A company's fixed asset register and depreciation working (the Fixed Assets page's state)."""
+    __tablename__ = "fixed_asset_states"
+
+    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), primary_key=True)
+    state: Mapped[dict] = mapped_column(JSON, default=dict)
+    saved_by: Mapped[str | None] = mapped_column(String(200))
+    saved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -100,15 +100,44 @@ function Find-Postgres {
 }
 function Install-Postgres($super) {
   $override = "--mode unattended --unattendedmodeui none --superpassword $super --serverport 5432"
-  foreach ($id in @("PostgreSQL.PostgreSQL.16", "PostgreSQL.PostgreSQL.17")) {
-    for ($try = 1; $try -le 2; $try++) {
-      Write-Host "==> Installing $id (attempt $try)"
+  # 1. winget, when this Windows has it (Windows Server 2019 and older usually do not).
+  if (Get-Command winget.exe -ErrorAction SilentlyContinue) {
+    foreach ($id in @("PostgreSQL.PostgreSQL.16", "PostgreSQL.PostgreSQL.17")) {
+      Write-Host "==> Installing $id with winget"
       if (Winget-Try $id @("--override", $override)) { return }
-      Write-Host "    the download failed; trying again in 15 seconds" -ForegroundColor Yellow
-      Start-Sleep -Seconds 15
+      Write-Host "    winget could not install it; trying the direct download" -ForegroundColor Yellow
+    }
+  } else {
+    Write-Host "    winget is not on this Windows; downloading PostgreSQL directly" -ForegroundColor Yellow
+  }
+  # 2. The EnterpriseDB installer, downloaded directly. PostgreSQL 16 needs Windows 10 / Server 2016 or
+  #    newer; older Windows (e.g. Server 2012 R2) gets PostgreSQL 14.
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  $versions = if ([Environment]::OSVersion.Version.Major -ge 10) { @("16.6-1", "16.4-1", "15.10-1") } else { @("14.15-1", "14.13-1") }
+  $reasons = @()
+  foreach ($v in $versions) {
+    $url = "https://get.enterprisedb.com/postgresql/postgresql-$v-windows-x64.exe"
+    $exe = Join-Path $InstallDir "updates\postgresql-$v-windows-x64.exe"
+    for ($try = 1; $try -le 2; $try++) {
+      try {
+        Write-Host "==> Downloading PostgreSQL $v (about 350 MB, attempt $try)"
+        $ProgressPreference = "SilentlyContinue"     # the progress bar makes Invoke-WebRequest very slow
+        Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing -TimeoutSec 1800
+        Write-Host "==> Installing PostgreSQL $v (a few minutes)"
+        $p = Start-Process -FilePath $exe -ArgumentList ($override + " --enable-components server,commandlinetools") -Wait -PassThru
+        Remove-Item $exe -Force -ErrorAction SilentlyContinue
+        if ($p.ExitCode -eq 0) { return }
+        $reasons += "PostgreSQL $v installer ended with code $($p.ExitCode)"
+        break                        # downloaded fine but did not install: try the next version
+      } catch {
+        $reasons += "PostgreSQL ${v}: $($_.Exception.Message)"
+        Write-Host "    $($_.Exception.Message)" -ForegroundColor Yellow
+        if ($try -lt 2) { Write-Host "    trying again in 15 seconds" -ForegroundColor Yellow; Start-Sleep -Seconds 15 }
+      }
     }
   }
-  throw ("PostgreSQL could not be downloaded: the EnterpriseDB download server refused it. Install PostgreSQL " +
+  throw ("PostgreSQL could not be installed:`n  " + ($reasons -join "`n  ") + "`n" +
+         "Check that this computer can open https://get.enterprisedb.com (proxy / firewall), or install PostgreSQL " +
          "by hand from https://www.enterprisedb.com/downloads/postgres-postgresql-downloads (remember the password " +
          "you give the 'postgres' user), then run run.bat again. It finds that PostgreSQL and asks for the password.")
 }
@@ -124,9 +153,17 @@ if (-not $pg) {
 }
 Write-Host "    PostgreSQL: $($pg.Name), port $($pg.Port)"
 function Sql($q) {
-  $out = & $pg.Psql -h 127.0.0.1 -p $pg.Port -U postgres -d postgres -tAc $q
-  if ($LASTEXITCODE -ne 0) { throw "PostgreSQL refused: $q" }
-  return $out
+  # psql notices go to stderr; read them as text so they do not stop the script, and show them on failure.
+  $ErrorActionPreference = "Continue"
+  $all = & $pg.Psql -h 127.0.0.1 -p $pg.Port -U postgres -d postgres -tAc $q 2>&1
+  $code = $LASTEXITCODE
+  $ErrorActionPreference = "Stop"
+  $out = @($all | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
+  if ($code -ne 0) {
+    $err = ($all | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.ToString() }) -join " "
+    throw "PostgreSQL refused: $q  ($err)"
+  }
+  return ($out -join "`n").Trim()
 }
 if (Test-Path $superFile) { $super = (Get-Content $superFile -Raw).Trim() } else { $super = $null }
 for ($try = 1; $try -le 3; $try++) {
@@ -135,9 +172,18 @@ for ($try = 1; $try -le 3; $try++) {
     $super = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
   }
   $env:PGPASSWORD = $super
+  # A refused password is an answer, not a failure of this script: psql's message on stderr must not stop it
+  # (with ErrorActionPreference=Stop, Windows PowerShell 5 turns any stderr line into a terminating error).
+  $ErrorActionPreference = "Continue"
   & $pg.Psql -h 127.0.0.1 -p $pg.Port -U postgres -d postgres -tAc "select 1" 2>$null | Out-Null
-  if ($LASTEXITCODE -eq 0) { break }
-  Write-Host "    that password was not accepted" -ForegroundColor Yellow
+  $ok = $LASTEXITCODE -eq 0
+  $ErrorActionPreference = "Stop"
+  if ($ok) {
+    Set-Content -Path $superFile -Value $super -Encoding ASCII     # remembered for repairs and updates
+    break
+  }
+  Write-Host ("    " + $(if ($try -eq 1 -and (Test-Path $superFile)) { "the saved password was not accepted (PostgreSQL was installed with another one)" }
+                       else { "that password was not accepted" })) -ForegroundColor Yellow
   $super = $null
   if ($try -eq 3) { throw "PostgreSQL did not accept the password of its 'postgres' user." }
 }

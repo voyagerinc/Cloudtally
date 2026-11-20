@@ -26,7 +26,7 @@ REPO = Path(__file__).resolve().parents[3]
 
 # Never in a package: secrets, environments, build output, caches.
 SKIP_DIRS = {".git", ".github", ".venv", "venv", "dist", "updates", "__pycache__", ".pytest_cache", "node_modules",
-             "pgdata", "logs", "localdb"}
+             "pgdata", "logs", "localdb", "Fixedassets"}
 SKIP_FILES = {".env"}
 # Office documents and spreadsheets in the folder are the user's business files, never part of the software.
 SKIP_SUFFIXES = (".pyc", ".pyo", ".docx", ".doc", ".xlsx", ".xlsm", ".xls", ".csv", ".pdf", ".log", ".pem", ".key",

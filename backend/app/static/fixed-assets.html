@@ -1,0 +1,1146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fixed Assets · Tally Cloud</title>
+<style>
+:root{
+  --bg:#f5f6f8; --panel:#fff; --ink:#1d2330; --muted:#6a7282; --line:#e2e5ea;
+  --accent:#1f5fbf; --accent-ink:#fff; --ok:#1d7a46; --ok-bg:#e5f4ec; --warn:#9a5b00; --warn-bg:#fff3dc;
+  --bad:#b42318; --bad-bg:#fdecea; --info:#1f5fbf; --info-bg:#e8f0fc; --row:#fafbfc;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 "Segoe UI",system-ui,sans-serif}
+header{background:var(--panel);border-bottom:1px solid var(--line);padding:12px 20px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;position:sticky;top:0;z-index:5}
+header h1{font-size:17px;margin:0 16px 0 0;font-weight:600}
+.field{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--muted)}
+.field input,.field select{font:inherit;font-size:14px;color:var(--ink)}
+input,select,textarea{border:1px solid var(--line);border-radius:6px;padding:5px 8px;background:#fff;font:inherit;color:var(--ink)}
+input[type=number]{text-align:right}
+button{font:inherit;border:1px solid var(--line);background:#fff;border-radius:6px;padding:6px 12px;cursor:pointer;color:var(--ink)}
+button:hover{background:#f0f2f5}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+button.primary:hover{filter:brightness(1.08)}
+button.danger{color:var(--bad);border-color:#f0c2bd}
+button:disabled{opacity:.5;cursor:not-allowed}
+button.sm{padding:3px 8px;font-size:12px}
+.spacer{flex:1}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:600;white-space:nowrap}
+.b-ok{background:var(--ok-bg);color:var(--ok)} .b-warn{background:var(--warn-bg);color:var(--warn)}
+.b-bad{background:var(--bad-bg);color:var(--bad)} .b-info{background:var(--info-bg);color:var(--info)}
+.b-mute{background:#eef0f3;color:var(--muted)}
+main{padding:16px 20px 60px;max-width:1500px;margin:0 auto}
+.banner{border-radius:8px;padding:12px 14px;margin-bottom:14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.banner.bad{background:var(--bad-bg);color:#5f1610;border:1px solid #f3c4bf}
+.banner.warn{background:var(--warn-bg);color:#5c3800;border:1px solid #f1d8a6}
+.banner.ok{background:var(--ok-bg);color:#0f4a2a;border:1px solid #bfe3cf}
+.banner.info{background:var(--info-bg);color:#123a73;border:1px solid #c6d7f3}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:14px}
+.tabs button{border:none;border-bottom:2px solid transparent;border-radius:0;background:none;padding:8px 14px;color:var(--muted);font-weight:600}
+.tabs button.on{color:var(--accent);border-bottom-color:var(--accent)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.tblwrap{overflow:auto;border:1px solid var(--line);border-radius:6px;background:#fff}
+table{border-collapse:collapse;width:100%}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
+th{background:#f3f5f8;font-size:12px;font-weight:600;color:#3b4252;position:sticky;top:0;white-space:nowrap}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+tr.tot td{font-weight:700;background:#f3f5f8}
+tr.sub td{font-weight:600;background:#f8f9fb}
+tbody tr:hover{background:var(--row)}
+td select{max-width:220px}
+.chips{display:flex;gap:4px;flex-wrap:wrap}
+.muted{color:var(--muted)} .small{font-size:12px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px 14px}
+.modal-bg{position:fixed;inset:0;background:rgba(20,25,35,.45);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;z-index:50;overflow:auto}
+.modal{background:#fff;border-radius:10px;max-width:1100px;width:100%;padding:18px 20px;box-shadow:0 20px 50px rgba(0,0,0,.25)}
+.modal h2{margin:0 0 6px;font-size:17px}
+.modal .foot{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+.hidden{display:none!important}
+.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-bottom:14px}
+.kpi{background:#fff;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.kpi .v{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums}
+.kpi .l{font-size:12px;color:var(--muted)}
+.rep-head{margin-bottom:10px}
+.rep-head h2{margin:0;font-size:17px} .rep-head div{color:var(--muted);font-size:12px}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:sp .8s linear infinite;vertical-align:-2px}
+@keyframes sp{to{transform:rotate(360deg)}}
+.edited{background:#fffbe8}
+.login-bg{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:16px;z-index:60}
+.login{background:#fff;border:1px solid var(--line);border-radius:10px;padding:22px 24px;width:100%;max-width:360px;box-shadow:0 10px 30px rgba(0,0,0,.08)}
+.login h2{margin:0 0 4px;font-size:18px}
+.login .field{margin-top:12px}
+.login button{width:100%;margin-top:16px}
+.login .err{color:var(--bad);font-size:13px;margin-top:10px;min-height:1em}
+@media print{
+  header,.tabs,.toolbar,.banner,#pageAssets,#pageJournal,#pageSettings,.noprint{display:none!important}
+  body{background:#fff} main{padding:0} .panel{border:none;padding:0} .tblwrap{border:none;overflow:visible}
+  th{position:static} table{font-size:11px}
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Fixed Assets &amp; Depreciation</h1>
+  <button id="btnHome" title="List of saved companies">Companies</button>
+  <div class="field">Company
+    <select id="companySel"></select>
+    <input id="companyTxt" class="hidden" placeholder="Company name (manual)">
+  </div>
+  <div class="field">From <input type="date" id="fromDt"></div>
+  <div class="field">To <input type="date" id="toDt"></div>
+  <div class="field">&nbsp;<span id="srcBadge" class="badge b-mute">—</span></div>
+  <div class="spacer"></div>
+  <button id="btnCheck" title="Reload the list of companies">Refresh</button>
+  <button id="btnFetch" class="primary" title="Read the fixed asset ledgers and vouchers of the period from Tally Cloud (synced from Tally)">Fetch from books</button>
+  <button id="btnManual">Manual entry</button>
+  <span id="saveInfo" class="small muted"></span>
+  <span id="userInfo" class="small muted"></span>
+  <button id="btnLogout" class="sm" title="Back to Tally Cloud">Tally Cloud</button>
+</header>
+
+<main>
+  <div id="banner"></div>
+  <div class="tabs">
+    <button data-tab="Assets" class="on">Assets &amp; Ledger Tagging</button>
+    <button data-tab="Reports">Reports</button>
+    <button data-tab="Journal">Depreciation Journal</button>
+    <button data-tab="Settings">Settings &amp; Rates</button>
+  </div>
+
+  <section id="pageAssets">
+    <div class="kpis" id="kpis"></div>
+    <div class="panel">
+      <div class="toolbar">
+        <button id="btnAdd">+ Add asset</button>
+        <button id="btnImport">Import CSV</button>
+        <button id="btnTemplate">CSV template</button>
+        <input type="file" id="csvFile" accept=".csv" class="hidden">
+        <span class="spacer"></span>
+        <span class="small muted">Bulk tag selected:</span>
+        <select id="bulkClass"></select>
+        <select id="bulkLedger"></select>
+        <button id="btnBulk">Apply</button>
+        <label class="small"><input type="checkbox" id="showExcluded"> show excluded</label>
+      </div>
+      <div class="tblwrap"><table id="assetTbl"></table></div>
+    </div>
+  </section>
+
+  <section id="pageReports" class="hidden">
+    <div class="toolbar">
+      <select id="repSel">
+        <option value="schedule">Depreciation Schedule (Companies Act, class-wise)</option>
+        <option value="register">Fixed Asset Register (asset-wise)</option>
+        <option value="working">Asset-wise Depreciation Working</option>
+        <option value="it">Income Tax Depreciation (Block-wise, Sec 32)</option>
+        <option value="compare">Computed vs Booked in Tally</option>
+        <option value="exceptions">Exceptions &amp; Corrections</option>
+      </select>
+      <button id="btnXls">Export Excel</button>
+      <button id="btnCsv">Export CSV</button>
+      <button id="btnPrint">Print / PDF</button>
+    </div>
+    <div class="panel" id="reportOut"></div>
+  </section>
+
+  <section id="pageJournal" class="hidden">
+    <div class="panel" id="journalOut"></div>
+  </section>
+
+  <section id="pageSettings" class="hidden">
+    <div class="panel" id="settingsOut"></div>
+  </section>
+</main>
+
+<div id="modalRoot"></div>
+
+<script>
+/* ===================================================================== data */
+// Companies Act 2013 Schedule II useful lives (5% residual) and Income-tax rates.
+const CLASS_MASTER = {
+  "Land":                        {life:0,  slm:0,     wdv:0,     it:0,  method:"WDV", kw:/\bland\b|plot/i},
+  "Buildings (Non-factory)":     {life:60, slm:1.58,  wdv:4.87,  it:10, method:"WDV", kw:/building|office premises|flat|shop/i},
+  "Factory Buildings":           {life:30, slm:3.17,  wdv:9.50,  it:10, method:"WDV", kw:/factory|godown|warehouse|shed/i},
+  "Plant & Machinery":           {life:15, slm:6.33,  wdv:18.10, it:15, method:"WDV", kw:/plant|machin|equipment(?! office)|generator|dg set|tools|sound|speaker|light/i},
+  "Furniture & Fixtures":        {life:10, slm:9.50,  wdv:25.89, it:10, method:"WDV", kw:/furnit|fixture|fitting|chair|\btables?\b|interior|almirah|cabinet/i},
+  "Electrical Installations":    {life:10, slm:9.50,  wdv:25.89, it:10, method:"WDV", kw:/electric|wiring|fan|ups|inverter/i},
+  "Office Equipment":            {life:5,  slm:19.00, wdv:45.07, it:15, method:"WDV", kw:/office equip|air ?condition|\bac\b|printer|xerox|copier|camera|projector|tv|television|refrigerator|cctv/i},
+  "Computers & Laptops":         {life:3,  slm:31.67, wdv:63.16, it:40, method:"WDV", kw:/comput|laptop|desktop|monitor|tablet|ipad|macbook|\bpc\b/i},
+  "Servers & Networks":          {life:6,  slm:15.83, wdv:39.30, it:40, method:"WDV", kw:/server|network|router|switch|firewall/i},
+  "Mobile Phones":               {life:5,  slm:19.00, wdv:45.07, it:15, method:"WDV", kw:/mobile|phone|iphone/i},
+  "Motor Car":                   {life:8,  slm:11.88, wdv:31.23, it:15, method:"WDV", kw:/\bcar\b|vehicle|motor|innova|scorpio|honda|maruti|toyota/i},
+  "Two Wheelers":                {life:10, slm:9.50,  wdv:25.89, it:15, method:"WDV", kw:/scooter|bike|motorcycle|two wheeler|activa/i},
+  "Commercial Vehicles (on hire)":{life:6, slm:15.83, wdv:39.30, it:30, method:"WDV", kw:/truck|lorry|\bbus(es)?\b|tempo/i},
+  "Software / Intangibles":      {life:3,  slm:33.33, wdv:63.16, it:25, method:"SLM", kw:/software|licen|trademark|website|intangible|copyright|patent/i},
+  "Other Assets":                {life:15, slm:6.33,  wdv:18.10, it:15, method:"WDV", kw:null},
+};
+const TXN_TYPES = {add:"Addition", del:"Deletion / Sale", dep:"Depreciation booked", ignore:"Ignore"};
+
+let S = null;                // working state for the selected company
+let TALLY = {connected:false, companies:[], error:null, checking:false};
+let currentTab = "Assets";
+let saveTimer = null;
+let UNTAGGED_ONLY = false;   // assets table filter: only assets still missing a class / ledger
+
+/* ================================================================== helpers */
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const uid = () => Math.random().toString(36).slice(2, 10);
+const r2 = x => Math.round((+x || 0) * 100) / 100;
+const fmt = x => (Math.abs(x) < 0.005 ? "-" : (+x).toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2}));
+const num = v => { const n = parseFloat(String(v ?? "").replace(/,/g, "")); return isFinite(n) ? n : 0; };
+const dayNo = iso => { const [y,m,d] = iso.split("-").map(Number); return Date.UTC(y, m-1, d) / 86400000; };
+const isoOf = dn => new Date(dn * 86400000).toISOString().slice(0, 10);
+const dmy = iso => iso ? iso.split("-").reverse().join("-") : "";
+function addYear(iso){ const [y,m,d] = iso.split("-").map(Number); return isoOf(Date.UTC(y+1, m-1, d)/86400000); }
+function yearDays(from){ return dayNo(addYear(from)) - dayNo(from); }
+function fyOf(iso){ const [y,m] = iso.split("-").map(Number); const s = m >= 4 ? y : y-1; return [`${s}-04-01`, `${s+1}-03-31`]; }
+
+// Tally Cloud's sign-in (the main page keeps it): bearer token or API key.
+function tcAuth(){
+  let t = null, k = null;
+  try { t = localStorage.getItem("erp_token"); k = localStorage.getItem("erp_key"); } catch(_) {}
+  return t ? {Authorization: "Bearer " + t} : (k ? {"X-API-Key": k} : {});
+}
+async function api(path, body, timeoutMs){
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs || 15 * 60 * 1000);
+  try{
+    const url = "/api/v1/fixed-assets" + path.replace(/^\/api/, "");
+    const r = await fetch(url, body ? {method:"POST", headers:{"Content-Type":"application/json", ...tcAuth()}, body:JSON.stringify(body), signal:ctl.signal}
+                                    : {headers:tcAuth(), signal:ctl.signal});
+    let j = {};
+    try { j = await r.json(); } catch(_) { j = {}; }
+    if(r.status === 401) { showLogin(false); }
+    if(!r.ok) { const e = new Error(j.detail || j.error || r.statusText); e.data = {...j, tallyUnavailable: r.status === 503}; throw e; }
+    return j;
+  } finally { clearTimeout(t); }
+}
+
+// Saved records keep the name they were saved under; S.tallyCompany is the matching company open in Tally.
+const normName = s => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+function matchTally(name){
+  return TALLY.companies.find(c => c.name === name) || TALLY.companies.find(c => normName(c.name) === normName(name)) || null;
+}
+function tallyName(){ return S?.tallyCompany || S?.company; }
+
+function companyName(){ return TALLY.connected && S?.source !== "manual" ? $("#companySel").value : $("#companyTxt").value.trim(); }
+
+function blankState(company, source, from, to, booksFrom){
+  return {company, source, from, to, booksFrom: booksFrom || from, fetchedAt:null, fetchPeriod:null,
+          ledgers:[], assets:[], settings:{defaultMethod:"WDV", residualPct:5, roundOff:true}, posted:[]};
+}
+
+function newAsset(name){
+  return {id:uid(), name, group:"", source:"manual", klass:"", method:S?.settings.defaultMethod || "WDV",
+          rate:0, itRate:0, residualPct:S?.settings.residualPct ?? 5, depLedger:"", suggestedDepLedger:"",
+          accDepLedger:"", openingGross:0, openingAccDep:0, itOpening:null, txns:[], excluded:false,
+          excludeReason:"", edited:false, tally:null, tallyChanged:false, vouchersFailed:false, notInTally:false};
+}
+
+function applyClass(a, klass, keepRates){
+  a.klass = klass;
+  const c = CLASS_MASTER[klass];
+  if(!c || keepRates) return;
+  if(klass === "Software / Intangibles") a.method = "SLM";
+  a.rate = a.method === "SLM" ? c.slm : c.wdv;
+  a.itRate = c.it;
+}
+function guessClass(name){
+  // Capitalised expenses (event costs, fees, services...) get no guess - the user must choose.
+  if(/\bexp\b|exp\.|expense|charges|fees|services|promotion|marketing|advertis|travel|hotel|food/i.test(name)) return "";
+  for(const [k, c] of Object.entries(CLASS_MASTER)) if(c.kw && c.kw.test(name)) return k;
+  return "";
+}
+
+/* ============================================================== tally sync */
+function isDepName(n){ return /deprec|amorti/i.test(n) && !/accum|provision/i.test(n); }
+function isAccDepName(n){ return /accum|acc\.?\s*dep|provision for dep/i.test(n); }
+
+function txnFromVch(v, depLedgers){
+  let type = v.amount < 0 ? "add" : "del";
+  if(v.amount > 0 && v.others.some(o => isDepName(o) || depLedgers.has(o))) type = "dep";
+  return {id:uid(), date:v.date, type, amount:r2(Math.abs(v.amount)), vchType:v.vchType, vchNo:v.vchNo,
+          narration:v.narration, others:v.others};
+}
+
+function suggestDepLedger(){
+  const exp = S.ledgers.filter(l => l.isExpense && isDepName(l.name));
+  return exp.length === 1 ? exp[0].name : "";
+}
+
+function mergeFetch(data){
+  const periodChanged = S.fetchPeriod && (S.fetchPeriod.from !== data.from || S.fetchPeriod.to !== data.to);
+  S.ledgers = data.ledgers;
+  const depLedgers = new Set(S.assets.map(a => a.depLedger).filter(Boolean));
+  const sugg = suggestDepLedger();
+  const byName = Object.fromEntries(S.assets.filter(a => a.source === "tally").map(a => [a.name, a]));
+  const seen = new Set();
+  let keepCorrections = true;
+  if(periodChanged && S.assets.some(a => a.edited)) {
+    keepCorrections = confirm("Period changed since the last fetch. Corrections you made were for the old period.\n\nOK = keep your corrected figures\nCancel = replace them with fresh Tally data");
+  }
+  for(const t of data.assets){
+    seen.add(t.name);
+    const snap = {opening:r2(t.openingTally), reconcileDiff:t.reconcileDiff, outside:t.outsidePeriod || [], vouchers:t.vouchers, failed:t.vouchersFailed};
+    let a = byName[t.name];
+    if(!a){
+      a = newAsset(t.name);
+      a.source = "tally";
+      const g = guessClass(t.name);
+      if(g) applyClass(a, g); else { a.klass = ""; }
+      a.suggestedDepLedger = sugg;
+      if(isAccDepName(t.name) || (t.openingTally < 0 && !t.vouchers.some(v => v.amount < 0))){
+        a.excluded = true; a.excludeReason = "Accumulated depreciation / credit-balance ledger";
+      }
+      if(/\bland\b/i.test(t.name)) a.excludeReason = a.excludeReason || "";
+      S.assets.push(a);
+    }
+    a.group = t.group; a.notInTally = false;
+    const changed = a.tally && JSON.stringify(a.tally) !== JSON.stringify(snap);
+    if(a.edited && keepCorrections){
+      a.tallyChanged = a.tallyChanged || !!changed;
+    } else {
+      a.openingGross = snap.opening; a.openingAccDep = 0;
+      a.txns = t.vouchers.map(v => txnFromVch(v, depLedgers));
+      a.edited = false; a.tallyChanged = false;
+    }
+    a.tally = snap;
+    a.vouchersFailed = t.vouchersFailed;
+    if(!a.depLedger && !a.suggestedDepLedger) a.suggestedDepLedger = sugg;
+  }
+  for(const a of S.assets) if(a.source === "tally" && !seen.has(a.name)) a.notInTally = true;
+  S.fetchedAt = data.fetchedAt; S.fetchPeriod = {from:data.from, to:data.to};
+  S.fetchErrors = data.errors || [];
+}
+
+function revertToTally(a){
+  if(!a.tally) return;
+  const depLedgers = new Set(S.assets.map(x => x.depLedger).filter(Boolean));
+  a.openingGross = a.tally.opening; a.openingAccDep = 0; a.itOpening = null;
+  a.txns = a.tally.vouchers.map(v => txnFromVch(v, depLedgers));
+  a.edited = false; a.tallyChanged = false;
+}
+
+/* ============================================================ calculations */
+function inPeriod(t){ return t.date >= S.from && t.date <= S.to; }
+
+function computeBook(a){
+  const F = dayNo(S.from), T = dayNo(S.to), D = T - F + 1, Y = yearDays(S.from);
+  const rate = (+a.rate || 0) / 100;
+  const tx = a.txns.filter(inPeriod);
+  const sum = ty => r2(tx.filter(t => t.type === ty).reduce((s, t) => s + num(t.amount), 0));
+  const add = sum("add"), del = sum("del"), booked = sum("dep");
+  const openGross = r2(a.openingGross), openAcc = r2(a.openingAccDep), openNet = r2(openGross - openAcc);
+  const closeGross = r2(openGross + add - del);
+  const rows = [];
+  let dep = 0;
+  const base0 = a.method === "SLM" ? openGross : openNet;
+  if(!a.excluded && rate > 0){
+    const d0 = rate * base0 * D / Y;
+    rows.push({part: a.method === "SLM" ? "Opening cost" : "Opening WDV", date:S.from, amt:base0, days:D, dep:d0});
+    dep += d0;
+    for(const t of tx.filter(t => t.type === "add" || t.type === "del").sort((x, y) => x.date.localeCompare(y.date))){
+      const days = T - dayNo(t.date) + 1;
+      const sign = t.type === "add" ? 1 : -1;
+      const d = sign * rate * num(t.amount) * days / Y;
+      rows.push({part: (t.type === "add" ? "Addition" : "Deletion") + (t.vchNo ? ` (Vch ${t.vchNo})` : ""), date:t.date, amt:sign * num(t.amount), days, dep:d});
+      dep += d;
+    }
+    let cap;
+    if(a.method === "SLM") cap = Math.max(0, closeGross * (1 - (+a.residualPct || 0) / 100) - openAcc);
+    else cap = Math.max(0, openNet + add - del);
+    if(dep > cap){ rows.push({part:"Restricted to depreciable balance", date:"", amt:null, days:null, dep:cap - dep}); dep = cap; }
+    if(dep < 0){ rows.push({part:"Negative depreciation set to nil", date:"", amt:null, days:null, dep:-dep}); dep = 0; }
+  }
+  dep = S.settings.roundOff ? Math.round(dep) : r2(dep);
+  const closeAcc = r2(openAcc + dep);
+  return {openGross, add, del, closeGross, openAcc, dep, closeAcc, openNet, closeNet:r2(closeGross - closeAcc),
+          booked, diff:r2(dep - booked), bookNet:r2(openNet + add - del - booked), rows, rate:+a.rate || 0};
+}
+
+function computeIT(){
+  const T = dayNo(S.to);
+  const blocks = {};
+  for(const a of activeAssets()){
+    const r = +a.itRate || 0;
+    const key = r.toFixed(2);
+    const b = blocks[key] ||= {rate:r, classes:new Set(), open:0, addFull:0, addHalf:0, del:0, assets:[]};
+    b.classes.add(a.klass || "Unclassified");
+    const bk = computeBook(a);
+    b.open += a.itOpening !== null && a.itOpening !== "" && a.itOpening !== undefined ? num(a.itOpening) : bk.openNet;
+    for(const t of a.txns.filter(inPeriod)){
+      if(t.type === "add"){ if(T - dayNo(t.date) + 1 >= 180) b.addFull += num(t.amount); else b.addHalf += num(t.amount); }
+      if(t.type === "del") b.del += num(t.amount);
+    }
+    b.assets.push(a.name);
+  }
+  const out = [];
+  for(const b of Object.values(blocks).sort((x, y) => x.rate - y.rate)){
+    let full = b.open + b.addFull - b.del, half = b.addHalf, stcg = 0;
+    if(full < 0){ half += full; full = 0; }
+    if(half < 0){ stcg = -half; half = 0; }
+    let depFull = full * b.rate / 100, depHalf = half * b.rate / 200;
+    if(S.settings.roundOff){ depFull = Math.round(depFull); depHalf = Math.round(depHalf); }
+    out.push({...b, classes:[...b.classes].join(", "), full, half, depFull, depHalf, dep:depFull + depHalf,
+              close:r2(full + half - depFull - depHalf), stcg});
+  }
+  return out;
+}
+
+function activeAssets(){ return S.assets.filter(a => !a.excluded); }
+
+/* ======================================================== validation/tags */
+function ledgerInfo(name){ return S.ledgers.find(l => l.name === name); }
+function issues(a){
+  const out = [];
+  if(a.excluded) return [{lvl:"mute", msg:a.excludeReason || "Excluded"}];
+  if(!a.klass) out.push({lvl:"bad", msg:"Asset class not set", tag:true});
+  if((+a.rate || 0) > 0 && !a.depLedger) out.push({lvl:"bad", msg:"Depreciation ledger not tagged", tag:true});
+  if(a.depLedger && S.ledgers.length){
+    const li = ledgerInfo(a.depLedger);
+    if(!li) out.push({lvl:"bad", msg:`Ledger "${a.depLedger}" not found in Tally`, tag:true});
+    else if(!li.isExpense) out.push({lvl:"warn", msg:`"${a.depLedger}" is not under an expense group`});
+  }
+  if(a.vouchersFailed) out.push({lvl:"bad", msg:"Vouchers could not be fetched - enter additions/deletions manually or re-fetch"});
+  if(a.notInTally) out.push({lvl:"warn", msg:"Ledger no longer in Tally"});
+  if(!a.edited && a.tally && a.tally.reconcileDiff != null && Math.abs(a.tally.reconcileDiff) > 1)
+    out.push({lvl:"bad", msg:`Tally balance does not match opening + vouchers (diff ${fmt(a.tally.reconcileDiff)}) - correction required`});
+  if(a.tally?.outside?.length)
+    out.push({lvl:"warn", msg:`${a.tally.outside.length} voucher(s) dated outside the period not included: ` +
+      a.tally.outside.map(v => `${dmy(v.date)} ${v.vchType} ${v.vchNo} ${fmt(Math.abs(v.amount))}`).join("; ")});
+  if(a.tallyChanged) out.push({lvl:"warn", msg:"Tally data changed after your correction"});
+  const c = computeBook(a);
+  if(c.openNet < 0) out.push({lvl:"bad", msg:"Opening WDV is negative - correct opening figures"});
+  if(c.closeGross < 0) out.push({lvl:"bad", msg:"Deletions exceed cost - correction required"});
+  if(a.edited) out.push({lvl:"info", msg:"Manually corrected"});
+  if(a.source === "manual") out.push({lvl:"info", msg:"Manual entry"});
+  return out;
+}
+function blocking(){ return activeAssets().filter(a => issues(a).some(i => i.tag)); }
+
+/* ================================================================== render */
+function setBanner(html, cls){ $("#banner").innerHTML = html ? `<div class="banner ${cls}">${html}</div>` : ""; }
+
+function renderBanner(){
+  if(TALLY.checking){ setBanner(`<span class="spin"></span> Checking TallyPrime connection…`, "info"); return; }
+  if(!S){
+    setBanner(`No company open. <span class="spacer"></span><button class="primary" onclick="showHome()">Open a company</button>`, "info");
+    return;
+  }
+  const savedNote = S.fetchedAt ? `Showing saved data last fetched ${esc(S.fetchedAt.replace("T", " "))} for ${dmy(S.fetchPeriod?.from)} to ${dmy(S.fetchPeriod?.to)}.` : "";
+  if(!TALLY.connected && S.source !== "manual" && S.fetchedAt){
+    setBanner(`<b>Tally is not available.</b> ${savedNote} Reports work on this data; to update it, open TallyPrime and click Retry.
+      <span class="spacer"></span><button onclick="checkTally()">Retry</button>`, "warn");
+    return;
+  }
+  if(TALLY.connected && S.source !== "manual" && !S.tallyCompany){
+    setBanner(`<b>"${esc(S.company)}" is not open in TallyPrime.</b> ${savedNote} Open this company in Tally (Alt+F3) and click Retry to update it.
+      <span class="spacer"></span><button onclick="checkTally()">Retry</button>`, "warn");
+    return;
+  }
+  if(!TALLY.connected && S?.source !== "manual"){
+    setBanner(`<b>Tally is not available.</b> <span class="small">${esc(TALLY.error || "")}</span>
+      <span class="spacer"></span>
+      <span class="small">Make sure TallyPrime is open with the company loaded and <i>F1 › Settings › Connectivity › Client/Server = Both, Port 9000</i>.</span>
+      <button onclick="checkTally()">Retry</button>
+      <button class="primary" onclick="startManual()">Enter data manually</button>
+      <button onclick="showHome()">Open saved company</button>`, "bad");
+    return;
+  }
+  const blk = S ? blocking() : [];
+  if(S && blk.length){
+    setBanner(`<b>Data is saved. ${blk.length} asset(s) still need a depreciation ledger / class.</b> Tag them whenever you have time, one by one in the table below - every change is saved. Reports and the journal open once all are tagged.
+      <span class="spacer"></span><label class="small"><input type="checkbox" ${UNTAGGED_ONLY ? "checked" : ""} onchange="UNTAGGED_ONLY=this.checked;renderAssets()"> show only untagged</label>
+      <button onclick="openTagModal()">Tag several at once</button>`, "warn");
+    return;
+  }
+  if(S?.source === "manual"){
+    setBanner(`Working on <b>manually entered data</b>${TALLY.connected ? "" : " (Tally is not available)"}. Add or correct assets below, or import a CSV.
+      <span class="spacer"></span><button onclick="checkTally()">Check Tally again</button>`, "info");
+    return;
+  }
+  if(S?.fetchErrors?.length){
+    setBanner(`<b>Some ledgers could not be read from Tally.</b> ${S.fetchErrors.length} error(s). Enter their figures manually or fetch again.`, "warn");
+    return;
+  }
+  setBanner(S?.fetchedAt ? `Connected to Tally. Last fetched ${esc(S.fetchedAt.replace("T", " "))} for ${dmy(S.fetchPeriod?.from)} to ${dmy(S.fetchPeriod?.to)}. Change the period and click <b>Update from Tally</b> to refresh.` :
+            `Connected to Tally. Choose the period and click <b>Fetch from Tally</b>.`, "ok");
+}
+
+function renderHeader(){
+  const sel = $("#companySel");
+  sel.innerHTML = TALLY.companies.map(c => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join("");
+  const manual = !TALLY.connected || S?.source === "manual" || (S && !S.tallyCompany);
+  sel.classList.toggle("hidden", manual);
+  $("#companyTxt").classList.toggle("hidden", !manual);
+  $("#companyTxt").readOnly = !!S && S.source !== "manual";
+  if(S){ if(manual) $("#companyTxt").value = S.company; else sel.value = S.tallyCompany; $("#fromDt").value = S.from; $("#toDt").value = S.to; }
+  const b = $("#srcBadge");
+  if(TALLY.checking){ b.className = "badge b-info"; b.textContent = "Checking…"; }
+  else if(S?.source === "manual"){ b.className = "badge b-warn"; b.textContent = "Manual data"; }
+  else if(TALLY.connected){ b.className = "badge b-ok"; b.textContent = "Tally connected"; }
+  else { b.className = "badge b-bad"; b.textContent = "Tally offline"; }
+  $("#btnFetch").disabled = !TALLY.connected || (S && S.source !== "manual" && !S.tallyCompany);
+  $("#btnFetch").textContent = S?.fetchedAt && S.source !== "manual" ? "Update from Tally" : "Fetch from Tally";
+}
+
+function ledgerOptions(selected, suggested){
+  if(!S.ledgers.length) return null;
+  const dep = S.ledgers.filter(l => isDepName(l.name));
+  const exp = S.ledgers.filter(l => l.isExpense && !isDepName(l.name));
+  const opt = l => `<option value="${esc(l.name)}" ${l.name === selected ? "selected" : ""}>${esc(l.name)}${l.name === suggested && !selected ? "  (suggested)" : ""}</option>`;
+  let h = `<option value="">— select ledger —</option>`;
+  if(dep.length) h += `<optgroup label="Depreciation ledgers">${dep.map(opt).join("")}</optgroup>`;
+  h += `<optgroup label="Other expense ledgers">${exp.map(opt).join("")}</optgroup>`;
+  if(selected && !S.ledgers.some(l => l.name === selected)) h += `<option value="${esc(selected)}" selected>${esc(selected)} (not in Tally)</option>`;
+  return h;
+}
+function ledgerControl(id, value, suggested, onchange){
+  const opts = ledgerOptions(value, suggested);
+  if(opts) return `<select ${id} onchange="${onchange}">${opts}</select>`;
+  const names = [...new Set(S.assets.map(a => a.depLedger).filter(Boolean))];
+  return `<input ${id} list="dlDep" value="${esc(value)}" placeholder="${esc(suggested || "Depreciation ledger name")}" onchange="${onchange}">
+          <datalist id="dlDep">${names.map(n => `<option value="${esc(n)}">`).join("")}</datalist>`;
+}
+const classOptions = sel => `<option value="">— class —</option>` + Object.keys(CLASS_MASTER).map(k => `<option ${k === sel ? "selected" : ""}>${esc(k)}</option>`).join("");
+
+function renderKpis(){
+  const act = activeAssets(); const c = act.map(computeBook);
+  const s = k => c.reduce((x, y) => x + y[k], 0);
+  const blk = blocking().length;
+  $("#kpis").innerHTML = [
+    ["Assets (active)", act.length + (S.assets.length - act.length ? ` <span class="small muted">+${S.assets.length - act.length} excluded</span>` : "")],
+    ["Opening WDV", fmt(s("openNet"))], ["Additions", fmt(s("add"))], ["Deletions", fmt(s("del"))],
+    ["Depreciation (computed)", fmt(s("dep"))], ["Already booked in Tally", fmt(s("booked"))],
+    ["Closing WDV", fmt(s("closeNet"))],
+    ["Tagging", blk ? `<span class="badge b-bad">${blk} pending</span>` : `<span class="badge b-ok">All tagged</span>`],
+  ].map(([l, v]) => `<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div></div>`).join("");
+}
+
+function renderAssets(){
+  if(!S){ $("#assetTbl").innerHTML = `<tr><td class="muted">No data yet. Fetch from Tally or start manual entry.</td></tr>`; $("#kpis").innerHTML = ""; return; }
+  renderKpis();
+  $("#bulkClass").innerHTML = classOptions("");
+  $("#bulkLedger").outerHTML = ledgerOptions("", "") ? `<select id="bulkLedger">${ledgerOptions("", suggestDepLedger())}</select>` : `<input id="bulkLedger" placeholder="Dep. ledger name">`;
+  const show = $("#showExcluded").checked;
+  const pending = UNTAGGED_ONLY ? new Set(blocking()) : null;
+  const list = S.assets.filter(a => (show || !a.excluded) && (!pending || pending.has(a)));
+  let h = `<thead><tr><th><input type="checkbox" onclick="document.querySelectorAll('.selA').forEach(c=>c.checked=this.checked)"></th>
+    <th>Asset ledger</th><th>Group</th><th>Asset class</th><th>Method</th><th class="n">Rate %</th><th class="n">IT %</th>
+    <th>Depreciation ledger</th><th class="n">Opening WDV</th><th class="n">Additions</th><th class="n">Deletions</th>
+    <th class="n">Dep. (computed)</th><th class="n">Booked</th><th>Status</th><th></th></tr></thead><tbody>`;
+  if(!list.length && pending) h += `<tr><td colspan="15" class="muted">Every asset is tagged.</td></tr>`;
+  else if(!list.length) h += `<tr><td colspan="15" class="muted">No assets. ${S.source === "manual" ? "Click <b>+ Add asset</b> or import a CSV." : "Fetch from Tally."}</td></tr>`;
+  for(const a of list){
+    const c = computeBook(a);
+    const iss = issues(a);
+    h += `<tr class="${a.edited ? "edited" : ""}">
+      <td><input type="checkbox" class="selA" value="${a.id}"></td>
+      <td><b>${esc(a.name)}</b></td><td class="small muted">${esc(a.group)}</td>
+      <td><select onchange="setField('${a.id}','klass',this.value)">${classOptions(a.klass)}</select></td>
+      <td><select onchange="setField('${a.id}','method',this.value)"><option ${a.method === "WDV" ? "selected" : ""}>WDV</option><option ${a.method === "SLM" ? "selected" : ""}>SLM</option></select></td>
+      <td class="n"><input type="number" step="0.01" style="width:70px" value="${a.rate}" onchange="setField('${a.id}','rate',this.value)"></td>
+      <td class="n"><input type="number" step="0.01" style="width:60px" value="${a.itRate}" onchange="setField('${a.id}','itRate',this.value)"></td>
+      <td>${ledgerControl("", a.depLedger, a.suggestedDepLedger, `setField('${a.id}','depLedger',this.value)`)}</td>
+      <td class="n">${fmt(c.openNet)}</td><td class="n">${fmt(c.add)}</td><td class="n">${fmt(c.del)}</td>
+      <td class="n"><b>${fmt(c.dep)}</b></td><td class="n">${fmt(c.booked)}</td>
+      <td><div class="chips">${iss.length ? iss.map(i => `<span class="badge b-${i.lvl}" title="${esc(i.msg)}">${esc(i.msg)}</span>`).join("") : `<span class="badge b-ok">OK</span>`}</div></td>
+      <td><button class="sm" onclick="openEditor('${a.id}')">Edit / Correct</button></td></tr>`;
+  }
+  $("#assetTbl").innerHTML = h + "</tbody>";
+}
+
+function setField(id, f, v){
+  const a = S.assets.find(x => x.id === id);
+  if(f === "klass"){ applyClass(a, v); }
+  else if(f === "method"){ a.method = v; const c = CLASS_MASTER[a.klass]; if(c) a.rate = v === "SLM" ? c.slm : c.wdv; }
+  else if(f === "rate" || f === "itRate"){ a[f] = num(v); }
+  else a[f] = v;
+  changed();
+}
+
+function changed(){ renderAll(); scheduleSave(); }
+function renderAll(){ renderHeader(); renderBanner(); renderAssets(); if(currentTab === "Reports") renderReport(); if(currentTab === "Journal") renderJournal(); if(currentTab === "Settings") renderSettings(); }
+
+/* ================================================================== modals */
+function modal(html){ $("#modalRoot").innerHTML = `<div class="modal-bg"><div class="modal">${html}</div></div>`; }
+function closeModal(){ $("#modalRoot").innerHTML = ""; }
+
+function openTagModal(){
+  const blk = blocking();
+  if(!blk.length){ closeModal(); return; }
+  const sugg = suggestDepLedger();
+  modal(`<h2>Tag the depreciation ledger for each asset</h2>
+    <p class="muted">Depreciation is posted to the ledger you select here. ${sugg ? `Suggested ledger from Tally: <b>${esc(sugg)}</b> - confirm it or pick the correct one.` : "No depreciation ledger was identified automatically - select the correct ledger."}
+    Choose <i>Exclude</i> for ledgers that are not depreciable (e.g. capital WIP, accumulated depreciation).
+    Only the rows you change are saved; the rest stay pending so you can tag them later.</p>
+    <div class="toolbar">Set all to: ${ledgerControl('id="tagAll"', sugg, sugg, "")} <button onclick="tagAllApply()">Apply to all rows</button></div>
+    <div class="tblwrap"><table><thead><tr><th>Asset ledger</th><th>Issue</th><th>Asset class</th><th>Depreciation ledger</th><th>Exclude</th></tr></thead><tbody>
+    ${blk.map(a => `<tr data-id="${a.id}" onchange="this.dataset.touched=1"><td><b>${esc(a.name)}</b><div class="small muted">${esc(a.group)}</div></td>
+      <td class="small">${issues(a).filter(i => i.tag).map(i => esc(i.msg)).join("<br>")}</td>
+      <td><select class="tgClass">${classOptions(a.klass)}</select></td>
+      <td>${ledgerControl('class="tgLed"', a.depLedger || a.suggestedDepLedger, a.suggestedDepLedger, "")}</td>
+      <td><input type="checkbox" class="tgEx"></td></tr>`).join("")}
+    </tbody></table></div>
+    <div class="foot"><button onclick="closeModal()">Close (tag later)</button><button class="primary" onclick="tagSave()">Save tagging</button></div>`);
+}
+function tagAllApply(){
+  const v = $("#tagAll").value;
+  document.querySelectorAll("#modalRoot tr[data-id]").forEach(tr => { tr.querySelector(".tgLed").value = v; tr.dataset.touched = 1; });
+}
+function tagSave(){
+  document.querySelectorAll("#modalRoot tr[data-id][data-touched]").forEach(tr => {
+    const a = S.assets.find(x => x.id === tr.dataset.id);
+    if(tr.querySelector(".tgEx").checked){ a.excluded = true; a.excludeReason = "Excluded by user"; return; }
+    const k = tr.querySelector(".tgClass").value, l = tr.querySelector(".tgLed").value.trim();
+    if(k && k !== a.klass) applyClass(a, k);
+    a.depLedger = l;
+  });
+  closeModal();
+  changed();
+}
+
+function openEditor(id){
+  const a = id ? S.assets.find(x => x.id === id) : newAsset("");
+  const isNew = !id;
+  const accOpts = S.ledgers.length ? `<option value="">(credit the asset ledger itself)</option>` +
+      S.ledgers.filter(l => l.isFixedAsset).map(l => `<option ${l.name === a.accDepLedger ? "selected" : ""}>${esc(l.name)}</option>`).join("") : null;
+  const txRow = t => `<tr><td><input type="date" class="tD" value="${esc(t.date)}"></td>
+      <td><select class="tT">${Object.entries(TXN_TYPES).map(([k, v]) => `<option value="${k}" ${k === t.type ? "selected" : ""}>${v}</option>`).join("")}</select></td>
+      <td><input type="number" step="0.01" class="tA" value="${t.amount}" style="width:130px"></td>
+      <td><input class="tV" value="${esc([t.vchType, t.vchNo].filter(Boolean).join(" "))}" style="width:130px"></td>
+      <td><input class="tN" value="${esc(t.narration)}" style="width:100%"><div class="small muted">${esc((t.others || []).join(", "))}</div></td>
+      <td><button class="sm danger" onclick="this.closest('tr').remove()">✕</button></td></tr>`;
+  modal(`<h2>${isNew ? "Add asset" : "Edit / correct: " + esc(a.name)}</h2>
+    <p class="small muted">${a.source === "tally" ? "Fetched from Tally. Any change here is saved as a correction and shown in the Exceptions report. Tally itself is not changed." : "Manual entry."}</p>
+    <div class="grid2">
+      <label class="field">Asset / ledger name <input id="eName" value="${esc(a.name)}" ${a.source === "tally" ? "readonly" : ""}></label>
+      <label class="field">Asset class <select id="eClass">${classOptions(a.klass)}</select></label>
+      <label class="field">Method (Companies Act) <select id="eMethod"><option ${a.method === "WDV" ? "selected" : ""}>WDV</option><option ${a.method === "SLM" ? "selected" : ""}>SLM</option></select></label>
+      <label class="field">Rate % (Companies Act) <input id="eRate" type="number" step="0.01" value="${a.rate}"></label>
+      <label class="field">Income-tax rate % <input id="eIt" type="number" step="0.01" value="${a.itRate}"></label>
+      <label class="field">Residual value % (SLM) <input id="eRes" type="number" step="0.01" value="${a.residualPct}"></label>
+      <label class="field">Depreciation ledger (Dr) ${ledgerControl('id="eDep"', a.depLedger || a.suggestedDepLedger, a.suggestedDepLedger, "")}</label>
+      <label class="field">Credit ledger (Acc. Dep., optional) ${accOpts ? `<select id="eAcc">${accOpts}</select>` : `<input id="eAcc" value="${esc(a.accDepLedger)}" placeholder="blank = asset ledger">`}</label>
+      <label class="field">Opening gross block (cost) <input id="eOG" type="number" step="0.01" value="${a.openingGross}"></label>
+      <label class="field">Opening accumulated depreciation <input id="eOA" type="number" step="0.01" value="${a.openingAccDep}"></label>
+      <label class="field">Income-tax opening WDV (blank = book WDV) <input id="eIO" type="number" step="0.01" value="${a.itOpening ?? ""}"></label>
+      <label class="field">&nbsp;<span><input type="checkbox" id="eEx" ${a.excluded ? "checked" : ""}> Exclude from depreciation</span></label>
+    </div>
+    ${a.source === "tally" ? `<p class="small muted">Tally opening balance on ${dmy(S.from)}: <b>${fmt(a.tally?.opening || 0)}</b>. If your Tally ledger holds net WDV, keep gross = WDV and accumulated = 0. For SLM, enter original cost and accumulated depreciation.</p>` : ""}
+    <h3 style="font-size:14px;margin:14px 0 6px">Transactions in the period (additions, deletions, depreciation already booked)</h3>
+    <div class="tblwrap"><table><thead><tr><th>Date (put to use)</th><th>Type</th><th class="n">Amount</th><th>Voucher</th><th>Narration / other ledgers</th><th></th></tr></thead>
+    <tbody id="eTx">${a.txns.map(txRow).join("")}</tbody></table></div>
+    <div class="toolbar" style="margin-top:6px"><button class="sm" id="eAddTx">+ Add row</button>
+      <span class="small muted">For additions, use the date the asset was put to use - it drives the day-wise and 180-day calculations.</span></div>
+    <div class="foot">
+      ${a.source === "tally" && a.edited ? `<button onclick="revertToTally(S.assets.find(x=>x.id==='${a.id}'));closeModal();changed()">Revert to Tally data</button>` : ""}
+      ${a.source === "manual" && !isNew ? `<button class="danger" onclick="if(confirm('Delete this asset?')){S.assets=S.assets.filter(x=>x.id!=='${a.id}');closeModal();changed()}">Delete</button>` : ""}
+      <span class="spacer"></span><button onclick="closeModal()">Cancel</button><button class="primary" id="eSave">Save</button></div>`);
+  $("#eAddTx").onclick = () => $("#eTx").insertAdjacentHTML("beforeend", txRow({date:S.to, type:"add", amount:0, vchType:"", vchNo:"", narration:"", others:[]}));
+  $("#eClass").onchange = () => { const c = CLASS_MASTER[$("#eClass").value]; if(c){ $("#eRate").value = $("#eMethod").value === "SLM" ? c.slm : c.wdv; $("#eIt").value = c.it; } };
+  $("#eMethod").onchange = () => { const c = CLASS_MASTER[$("#eClass").value]; if(c) $("#eRate").value = $("#eMethod").value === "SLM" ? c.slm : c.wdv; };
+  $("#eSave").onclick = () => {
+    const name = $("#eName").value.trim();
+    if(!name) return alert("Enter the asset name.");
+    const txns = [...document.querySelectorAll("#eTx tr")].map(tr => {
+      const v = tr.querySelector(".tV").value.trim().split(" ");
+      return {id:uid(), date:tr.querySelector(".tD").value, type:tr.querySelector(".tT").value, amount:r2(num(tr.querySelector(".tA").value)),
+              vchType:v.length > 1 ? v.slice(0, -1).join(" ") : "", vchNo:v[v.length - 1] || "", narration:tr.querySelector(".tN").value,
+              others:(a.txns.find(t => t.date === tr.querySelector(".tD").value && Math.abs(t.amount - num(tr.querySelector(".tA").value)) < .01) || {}).others || []};
+    });
+    const bad = txns.filter(t => !t.date || t.amount <= 0);
+    if(bad.length) return alert("Every transaction needs a date and an amount greater than zero.");
+    const io = $("#eIO").value.trim();
+    const upd = {name, klass:$("#eClass").value, method:$("#eMethod").value, rate:num($("#eRate").value), itRate:num($("#eIt").value),
+                 residualPct:num($("#eRes").value), depLedger:$("#eDep").value.trim(), accDepLedger:$("#eAcc").value.trim(),
+                 openingGross:r2(num($("#eOG").value)), openingAccDep:r2(num($("#eOA").value)), itOpening:io === "" ? null : num(io),
+                 excluded:$("#eEx").checked};
+    if(upd.excluded && !a.excluded) upd.excludeReason = "Excluded by user";
+    const sig = x => JSON.stringify([x.openingGross, x.openingAccDep, x.itOpening, (x.txns || []).map(t => [t.date, t.type, +t.amount])]);
+    const before = sig(a);
+    Object.assign(a, upd, {txns});
+    if(a.source === "tally" && sig(a) !== before) a.edited = true;
+    if(a.source === "tally" && a.tally && sig(a) === sig({openingGross:a.tally.opening, openingAccDep:0, itOpening:null, txns:a.tally.vouchers.map(v => txnFromVch(v, new Set(S.assets.map(x => x.depLedger))))})) a.edited = false;
+    if(isNew) S.assets.push(a);
+    closeModal(); changed();
+  };
+}
+
+/* =========================================================== source flows */
+async function checkTally(){
+  TALLY.checking = true; renderAll();
+  try{
+    const r = await api("/api/status?timeout=10", null, 30000);
+    TALLY.connected = r.connected; TALLY.companies = r.companies || []; TALLY.error = r.error;
+  } catch(e){ TALLY.connected = false; TALLY.error = e.name === "AbortError" ? "Tally did not answer in time" : e.message; }
+  TALLY.checking = false;
+  if(S && S.source !== "manual") S.tallyCompany = TALLY.connected ? matchTally(S.company)?.name || null : S.tallyCompany;
+  renderAll();
+  if(HOME_OPEN) showHome();
+}
+
+async function selectCompany(name){
+  const comp = TALLY.companies.find(c => c.name === name) || {};
+  let st = null;
+  try{
+    st = (await api("/api/state?company=" + encodeURIComponent(name))).state;
+    if(!st){
+      const saved = (await api("/api/saved")).saved.find(s => s.source !== "manual" && normName(s.company) === normName(name));
+      if(saved) st = (await api("/api/state?company=" + encodeURIComponent(saved.company))).state;
+    }
+  } catch(e){}
+  if(st && st.source !== "manual"){ S = st; S.fetchErrors = S.fetchErrors || []; }
+  else {
+    const start = comp.startingFrom || comp.booksFrom || fyOf(new Date().toISOString().slice(0, 10))[0];
+    const [f, t] = fyOf(start);
+    S = blankState(name, "tally", f, t, comp.booksFrom || f);
+  }
+  S.tallyCompany = name;
+}
+
+async function fetchTally(){
+  if(!S || S.source === "manual"){ const c = $("#companySel").value; if(!c) return alert("No company is open in TallyPrime."); await selectCompany(c); }
+  if(!S.tallyCompany) return alert(`"${S.company}" is not open in TallyPrime. Open it in Tally and click Check Tally.`);
+  S.from = $("#fromDt").value; S.to = $("#toDt").value;
+  if(!S.from || !S.to || S.from > S.to) return alert("Enter a valid period.");
+  const comp = TALLY.companies.find(c => c.name === tallyName()) || {};
+  setBanner(`<span class="spin"></span> Reading fixed asset ledgers and vouchers of <b>${esc(tallyName())}</b> from Tally Cloud's books…`, "info");
+  $("#btnFetch").disabled = true;
+  try{
+    const data = await api("/api/fetch", {company:tallyName(), from:S.from, to:S.to, booksFrom:comp.booksFrom || S.booksFrom});
+    mergeFetch(data);
+    S.source = "tally";
+    changed();
+    if(!data.assets.length) alert("No ledgers were found under the 'Fixed Assets' group in Tally. Add assets manually or check the group in Tally.");
+  } catch(e){
+    TALLY.connected = !e.data?.tallyUnavailable;
+    TALLY.error = e.message;
+    renderAll();
+    modal(`<h2>Could not fetch data from Tally</h2><p>${esc(e.message)}</p>
+      <p class="muted">You can retry, continue with the last saved data, or enter / correct the data manually.</p>
+      <div class="foot"><button onclick="closeModal();checkTally()">Retry</button>
+      <button onclick="closeModal();renderAll()">Keep saved data</button>
+      <button class="primary" onclick="closeModal();startManual()">Enter data manually</button></div>`);
+  } finally { $("#btnFetch").disabled = !TALLY.connected; }
+}
+
+function startManual(){
+  const def = fyOf(new Date().toISOString().slice(0, 10));
+  modal(`<h2>Manual entry</h2><p class="muted">Tally is not being used. Enter the company and period, then add each asset with its opening value, additions and deletions - or import them from a CSV file.</p>
+    <div class="grid2">
+      <label class="field">Company name <input id="mC" value="${esc(S?.company || "")}"></label>
+      <label class="field">From <input type="date" id="mF" value="${S?.from || def[0]}"></label>
+      <label class="field">To <input type="date" id="mT" value="${S?.to || def[1]}"></label>
+      <label class="field">Depreciation ledger name (used for all assets) <input id="mL" placeholder="e.g. Depreciation" value="${esc(S?.assets?.find(a => a.depLedger)?.depLedger || "")}"></label>
+    </div>
+    ${S?.assets?.length ? `<p><label><input type="checkbox" id="mKeep" checked> Keep the ${S.assets.length} asset(s) already loaded (from ${S.source === "tally" ? "Tally" : "manual entry"}) and correct them manually</label></p>` : ""}
+    <div class="foot"><button onclick="closeModal()">Cancel</button><button class="primary" id="mGo">Start</button></div>`);
+  $("#mGo").onclick = async () => {
+    const c = $("#mC").value.trim(); if(!c) return alert("Enter the company name.");
+    const keep = $("#mKeep")?.checked;
+    const prev = S;
+    let st = null;
+    if(!keep){ try{ st = (await api("/api/state?company=" + encodeURIComponent(c))).state; } catch(e){} }
+    S = keep ? prev : (st && st.source === "manual" ? st : blankState(c, "manual", $("#mF").value, $("#mT").value));
+    S.source = "manual"; S.company = c; S.from = $("#mF").value; S.to = $("#mT").value;
+    const L = $("#mL").value.trim();
+    if(L) S.assets.forEach(a => { if(!a.depLedger) a.depLedger = L; });
+    S.defaultDepLedger = L;
+    closeModal(); changed();
+  };
+}
+
+/* ------------------------------------------------- companies (start screen) */
+let HOME_OPEN = false;
+const jsq = s => esc(String(s ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'"));
+async function showHome(){
+  let list = [];
+  try{ list = (await api("/api/saved")).saved; } catch(e){ if(e.data?.auth) return; }
+  HOME_OPEN = true;
+  const status = s => {
+    if(s.source === "manual") return `<span class="badge b-warn">Manual data</span>`;
+    if(TALLY.checking) return `<span class="badge b-info">Checking Tally…</span>`;
+    if(!TALLY.connected) return `<span class="badge b-mute">Tally offline</span>`;
+    return matchTally(s.company) ? `<span class="badge b-ok">Open in Tally</span>` : `<span class="badge b-warn">Not open in Tally</span>`;
+  };
+  const savedNames = new Set(list.map(s => normName(s.company)));
+  const fresh = TALLY.companies.filter(c => !savedNames.has(normName(c.name)));
+  modal(`<h2>Companies</h2>
+    <p class="muted small">Click <b>Open</b> to see a company's saved data. If the same company is open in TallyPrime, change the period and click <b>Update from Tally</b> to refresh it.</p>
+    ${list.length ? `<div class="tblwrap"><table><thead><tr><th>Company</th><th>Period</th><th class="n">Assets</th><th>Last fetched from Tally</th><th>Last saved</th><th>Tally</th><th></th></tr></thead><tbody>
+      ${list.map(s => `<tr><td><b>${esc(s.company)}</b></td><td>${dmy(s.from)} to ${dmy(s.to)}</td><td class="n">${s.assetCount ?? ""}</td>
+        <td>${esc((s.fetchedAt || "-").replace("T", " "))}</td><td>${esc((s.savedAt || "").replace("T", " "))}${s.savedBy ? ` <span class="muted">by ${esc(s.savedBy)}</span>` : ""}</td>
+        <td>${status(s)}</td><td><button class="sm primary" onclick="openCompany('${jsq(s.company)}')">Open</button></td></tr>`).join("")}
+      </tbody></table></div>` : `<p>No saved companies yet.</p>`}
+    ${fresh.length ? `<h3 style="font-size:15px;margin:16px 0 6px">Open in TallyPrime, not saved yet</h3>
+      <div class="chips">${fresh.map(c => `<button class="sm" onclick="startTallyCompany('${jsq(c.name)}')">+ ${esc(c.name)}</button>`).join("")}</div>` : ""}
+    <div class="foot">${TALLY.checking ? `<span class="small muted"><span class="spin"></span> Checking TallyPrime…</span>` : `<button onclick="checkTally()">Check Tally</button>`}
+      <button onclick="HOME_OPEN=false;closeModal();startManual()">Manual entry</button>
+      ${S ? `<button onclick="HOME_OPEN=false;closeModal()">Close</button>` : ""}</div>`);
+}
+async function openCompany(company){
+  const st = (await api("/api/state?company=" + encodeURIComponent(company))).state;
+  if(!st) return alert("Saved data for this company could not be found.");
+  S = st; S.fetchErrors = S.fetchErrors || [];
+  if(S.source !== "manual") S.tallyCompany = TALLY.connected ? matchTally(S.company)?.name || null : null;
+  HOME_OPEN = false; closeModal(); renderAll();
+}
+async function startTallyCompany(name){
+  await selectCompany(name);
+  HOME_OPEN = false; closeModal(); changed();
+}
+
+function scheduleSave(){
+  clearTimeout(saveTimer);
+  $("#saveInfo").textContent = "Unsaved changes…";
+  saveTimer = setTimeout(async () => {
+    if(!S || !S.company) return;
+    try{ const r = await api("/api/state", {company:S.company, state:S}); $("#saveInfo").textContent = "Saved " + r.savedAt.slice(11); }
+    catch(e){ $("#saveInfo").textContent = "Save failed: " + e.message; }
+  }, 700);
+}
+
+/* ===================================================================== CSV */
+const CSV_HEAD = ["asset_name","asset_class","method","rate","it_rate","dep_ledger","opening_gross","opening_acc_dep","txn_date","txn_type","txn_amount","narration"];
+function downloadTemplate(){
+  const rows = [CSV_HEAD.join(","),
+    'Laptops,Computers & Laptops,WDV,63.16,40,Depreciation,250000,0,,,,',
+    'Laptops,,,,,,,,2025-06-15,add,85000,Dell laptop',
+    'Office Furniture,Furniture & Fixtures,WDV,25.89,10,Depreciation,180000,0,,,,',
+    'Office Furniture,,,,,,,,2025-12-10,del,20000,Sold old chairs'];
+  download("fixed_assets_template.csv", rows.join("\r\n"), "text/csv");
+}
+function parseCSV(text){
+  const rows = []; let row = [], f = "", q = false;
+  for(let i = 0; i < text.length; i++){
+    const ch = text[i];
+    if(q){ if(ch === '"'){ if(text[i+1] === '"'){ f += '"'; i++; } else q = false; } else f += ch; }
+    else if(ch === '"') q = true;
+    else if(ch === ","){ row.push(f); f = ""; }
+    else if(ch === "\n" || ch === "\r"){ if(ch === "\r" && text[i+1] === "\n") i++; row.push(f); rows.push(row); row = []; f = ""; }
+    else f += ch;
+  }
+  if(f || row.length){ row.push(f); rows.push(row); }
+  return rows.filter(r => r.some(c => c.trim()));
+}
+function importCSV(text){
+  if(!S) return alert("Start manual entry or fetch from Tally first.");
+  const rows = parseCSV(text);
+  const head = rows.shift().map(h => h.trim().toLowerCase());
+  const idx = k => head.indexOf(k);
+  if(idx("asset_name") < 0) return alert("CSV must have an 'asset_name' column. Download the template.");
+  let n = 0, t = 0; const errs = [];
+  rows.forEach((r, i) => {
+    const g = k => (idx(k) >= 0 ? (r[idx(k)] || "").trim() : "");
+    const name = g("asset_name"); if(!name) return;
+    let a = S.assets.find(x => x.name.toLowerCase() === name.toLowerCase());
+    if(!a){ a = newAsset(name); a.depLedger = S.defaultDepLedger || ""; S.assets.push(a); n++; }
+    if(g("asset_class")){ if(!CLASS_MASTER[g("asset_class")]) errs.push(`Row ${i+2}: unknown class "${g("asset_class")}"`); else applyClass(a, g("asset_class")); }
+    if(g("method")) a.method = g("method").toUpperCase() === "SLM" ? "SLM" : "WDV";
+    if(g("rate")) a.rate = num(g("rate"));
+    if(g("it_rate")) a.itRate = num(g("it_rate"));
+    if(g("dep_ledger")) a.depLedger = g("dep_ledger");
+    if(g("opening_gross")) a.openingGross = r2(num(g("opening_gross")));
+    if(g("opening_acc_dep")) a.openingAccDep = r2(num(g("opening_acc_dep")));
+    if(g("txn_date") && g("txn_amount")){
+      const ty = g("txn_type").toLowerCase();
+      const type = ty.startsWith("del") || ty.startsWith("sale") ? "del" : ty.startsWith("dep") ? "dep" : "add";
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(g("txn_date"))) errs.push(`Row ${i+2}: date must be YYYY-MM-DD`);
+      else { a.txns.push({id:uid(), date:g("txn_date"), type, amount:r2(num(g("txn_amount"))), vchType:"", vchNo:"", narration:g("narration"), others:[]}); t++; }
+    }
+    if(a.source === "tally") a.edited = true;
+  });
+  changed();
+  alert(`Imported: ${n} new asset(s), ${t} transaction(s).` + (errs.length ? "\n\nNeeds correction:\n" + errs.join("\n") : ""));
+}
+
+/* ================================================================= reports */
+function repHeader(title){
+  const corrected = S.assets.some(a => a.edited || a.source === "manual");
+  return `<div class="rep-head"><h2>${esc(S.company)}</h2><h2 style="font-size:15px;font-weight:600">${esc(title)}</h2>
+    <div>For the period ${dmy(S.from)} to ${dmy(S.to)} · Source: ${S.source === "manual" ? "Manual entry" : "TallyPrime" + (S.fetchedAt ? " (fetched " + esc(S.fetchedAt.replace("T", " ")) + ")" : "")}
+    ${corrected ? " · <b>includes manual entries / corrections</b>" : ""} · Generated ${new Date().toLocaleString("en-IN")}</div></div>`;
+}
+function tbl(head, rows, extraHead){ return `<div class="tblwrap"><table id="repTable"><thead>${extraHead || ""}<tr>${head.map(h => `<th class="${h.n ? "n" : ""}">${h.t}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table></div>`; }
+const td = (v, n) => `<td class="${n ? "n" : ""}">${n ? fmt(v) : v}</td>`;
+
+function renderReport(){
+  const out = $("#reportOut");
+  if(!S){ out.innerHTML = `<p class="muted">No data loaded.</p>`; return; }
+  const rep = $("#repSel").value;
+  const blk = blocking();
+  if(blk.length && rep !== "exceptions"){
+    out.innerHTML = `<div class="banner warn"><b>Reports are locked.</b> ${blk.length} asset(s) do not have a depreciation ledger or asset class tagged:
+      ${blk.slice(0, 8).map(a => esc(a.name)).join(", ")}${blk.length > 8 ? "…" : ""}. <span class="spacer"></span>
+      <button class="primary" onclick="openTagModal()">Tag ledgers now</button></div>`;
+    return;
+  }
+  ({schedule:repSchedule, register:repRegister, working:repWorking, it:repIT, compare:repCompare, exceptions:repExceptions})[rep](out);
+}
+
+function repSchedule(out){
+  const groups = {};
+  for(const a of activeAssets()){ const c = computeBook(a); const g = groups[a.klass || "Unclassified"] ||= {n:0, openGross:0, add:0, del:0, closeGross:0, openAcc:0, dep:0, closeAcc:0, closeNet:0, openNet:0}; g.n++; for(const k in c) if(k in g) g[k] += c[k]; }
+  const keys = ["openGross","add","del","closeGross","openAcc","dep","onDel","closeAcc","closeNet","openNet"];
+  const tot = Object.fromEntries(keys.map(k => [k, 0]));
+  const rows = Object.entries(groups).map(([k, g], i) => { g.onDel = 0; keys.forEach(x => tot[x] += g[x]); return `<tr><td>${i+1}</td><td>${esc(k)}</td>${keys.map(x => td(g[x], 1)).join("")}</tr>`; });
+  rows.push(`<tr class="tot"><td></td><td>Total</td>${keys.map(x => td(tot[x], 1)).join("")}</tr>`);
+  const eh = `<tr><th></th><th></th><th colspan="4" style="text-align:center">Gross Block</th><th colspan="4" style="text-align:center">Depreciation</th><th colspan="2" style="text-align:center">Net Block</th></tr>`;
+  out.innerHTML = repHeader("Property, Plant & Equipment - Depreciation Schedule (Companies Act, 2013)") +
+    tbl([{t:"Sr"},{t:"Asset class"},{t:`As at ${dmy(S.from)}`,n:1},{t:"Additions",n:1},{t:"Deletions",n:1},{t:`As at ${dmy(S.to)}`,n:1},
+         {t:`Up to ${dmy(S.from)}`,n:1},{t:"For the period",n:1},{t:"On deletions",n:1},{t:`Up to ${dmy(S.to)}`,n:1},{t:`As at ${dmy(S.to)}`,n:1},{t:`As at ${dmy(S.from)}`,n:1}], rows, eh) +
+    `<p class="small muted">Depreciation computed day-wise on ${S.settings.defaultMethod}/SLM rates as tagged per asset (Schedule II useful lives, ${S.settings.residualPct}% residual). Deletions are taken at the value credited to the asset ledger.</p>`;
+}
+
+function repRegister(out){
+  const keys = ["openGross","add","del","closeGross","openAcc","dep","closeAcc","closeNet"];
+  const tot = Object.fromEntries(keys.map(k => [k, 0]));
+  const rows = activeAssets().sort((x, y) => (x.klass || "").localeCompare(y.klass || "") || x.name.localeCompare(y.name)).map((a, i) => {
+    const c = computeBook(a); keys.forEach(k => tot[k] += c[k]);
+    return `<tr class="${a.edited ? "edited" : ""}"><td>${i+1}</td><td>${esc(a.name)}${a.edited ? " *" : ""}</td><td>${esc(a.klass)}</td><td>${a.method}</td><td class="n">${a.rate.toFixed(2)}</td><td>${esc(a.depLedger)}</td>${keys.map(k => td(c[k], 1)).join("")}</tr>`;
+  });
+  rows.push(`<tr class="tot"><td></td><td>Total</td><td></td><td></td><td></td><td></td>${keys.map(k => td(tot[k], 1)).join("")}</tr>`);
+  out.innerHTML = repHeader("Fixed Asset Register") +
+    tbl([{t:"Sr"},{t:"Asset"},{t:"Class"},{t:"Method"},{t:"Rate %",n:1},{t:"Depreciation ledger"},{t:"Opening cost",n:1},{t:"Additions",n:1},{t:"Deletions",n:1},{t:"Closing cost",n:1},
+         {t:"Opening acc. dep.",n:1},{t:"Dep. for period",n:1},{t:"Closing acc. dep.",n:1},{t:"Net block",n:1}], rows) +
+    `<p class="small muted">* manually corrected figures.</p>`;
+}
+
+function repWorking(out){
+  const rows = [];
+  let grand = 0;
+  for(const a of activeAssets()){
+    const c = computeBook(a);
+    rows.push(`<tr class="sub"><td colspan="6">${esc(a.name)} - ${esc(a.klass)} · ${a.method} @ ${a.rate}% · Dr ${esc(a.depLedger)}</td></tr>`);
+    for(const r of c.rows) rows.push(`<tr><td>${esc(r.part)}</td><td>${dmy(r.date)}</td>${r.amt === null ? "<td></td>" : td(r.amt, 1)}<td class="n">${r.days ?? ""}</td><td class="n">${r.amt === null ? "" : a.rate + "%"}</td>${td(r.dep, 1)}</tr>`);
+    if(!c.rows.length) rows.push(`<tr><td colspan="5" class="muted">Rate is nil - no depreciation</td>${td(0, 1)}</tr>`);
+    rows.push(`<tr class="tot"><td colspan="5">Depreciation - ${esc(a.name)}${S.settings.roundOff ? " (rounded)" : ""}</td>${td(c.dep, 1)}</tr>`);
+    grand += c.dep;
+  }
+  rows.push(`<tr class="tot"><td colspan="5">Total depreciation</td>${td(grand, 1)}</tr>`);
+  out.innerHTML = repHeader("Asset-wise Depreciation Working") +
+    tbl([{t:"Particulars"},{t:"Date"},{t:"Amount",n:1},{t:"Days used",n:1},{t:"Rate",n:1},{t:"Depreciation",n:1}], rows) +
+    `<p class="small muted">Depreciation = Amount × Rate × Days used ÷ ${yearDays(S.from)} days.</p>`;
+}
+
+function repIT(out){
+  const b = computeIT();
+  const keys = ["open","addFull","addHalf","del","full","half","depFull","depHalf","dep","close","stcg"];
+  const tot = Object.fromEntries(keys.map(k => [k, 0]));
+  const rows = b.map(x => { keys.forEach(k => tot[k] += x[k]); return `<tr><td>Block @ ${x.rate}%<div class="small muted">${esc(x.classes)}</div></td>${keys.map(k => td(x[k], 1)).join("")}</tr>`; });
+  rows.push(`<tr class="tot"><td>Total</td>${keys.map(k => td(tot[k], 1)).join("")}</tr>`);
+  const short = dayNo(S.to) - dayNo(S.from) + 1 < 365;
+  out.innerHTML = repHeader("Depreciation as per Income-tax Act, 1961 (Section 32 - Block of Assets)") +
+    (short ? `<div class="banner warn">Income-tax depreciation is computed for a full previous year. The selected period is shorter than a year.</div>` : "") +
+    tbl([{t:"Block"},{t:"Opening WDV",n:1},{t:"Additions ≥180 days",n:1},{t:"Additions <180 days",n:1},{t:"Deletions (sale value)",n:1},
+         {t:"WDV at full rate",n:1},{t:"WDV at half rate",n:1},{t:"Dep. full rate",n:1},{t:"Dep. half rate",n:1},{t:"Total depreciation",n:1},{t:"Closing WDV",n:1},{t:"Short-term capital gain (Sec 50)",n:1}], rows) +
+    `<p class="small muted">Additions put to use for less than 180 days in the year get 50% of the rate. Deletions are reduced first from additions/WDV eligible at full rate. Additional depreciation u/s 32(1)(iia) is not included. Opening WDV per asset can be overridden in Edit / Correct.</p>`;
+}
+
+function repCompare(out){
+  const rows = []; let t = [0, 0, 0];
+  for(const a of activeAssets()){
+    const c = computeBook(a); t[0] += c.dep; t[1] += c.booked; t[2] += c.diff;
+    rows.push(`<tr><td>${esc(a.name)}</td><td>${esc(a.depLedger)}</td>${td(c.dep, 1)}${td(c.booked, 1)}${td(c.diff, 1)}<td>${Math.abs(c.diff) < 1 ? '<span class="badge b-ok">Matched</span>' : c.diff > 0 ? '<span class="badge b-warn">To be posted</span>' : '<span class="badge b-bad">Excess booked</span>'}</td></tr>`);
+  }
+  rows.push(`<tr class="tot"><td>Total</td><td></td>${t.map(v => td(v, 1)).join("")}<td></td></tr>`);
+  out.innerHTML = repHeader("Computed Depreciation vs Booked in Tally") +
+    tbl([{t:"Asset"},{t:"Depreciation ledger"},{t:"Computed",n:1},{t:"Booked in Tally",n:1},{t:"Difference",n:1},{t:"Status"}], rows);
+}
+
+function repExceptions(out){
+  const rows = [];
+  for(const a of S.assets){
+    for(const i of issues(a)) if(i.lvl !== "ok") rows.push(`<tr><td>${esc(a.name)}</td><td><span class="badge b-${i.lvl}">${i.lvl === "bad" ? "Correction required" : i.lvl === "warn" ? "Check" : i.lvl === "info" ? "Info" : "Excluded"}</span></td><td>${esc(i.msg)}</td><td class="noprint"><button class="sm" onclick="openEditor('${a.id}')">Open</button></td></tr>`);
+    if(a.edited && a.tally){
+      const c = computeBook(a);
+      const tAdd = a.tally.vouchers.filter(v => v.amount < 0).reduce((s, v) => s - v.amount, 0);
+      rows.push(`<tr><td>${esc(a.name)}</td><td><span class="badge b-info">Correction</span></td><td>Tally opening ${fmt(a.tally.opening)} → used ${fmt(c.openNet)}; Tally debits ${fmt(tAdd)} → additions used ${fmt(c.add)}</td><td></td></tr>`);
+    }
+  }
+  for(const e of S.fetchErrors || []) rows.push(`<tr><td colspan="2"><span class="badge b-bad">Fetch error</span></td><td>${esc(e)}</td><td></td></tr>`);
+  if(!rows.length) rows.push(`<tr><td colspan="4" class="muted">No exceptions.</td></tr>`);
+  out.innerHTML = repHeader("Exceptions & Corrections") + tbl([{t:"Asset"},{t:"Type"},{t:"Detail"},{t:""}], rows);
+}
+
+function exportXls(){
+  const node = $("#reportOut"); if(!node.querySelector("table")) return;
+  const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body>${node.innerHTML.replace(/<button[^>]*>.*?<\/button>/g, "")}</body></html>`;
+  download(`${$("#repSel").value}_${S.from}_${S.to}.xls`, html, "application/vnd.ms-excel");
+}
+function exportCsv(){
+  const t = $("#repTable"); if(!t) return;
+  const lines = [[S.company], [$("#repSel").selectedOptions[0].text], [`${dmy(S.from)} to ${dmy(S.to)}`], []].map(r => r.join(","));
+  for(const tr of t.querySelectorAll("tr")){
+    const cells = [];
+    for(const c of tr.children){ const v = c.innerText.replace(/\s+/g, " ").trim(); const n = c.classList.contains("n") && v !== "-" ? v.replace(/,/g, "") : v; cells.push(`"${n.replace(/"/g, '""')}"`); for(let i = 1; i < (c.colSpan || 1); i++) cells.push(""); }
+    lines.push(cells.join(","));
+  }
+  download(`${$("#repSel").value}_${S.from}_${S.to}.csv`, "\ufeff" + lines.join("\r\n"), "text/csv");
+}
+function download(name, content, type){
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([content], {type})); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+/* ================================================================= journal */
+function journalLines(){
+  const dr = {}, cr = {}, detail = [];
+  for(const a of activeAssets()){
+    const c = computeBook(a);
+    const amt = r2(c.diff);
+    detail.push({a, c, amt});
+    if(amt <= 0) continue;
+    dr[a.depLedger] = r2((dr[a.depLedger] || 0) + amt);
+    const cl = a.accDepLedger || a.name;
+    cr[cl] = r2((cr[cl] || 0) + amt);
+  }
+  return {lines:[...Object.entries(dr).map(([ledger, v]) => ({ledger, dr:v, cr:0})), ...Object.entries(cr).map(([ledger, v]) => ({ledger, dr:0, cr:v}))], detail};
+}
+function renderJournal(){
+  const out = $("#journalOut");
+  if(!S){ out.innerHTML = `<p class="muted">No data loaded.</p>`; return; }
+  const blk = blocking();
+  if(blk.length){ out.innerHTML = `<div class="banner warn"><b>Journal locked:</b> tag the depreciation ledger for ${blk.length} asset(s) first. <span class="spacer"></span><button class="primary" onclick="openTagModal()">Tag ledgers now</button></div>`; return; }
+  const {lines, detail} = journalLines();
+  const tdr = lines.reduce((s, l) => s + l.dr, 0);
+  const excess = detail.filter(d => d.amt < 0);
+  const missingLedger = S.ledgers.length ? lines.filter(l => !ledgerInfo(l.ledger)).map(l => l.ledger) : [];
+  out.innerHTML = `<h2 style="margin:0 0 4px;font-size:16px">Depreciation journal - ${esc(S.company)}</h2>
+    <p class="small muted">Amount = depreciation computed for ${dmy(S.from)} to ${dmy(S.to)} less depreciation already booked in Tally in this period.</p>
+    <div class="grid2" style="margin-bottom:10px">
+      <label class="field">Voucher date <input type="date" id="jDate" value="${S.to}"></label>
+      <label class="field" style="grid-column:span 2">Narration <input id="jNarr" value="Being depreciation for the period ${dmy(S.from)} to ${dmy(S.to)} as per Companies Act, 2013"></label>
+    </div>
+    ${tbl([{t:"Ledger"},{t:"Debit",n:1},{t:"Credit",n:1}], [...lines.map(l => `<tr><td>${l.dr ? "Dr " : "&nbsp;&nbsp;&nbsp;&nbsp;Cr "}${esc(l.ledger)}</td>${td(l.dr, 1)}${td(l.cr, 1)}</tr>`),
+       `<tr class="tot"><td>Total</td>${td(tdr, 1)}${td(tdr, 1)}</tr>`])}
+    ${missingLedger.length ? `<div class="banner bad" style="margin-top:10px">These ledgers do not exist in Tally: <b>${missingLedger.map(esc).join(", ")}</b>. Tag the correct credit ledger (Edit / Correct › Credit ledger) or create them in Tally before posting.</div>` : ""}
+    ${excess.length ? `<div class="banner warn" style="margin-top:10px">Excess depreciation already booked (not reversed automatically): ${excess.map(d => `${esc(d.a.name)} ${fmt(-d.amt)}`).join("; ")}</div>` : ""}
+    <div class="toolbar" style="margin-top:12px">
+      <button onclick="downloadJournalXml()" ${tdr ? "" : "disabled"}>Download Tally import XML</button>
+      <button class="primary" onclick="postJournal()" ${tdr && TALLY.connected && S.source !== "manual" && S.tallyCompany && !missingLedger.length ? "" : "disabled"}>Post journal to Tally…</button>
+      ${S.source === "manual" || !TALLY.connected ? `<span class="small muted">Posting needs a live Tally connection - use the XML file and import it in Tally (Import › Transactions).</span>` : ""}
+    </div>
+    ${S.posted?.length ? `<h3 style="font-size:14px">Posting history</h3>${tbl([{t:"Posted at"},{t:"Voucher date"},{t:"Amount",n:1},{t:"Result"}], S.posted.map(p => `<tr><td>${esc(p.at)}</td><td>${dmy(p.date)}</td>${td(p.amount, 1)}<td>${esc(p.result)}</td></tr>`))}` : ""}`;
+}
+function journalXml(){
+  const {lines} = journalLines();
+  const e = s => esc(s);
+  const d = $("#jDate").value.replace(/-/g, "");
+  const le = lines.map(l => l.dr ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>${e(l.ledger)}</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-${l.dr.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>`
+                                   : `<ALLLEDGERENTRIES.LIST><LEDGERNAME>${e(l.ledger)}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${l.cr.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>`).join("\n");
+  return `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER><BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES><SVCURRENTCOMPANY>${e(tallyName())}</SVCURRENTCOMPANY></STATICVARIABLES></REQUESTDESC><REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">
+<VOUCHER VCHTYPE="Journal" ACTION="Create"><DATE>${d}</DATE><EFFECTIVEDATE>${d}</EFFECTIVEDATE><VOUCHERTYPENAME>Journal</VOUCHERTYPENAME><NARRATION>${e($("#jNarr").value)}</NARRATION>
+${le}
+</VOUCHER></TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`;
+}
+function downloadJournalXml(){ download(`depreciation_journal_${S.to}.xml`, journalXml(), "text/xml"); }
+async function postJournal(){
+  const {lines} = journalLines();
+  const tot = lines.reduce((s, l) => s + l.dr, 0);
+  if(!S.tallyCompany) return alert(`"${S.company}" is not open in TallyPrime. Open it in Tally and click Check Tally.`);
+  if(!confirm(`Create a Journal voucher in Tally Cloud? It goes to Tally with the sync (when sync to Tally is on).\n\nCompany: ${tallyName()}\nDate: ${dmy($("#jDate").value)}\nTotal: ₹ ${fmt(tot)}\n\n` + lines.map(l => `${l.dr ? "Dr" : "  Cr"} ${l.ledger}  ${fmt(l.dr || l.cr)}`).join("\n") + "\n\nThis writes to your books.")) return;
+  try{
+    const r = await api("/api/post-journal", {company:tallyName(), date:$("#jDate").value, narration:$("#jNarr").value, lines});
+    const ok = +r.CREATED > 0 && +r.ERRORS === 0;
+    const msg = ok ? `Created Journal ${r.voucher_number || ""} (${r.status}, sync ${r.sync_status})` : `Not created: ${r.lineErrors.join("; ")}`;
+    S.posted = S.posted || []; S.posted.push({at:new Date().toLocaleString("en-IN"), date:$("#jDate").value, amount:tot, result:msg});
+    alert(msg + (ok ? "\n\nClick Fetch from books again so 'Booked' shows this entry." : ""));
+    changed();
+  } catch(e){ alert("Posting failed: " + e.message); }
+}
+
+/* ================================================================ settings */
+async function renderSettings(){
+  const out = $("#settingsOut");
+  let s = {};
+  let u = {users:[]};
+  try{ s = (await api("/api/status?timeout=3", null, 10000)).settings || {}; } catch(e){}
+  try{ u = await api("/api/users"); } catch(e){}
+  out.innerHTML = `<p class="small muted">Signed in to Tally Cloud as <b>${esc(u.me || "")}</b>. Users, passwords and the Tally connection are managed in Tally Cloud;
+      ledgers and vouchers come from its books (synced from Tally).</p>
+    ${S ? `<h3 style="font-size:15px">Calculation</h3>
+    <div class="grid2"><label class="field">Default method for new assets <select id="sM"><option ${S.settings.defaultMethod === "WDV" ? "selected" : ""}>WDV</option><option ${S.settings.defaultMethod === "SLM" ? "selected" : ""}>SLM</option></select></label>
+      <label class="field">Residual value % <input id="sR" type="number" step="0.1" value="${S.settings.residualPct}"></label>
+      <label class="field">&nbsp;<span><input type="checkbox" id="sRo" ${S.settings.roundOff ? "checked" : ""}> Round depreciation to nearest rupee</span></label>
+      <label class="field">&nbsp;<button onclick="saveCalc()">Save</button></label></div>` : ""}
+    <h3 style="font-size:15px">Rate master (Companies Act Schedule II / Income-tax)</h3>
+    ${tbl([{t:"Asset class"},{t:"Useful life (yrs)",n:1},{t:"SLM %",n:1},{t:"WDV %",n:1},{t:"IT rate %",n:1},{t:""}],
+      Object.entries(CLASS_MASTER).map(([k, c]) => `<tr><td>${esc(k)}</td><td class="n">${c.life || "-"}</td><td class="n">${c.slm}</td><td class="n">${c.wdv}</td><td class="n">${c.it}</td>
+        <td>${S ? `<button class="sm" onclick="reapplyClass('${esc(k).replace(/'/g, "\\'")}')">Re-apply to assets of this class</button>` : ""}</td></tr>`))}
+    <p class="small muted">Rates per asset can be overridden on the Assets tab. Check the rates against your auditor's policy - e.g. continuous-process plant, hire vehicles and intangibles may need specific useful lives.</p>`;
+}
+async function changePassword(){
+  try{ await api("/api/password", {current:$("#pCur").value, password:$("#pNew").value}); alert("Password changed."); renderSettings(); }
+  catch(e){ alert(e.message); }
+}
+async function addUser(){
+  try{ const r = await api("/api/users", {username:$("#uName").value, password:$("#uPass").value}); alert(`User '${r.user}' added.`); renderSettings(); }
+  catch(e){ alert(e.message); }
+}
+async function saveConn(){
+  await api("/api/settings", {tallyHost:$("#sH").value.trim(), tallyPort:+$("#sP").value, timeout:+$("#sT").value});
+  checkTally();
+}
+function saveCalc(){ S.settings.defaultMethod = $("#sM").value; S.settings.residualPct = num($("#sR").value); S.settings.roundOff = $("#sRo").checked; changed(); }
+function reapplyClass(k){ const list = S.assets.filter(a => a.klass === k); list.forEach(a => applyClass(a, k)); alert(`Rates re-applied to ${list.length} asset(s).`); changed(); }
+
+/* ==================================================================== wire */
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("on", x === b));
+  currentTab = b.dataset.tab;
+  for(const t of ["Assets","Reports","Journal","Settings"]) $("#page" + t).classList.toggle("hidden", t !== currentTab);
+  renderAll();
+});
+$("#btnCheck").onclick = checkTally;
+$("#btnFetch").onclick = fetchTally;
+$("#btnManual").onclick = startManual;
+$("#btnAdd").onclick = () => { if(!S) return startManual(); openEditor(null); };
+$("#btnTemplate").onclick = downloadTemplate;
+$("#btnImport").onclick = () => $("#csvFile").click();
+$("#csvFile").onchange = e => { const f = e.target.files[0]; if(!f) return; f.text().then(importCSV); e.target.value = ""; };
+$("#showExcluded").onchange = renderAssets;
+$("#repSel").onchange = renderReport;
+$("#btnXls").onclick = exportXls; $("#btnCsv").onclick = exportCsv; $("#btnPrint").onclick = () => window.print();
+$("#companySel").onchange = async e => { await selectCompany(e.target.value); changed(); };
+$("#companyTxt").onchange = e => { if(S){ S.company = e.target.value.trim(); changed(); } };
+for(const id of ["#fromDt", "#toDt"]) $(id).onchange = () => { if(!S) return; S.from = $("#fromDt").value; S.to = $("#toDt").value;
+  if(S.source === "tally" && S.fetchPeriod && (S.fetchPeriod.from !== S.from || S.fetchPeriod.to !== S.to)) setBanner(`Period changed - click <b>Fetch from Tally</b> to load vouchers for ${dmy(S.from)} to ${dmy(S.to)}.`, "warn");
+  renderAssets(); scheduleSave(); };
+$("#btnBulk").onclick = () => {
+  const ids = [...document.querySelectorAll(".selA:checked")].map(c => c.value);
+  if(!ids.length) return alert("Tick the assets to tag first.");
+  const k = $("#bulkClass").value, l = $("#bulkLedger").value.trim();
+  if(!k && !l) return alert("Choose a class and/or ledger to apply.");
+  for(const a of S.assets.filter(a => ids.includes(a.id))){ if(k) applyClass(a, k); if(l) a.depLedger = l; }
+  changed();
+};
+
+$("#btnHome").onclick = showHome;
+$("#btnLogout").onclick = () => { location.href = "/"; };
+
+/* =================================================================== login */
+let LOGIN_SHOWN = false;
+function showLogin(setup){
+  setBanner(`<b>Sign in to Tally Cloud first.</b> <a href="/">Open Tally Cloud</a>, sign in, then open Fixed assets again.`, "bad");
+}
+
+function boot(user){
+  $("#userInfo").textContent = "User: " + user;
+  renderAll();
+  showHome();
+  checkTally();
+}
+
+(async () => {
+  let a = null;
+  try{ a = await api("/api/auth"); } catch(e){ return showLogin(false); }
+  if(a.user) boot(a.user); else showLogin(a.setup);
+})();
+</script>
+</body>
+</html>

@@ -11,7 +11,9 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from app import __version__, audit
-from app.api import audit_log, companies, export, licence, licensing, masters, mis, reports, sync, system, users, vouchers
+from app.api import (
+    audit_log, companies, export, fixed_assets, licence, licensing, masters, mis, reports, sync, system, users, vouchers,
+)
 from app.core.config import settings
 from app.core.db import engine
 from app.services.accounting.vouchers import VoucherError
@@ -57,7 +59,8 @@ app = FastAPI(
 )
 
 API = "/api/v1"
-for module in (users, companies, masters, vouchers, reports, mis, export, sync, audit_log, system, licence, licensing):
+for module in (users, companies, masters, vouchers, reports, mis, export, fixed_assets, sync, audit_log, system, licence,
+               licensing):
     app.include_router(module.router, prefix=API)
 
 
@@ -97,4 +100,10 @@ def index():
     html = html.replace('/static/app.js"', f'/static/app.js?v={__version__}"').replace(
         '/static/app.css"', f'/static/app.css?v={__version__}"')
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/fixed-assets", include_in_schema=False)
+def fixed_assets_page():
+    """Fixed assets & depreciation (signed in with Tally Cloud's session; data from /api/v1/fixed-assets)."""
+    return HTMLResponse((STATIC / "fixed-assets.html").read_text(encoding="utf-8"), headers={"Cache-Control": "no-cache"})
 

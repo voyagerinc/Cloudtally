@@ -15,3 +15,7 @@ localdb/
 *.xlsx
 *.xls
 ~$*
+
+# Stand-alone Fixed Assets app: its saved company data are business files
+Fixedassets/data/
+Fixedassets/*.zip

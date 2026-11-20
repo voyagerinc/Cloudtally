@@ -124,7 +124,7 @@ function applyPerms() {
   $("#l-new").hidden = $("#ld-edit").hidden = !can("masters.write");
 }
 function tabAllowed(tab) { const b = document.querySelector(`#tabs button[data-tab="${tab}"]`); return !!b && !b.hidden; }
-function firstTab() { return [...document.querySelectorAll("#tabs button")].find((b) => !b.hidden)?.dataset.tab; }
+function firstTab() { return [...document.querySelectorAll("#tabs button")].find((b) => !b.hidden && !b.dataset.href)?.dataset.tab; }
 
 // ------------------------------------------------------------------ change password
 function askNewPassword(forced) {
@@ -222,7 +222,7 @@ function show(tab) {
   if (tab !== "dashboard") { clearTimeout(progressTimer); progressTimer = null; }
   renderers[tab] && renderers[tab]().catch((e) => alert(e.message));
 }
-document.querySelectorAll("#tabs button").forEach((b) => (b.onclick = () => show(b.dataset.tab)));
+document.querySelectorAll("#tabs button").forEach((b) => (b.onclick = () => (b.dataset.href ? window.open(b.dataset.href, "_blank") : show(b.dataset.tab))));
 
 async function loadMasters() {
   itemsCache = null;
