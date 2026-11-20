@@ -376,3 +376,33 @@ def test_a_public_tally_address_is_refused_with_a_message_not_a_server_error(adm
         r = api.post(path, headers=admin, json=body)
         assert r.status_code == 422, r.text
         assert "public internet address" in r.json()["detail"] and "9898" in r.json()["detail"]
+
+
+def test_system_admin_can_allow_a_public_tally_address_after_confirming(db, admin):
+    from fastapi.testclient import TestClient
+    from app.api.sync import _check_host
+    from app.main import app
+    api = TestClient(app)
+    s = api.get("/api/v1/admin/security", headers=admin).json()
+    assert s["allow_public_tally"] is False
+    r = api.put("/api/v1/admin/security", headers=admin, json={"allow_public_tally": True})
+    assert r.status_code == 422 and "ALLOW" in r.json()["detail"]          # must be confirmed
+    r = api.put("/api/v1/admin/security", headers=admin, json={"allow_public_tally": True, "confirm": "allow"})
+    assert r.status_code == 200 and r.json()["allow_public_tally"] is True
+    db.expire_all()
+    assert "public internet" in _check_host(db, "1.1.1.1", 9898)          # allowed, with a warning
+    assert _check_host(db, "192.168.1.20", 9000) is None                    # office network: no warning
+    api.put("/api/v1/admin/security", headers=admin, json={"allow_public_tally": False})
+    db.expire_all()
+    import pytest
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException):
+        _check_host(db, "1.1.1.1", 9898)
+
+
+def test_only_the_system_admin_changes_security(db):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    headers = make_user(db, "sec-clerk")
+    assert TestClient(app).put("/api/v1/admin/security", headers=headers,
+                               json={"allow_public_tally": True, "confirm": "ALLOW"}).status_code == 403

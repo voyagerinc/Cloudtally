@@ -185,7 +185,8 @@ async function discoverTally() {
   $("#td-msg").textContent = "Asking Tally for its open companies…"; $("#td-table").innerHTML = "";
   let r;
   try { r = await api("/import/tally/discover", { method: "POST", body: target }); } catch (err) { $("#td-msg").textContent = err.message; return; }
-  $("#td-msg").textContent = r.companies.length ? `${r.companies.length} compan${r.companies.length === 1 ? "y" : "ies"} open in Tally.` : "No company is open in Tally. Open one in Tally and list again.";
+  $("#td-msg").innerHTML = esc(r.companies.length ? `${r.companies.length} compan${r.companies.length === 1 ? "y" : "ies"} open in Tally.` : "No company is open in Tally. Open one in Tally and list again.")
+    + (r.warning ? `<br><span class="error">${esc(r.warning)}</span>` : "");
   table($("#td-table"), [
     { label: "Tally company", key: "name", wrap: true },
     { label: "Books from", key: "books_from" },
@@ -2455,7 +2456,33 @@ $("#svc-update").onclick = async (e) => {
   finally { btn.disabled = false; }
 };
 
+// System admin > Security: allow Tally on a public IP address (off by default; Tally's port has no password).
+async function securityView() {
+  const el = $("#sv-security");
+  const s = await api("/admin/security");
+  el.innerHTML = `<label class="row"><input type="checkbox" id="sec-public" ${s.allow_public_tally ? "checked" : ""}>
+      <b>Allow Tally on a public IP address</b></label>
+    <p class="small ${s.allow_public_tally ? "error" : "muted"}">${s.allow_public_tally
+      ? `Allowed${s.updated_by ? ` by ${esc(s.updated_by)} ${when(s.updated_at)}` : ""}. Tally's port has no password: anyone on the internet who finds
+         it can read and change those books. Allow only this server's address on the office router or firewall, or better, use a VPN or the Tally tunnel.`
+      : "Off: Tally Cloud connects only to Tally on the office network (e.g. 192.168.x.x), a VPN or the Tally tunnel. Tally's port has no password, so it must not be open to the internet."}</p>
+    ${s.public_connectors.length ? `<p class="small error">Companies linked to a public address: ${s.public_connectors.map((c) => esc(`${c.company} (${c.host}:${c.port})`)).join(", ")}</p>` : ""}
+    <span id="sec-msg" class="small"></span>`;
+  $("#sec-public").onchange = async (e) => {
+    const on = e.target.checked;
+    let confirm = null;
+    if (on) {
+      confirm = prompt("Tally's port has no password: anyone on the internet who finds it can read and change your books. "
+        + "Type ALLOW to let Tally Cloud connect to Tally on a public IP address.");
+      if (confirm === null) { e.target.checked = false; return; }
+    }
+    try { await api("/admin/security", { method: "PUT", body: { allow_public_tally: on, confirm } }); await securityView(); }
+    catch (err) { e.target.checked = !on; $("#sec-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; }
+  };
+}
+
 renderers.server = async () => {
+  securityView().catch((err) => ($("#sv-security").innerHTML = `<p class="error">${esc(err.message)}</p>`));
   const client = state.user?.license_mode === "client";
   $("#sv-client").hidden = !client; $("#sv-github").hidden = client;
   if (client) return clientUpdateView();

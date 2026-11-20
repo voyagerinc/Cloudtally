@@ -1,4 +1,4 @@
-from app.models.admin import Company, FinancialYear, User, UserCompanyAccess, UserSession
+from app.models.admin import AppSetting, Company, FinancialYear, User, UserCompanyAccess, UserSession
 from app.models.licensing import (
     Customer, DownloadEvent, Installation, License, LicenseEvent, LicenseState, SoftwareRelease, UserInvite,
 )
@@ -22,5 +22,6 @@ __all__ = [
     "FinancialYear", "Godown", "ImportBatch", "Ledger", "LedgerGroup", "OutboxStatus", "ReconciliationRun",
     "StockGroup", "StockItem", "SyncAttempt", "SyncConflict", "SyncInbox", "SyncOutbox", "SyncProgress", "SyncStatus",
     "TallyConnector", "TallyMapping", "TaxCode", "Unit", "User", "UserCompanyAccess", "UserSession", "Voucher",
+    "AppSetting",
     "VoucherEntry", "VoucherInventoryLine", "VoucherStatus", "VoucherType", "VoucherVersion",
 ]

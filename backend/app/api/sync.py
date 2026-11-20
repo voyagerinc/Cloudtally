@@ -9,7 +9,7 @@ from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from app import audit
@@ -19,7 +19,7 @@ from app.core.db import SessionLocal
 from app.core.security import Perm
 from app.licensing import enforce as licence
 from app.models import (
-    Company, ImportBatch, OutboxStatus, ReconciliationRun, SyncAttempt, SyncConflict, SyncInbox, SyncOutbox,
+    AppSetting, Company, ImportBatch, OutboxStatus, ReconciliationRun, SyncAttempt, SyncConflict, SyncInbox, SyncOutbox,
     SyncProgress, TallyConnector, TallyMapping, Voucher, VoucherVersion,
 )
 from app.models.base import utcnow
@@ -52,17 +52,6 @@ class ConnectorIn(BaseModel):
     # What to do with software changes queued while the sync was one-way, when it becomes bidirectional.
     queued_changes: Literal["send", "discard"] | None = None
 
-    @field_validator("host")
-    @classmethod
-    def _private_only(cls, host: str) -> str:
-        # PRD §6.2: never point the connector at a publicly exposed Tally listener.
-        try:
-            ip = ipaddress.ip_address(host)
-        except ValueError:
-            return host
-        if ip.is_global:
-            raise ValueError(PUBLIC_TALLY.format(host=host, port="Tally's"))
-        return host
 
 
 PUBLIC_TALLY = ("Tally host {host} is a public internet address. Tally's port has no password: anyone on the internet "
@@ -72,12 +61,28 @@ PUBLIC_TALLY = ("Tally host {host} is a public internet address. Tally's port ha
                 "on the office router.")
 
 
-def _check_host(host: str, port: int) -> None:
-    """The private-network rule as a clear message (not a server error)."""
+def is_public(host: str) -> bool:
     try:
-        ConnectorIn(host=host, tally_company_name="-")
-    except ValidationError:
-        raise HTTPException(422, PUBLIC_TALLY.format(host=host, port=port))
+        return ipaddress.ip_address(host.strip()).is_global
+    except ValueError:      # a name (e.g. tally-pc, localhost): resolved on the private network
+        return False
+
+
+def public_tally_allowed(db) -> bool:
+    row = db.get(AppSetting, "allow_public_tally")
+    return bool(row and row.value)
+
+
+def _check_host(db, host: str, port: int) -> str | None:
+    """PRD §6.2: never point the connector at a publicly exposed Tally listener, unless the system admin
+    allowed it (System admin > Security). Returns the warning to show when it is allowed."""
+    if not is_public(host):
+        return None
+    if not public_tally_allowed(db):
+        raise HTTPException(422, PUBLIC_TALLY.format(host=host, port=port)
+                            + " (A system admin can allow public addresses under System admin > Security.)")
+    return (f"Tally at {host}:{port} is on the public internet with no password; public addresses are allowed "
+            "by the system admin. Close the port to everyone but this server, or use a VPN or the tunnel.")
 
 
 WAITING = (OutboxStatus.PENDING, OutboxStatus.FAILED, OutboxStatus.PAUSED)
@@ -122,6 +127,7 @@ def get_connector(company_id: uuid.UUID, db: DB, user: CurrentUser):
 @router.put("/sync/connectors/{company_id}")
 def put_connector(company_id: uuid.UUID, body: ConnectorIn, db: DB, user: CurrentUser):
     authorize(db, user, company_id, Perm.SYNC_MANAGE)
+    _check_host(db, body.host, body.port)
     conn = db.get(TallyConnector, company_id)
     before = _conn_out(conn) if conn else None
     if conn is None:
@@ -600,7 +606,7 @@ def discover(body: DiscoverIn, db: DB, user: CurrentUser):
     """List companies open in a Tally instance (read-only), marking those already linked to an ERP company."""
     if not user.is_superadmin:
         raise HTTPException(403, "Only a super admin can probe Tally servers")
-    _check_host(body.host, body.port)   # same private-network rule
+    warning = _check_host(db, body.host, body.port)
     from app.connectors.tally import TallyClient
     with TallyClient(body.host, body.port, "") as client:
         try:
@@ -611,7 +617,7 @@ def discover(body: DiscoverIn, db: DB, user: CurrentUser):
               if c.tally_company_guid}
     for c in companies:
         c["erp_company_id"] = linked.get(c["guid"])
-    return {"server": server, "companies": companies}
+    return {"server": server, "companies": companies, "warning": warning}
 
 
 class LinkIn(BaseModel):
@@ -627,7 +633,7 @@ def link_company(body: LinkIn, background: BackgroundTasks, db: DB, user: Curren
     """Create an ERP company for a Tally company in shadow mode (inbound only; outbound off)."""
     if not user.is_superadmin:
         raise HTTPException(403, "Only a super admin can create companies")
-    _check_host(body.host, body.port)
+    _check_host(db, body.host, body.port)
     from app.connectors.tally import TallyClient
     with TallyClient(body.host, body.port, body.tally_company_name) as client:
         try:
@@ -654,3 +660,40 @@ def link_company(body: LinkIn, background: BackgroundTasks, db: DB, user: Curren
         background.add_task(_run_import, company.id, ImportIn(company_id=company.id), actor_of(user))
     return {"company_id": company.id, "books_from": books_from, "tally_company_guid": found["guid"],
             "mode": "shadow (inbound only) – enable outbound after reconciliation sign-off"}
+
+
+# ------------------------------------------------------------------ installation settings (system admin)
+
+class SecurityIn(BaseModel):
+    allow_public_tally: bool
+    confirm: str | None = None      # turning it on: the admin types ALLOW
+
+
+@router.get("/admin/security")
+def get_security(db: DB, user: CurrentUser):
+    if not user.is_superadmin:
+        raise HTTPException(403, "Only the system admin can see this")
+    row = db.get(AppSetting, "allow_public_tally")
+    public = [{"company": c.tally_company_name, "host": c.host, "port": c.port}
+              for c in db.scalars(select(TallyConnector)) if is_public(c.host)]
+    return {"allow_public_tally": bool(row and row.value), "updated_by": row.updated_by if row else None,
+            "updated_at": row.updated_at if row else None, "public_connectors": public}
+
+
+@router.put("/admin/security")
+def put_security(body: SecurityIn, db: DB, user: CurrentUser):
+    if not user.is_superadmin:
+        raise HTTPException(403, "Only the system admin can change this")
+    if body.allow_public_tally and (body.confirm or "").strip().upper() != "ALLOW":
+        raise HTTPException(422, "Type ALLOW to confirm: Tally on a public IP can be read and changed by anyone "
+                                 "who finds its port")
+    row = db.get(AppSetting, "allow_public_tally")
+    before = bool(row and row.value)
+    if row is None:
+        row = AppSetting(key="allow_public_tally")
+        db.add(row)
+    row.value, row.updated_by, row.updated_at = body.allow_public_tally, user.username, utcnow()
+    audit.record(db, actor_of(user), "settings.allow_public_tally", "settings", "allow_public_tally",
+                 before={"allow_public_tally": before}, after={"allow_public_tally": body.allow_public_tally})
+    db.commit()
+    return get_security(db, user)

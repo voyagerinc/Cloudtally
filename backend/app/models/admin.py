@@ -87,3 +87,13 @@ class UserSession(IdMixin, Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     client: Mapped[str | None] = mapped_column(String(200))
+
+
+class AppSetting(Base):
+    """Settings of this whole installation, changed by its system admin (e.g. allow_public_tally)."""
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(60), primary_key=True)
+    value: Mapped[dict | list | bool | str | int | None] = mapped_column(JSON)
+    updated_by: Mapped[str | None] = mapped_column(String(100))
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
