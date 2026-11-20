@@ -58,6 +58,9 @@ try {
   Start-ScheduledTask -TaskName $task
   if (-not (Healthy)) { throw "Version $new did not start" }
   Write-Host "Updated to $new."
+  # start.bat runs this copy: keep it the new version's
+  $runPs = Join-Path $app "deploy\windows\run.ps1"
+  if (Test-Path $runPs) { Copy-Item $runPs (Join-Path $InstallDir "run.ps1") -Force }
 } catch {
   Write-Host "!! $($_.Exception.Message). Going back to $old."
   Stop-App

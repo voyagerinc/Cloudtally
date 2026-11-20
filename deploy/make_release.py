@@ -10,7 +10,7 @@ the last release, and a package whose VERSION file says otherwise.
 
 The package (dist/TallyCloud-X.Y.Z.zip):
     VERSION                       the version, checked by the portal and by the update script
-    install.cmd                   double-click (as administrator) for a first installation
+    run.bat                       double-click: installs the first time, later just starts it
     license_public_key.txt        the portal's public key (with --public-key), else fetched at install
     README.txt
     app/                          the code at tag vX.Y.Z
@@ -28,21 +28,26 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION_FILE = ROOT / "backend" / "app" / "__init__.py"
 PATTERN = re.compile(r'__version__ = "(\d+)\.(\d+)\.(\d+)"')
 
-INSTALL_CMD = """@echo off
-rem Installs Tally Cloud. Right-click this file and choose "Run as administrator".
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0app\\deploy\\windows\\install-server.ps1" %*
-pause
+# Same texts as backend/app/licensing/package.py (the portal's own build); raw strings keep the backslashes.
+RUN_BAT = r"""@echo off
+rem Tally Cloud. Double-click: the first time it installs Tally Cloud (Windows asks to allow it),
+rem later it just starts it and opens the browser. After installing, the "Tally Cloud" icon on the
+rem desktop (C:\TallyCloud\start.bat) does the same.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0app\deploy\windows\run.ps1" %*
 """
 
-README = """Tally Cloud {version}
+README = r"""Tally Cloud {version}
 
-First installation (Windows server or PC, next to Tally):
-  1. Unpack this zip, e.g. to C:\\TallyCloud-setup
-  2. Right-click install.cmd and choose "Run as administrator"
-  3. When the browser opens, enter your licence key and create the manager's user ID and password
-  Other users then open  http://<this computer's name>:8080  on the office network.
+Install and run (Windows server or PC, next to Tally):
+  1. Unpack this zip, e.g. to C:\TallyCloud-setup
+  2. Double-click run.bat and choose "Yes" when Windows asks to allow it.
+     The first time it installs everything (a few minutes) and opens Tally Cloud in the browser:
+     enter your licence key and create the manager's user ID and password.
+  3. Next time: double-click "Tally Cloud" on the desktop (or C:\TallyCloud\start.bat, or run.bat again).
+     Tally Cloud also starts by itself with Windows.
+  Other users open  http://<this computer's name>:8080  on the office network.
 
-Updates: the manager opens Licence -> Download update -> Install update. Nothing to unpack by hand.
+Updates: the manager opens Licence -> Check for updates -> Install update. Nothing to unpack by hand.
 """
 
 
@@ -92,7 +97,7 @@ def main() -> None:
     target = out / f"TallyCloud-{version}.zip"
     with zipfile.ZipFile(io.BytesIO(code)) as src, zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("VERSION", version + "\n")
-        z.writestr("install.cmd", INSTALL_CMD.replace("\n", "\r\n"))
+        z.writestr("run.bat", RUN_BAT.replace("\n", "\r\n"))
         z.writestr("README.txt", README.format(version=version).replace("\n", "\r\n"))
         if args.public_key:
             z.writestr("license_public_key.txt", args.public_key.strip() + "\n")

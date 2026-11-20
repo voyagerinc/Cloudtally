@@ -1,7 +1,7 @@
 <#
   Installs Tally Cloud on a customer's Windows server or PC (next to Tally).
 
-  Run from an unpacked release package: right-click install.cmd -> Run as administrator.
+  Run from an unpacked release package: double-click run.bat (it asks for administrator rights itself).
   Optional: -InstallDir C:\TallyCloud -Port 8080 -LicenceServer https://tallycloud.voyager.co.in
 
   It installs Python 3.12 and PostgreSQL 16 with winget when they are missing, puts the app in
@@ -18,7 +18,7 @@ $ErrorActionPreference = "Stop"
 
 $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  throw "Run this as administrator: right-click install.cmd and choose 'Run as administrator'."
+  throw "Run this as administrator: double-click run.bat and choose 'Yes' when Windows asks."
 }
 $Package = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path   # <package>\app\deploy\windows -> <package>
 $Version = (Get-Content (Join-Path $Package "VERSION") -ErrorAction Stop | Select-Object -First 1).Trim()
@@ -38,14 +38,14 @@ function Winget-Try($id, $extra) {
 }
 function Winget-Install($id, $extra) {
   if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
-    throw "winget is missing. Install 'App Installer' from the Microsoft Store, or install $id by hand, then run this again."
+    throw "winget is missing. Install 'App Installer' from the Microsoft Store, or install $id by hand, then run run.bat again."
   }
   for ($try = 1; $try -le 3; $try++) {
     if (Winget-Try $id $extra) { return }
     Write-Host "    download or install failed (attempt $try of 3)" -ForegroundColor Yellow
     Start-Sleep -Seconds 10
   }
-  throw "Installing $id failed 3 times. Install it by hand, then run install.cmd again."
+  throw "Installing $id failed 3 times. Install it by hand, then run run.bat again."
 }
 
 # ------------------------------------------------------------------ Python 3.11+
@@ -110,7 +110,7 @@ function Install-Postgres($super) {
   }
   throw ("PostgreSQL could not be downloaded: the EnterpriseDB download server refused it. Install PostgreSQL " +
          "by hand from https://www.enterprisedb.com/downloads/postgres-postgresql-downloads (remember the password " +
-         "you give the 'postgres' user), then run install.cmd again. It finds that PostgreSQL and asks for the password.")
+         "you give the 'postgres' user), then run run.bat again. It finds that PostgreSQL and asks for the password.")
 }
 
 $superFile = Join-Path $secrets "postgres-superuser.txt"
@@ -120,7 +120,7 @@ if (-not $pg) {
   Set-Content -Path $superFile -Value $super -Encoding ASCII
   Install-Postgres $super
   $pg = Find-Postgres
-  if (-not $pg) { throw "PostgreSQL was installed but could not be found. Run install.cmd again." }
+  if (-not $pg) { throw "PostgreSQL was installed but could not be found. Run run.bat again." }
 }
 Write-Host "    PostgreSQL: $($pg.Name), port $($pg.Port)"
 function Sql($q) {
@@ -217,6 +217,22 @@ if (-not (Get-NetFirewallRule -DisplayName "Tally Cloud" -ErrorAction SilentlyCo
   New-NetFirewallRule -DisplayName "Tally Cloud" -Direction Inbound -Protocol TCP -LocalPort $Port -Profile Domain,Private -Action Allow | Out-Null
 }
 
+# start.bat in the installation folder and a "Tally Cloud" desktop shortcut: from now on they start it.
+Copy-Item (Join-Path $PSScriptRoot "run.ps1") (Join-Path $InstallDir "run.ps1") -Force
+Set-Content -Path (Join-Path $InstallDir "start.bat") -Encoding ASCII -Value @(
+  "@echo off",
+  "rem Starts Tally Cloud (if it is not running) and opens it in the browser.",
+  "powershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0run.ps1`" -InstallDir `"%~dp0.`""
+)
+try {
+  $desk = [Environment]::GetFolderPath("CommonDesktopDirectory")
+  $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $desk "Tally Cloud.lnk"))
+  $lnk.TargetPath = Join-Path $InstallDir "start.bat"
+  $lnk.WorkingDirectory = $InstallDir
+  $lnk.Description = "Start Tally Cloud and open it in the browser"
+  $lnk.Save()
+} catch { Write-Host "    (no desktop shortcut: $($_.Exception.Message))" -ForegroundColor Yellow }
+
 Write-Host "==> Waiting for Tally Cloud to start"
 $up = $false
 for ($i = 0; $i -lt 60 -and -not $up; $i++) {
@@ -229,4 +245,5 @@ Write-Host "Tally Cloud $Version is running." -ForegroundColor Green
 Write-Host "  This computer:      http://localhost:$Port"
 Write-Host "  Other office PCs:   http://$($env:COMPUTERNAME):$Port"
 Write-Host "The first time, enter your licence key and create the manager's user ID and password."
+Write-Host "Next time: double-click 'Tally Cloud' on the desktop, or $InstallDir\start.bat (it also starts with Windows)."
 Start-Process "http://localhost:$Port"

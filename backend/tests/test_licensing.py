@@ -504,7 +504,7 @@ def test_make_release_bumps_tags_and_stamps_the_version(tmp_path):
     with zipfile.ZipFile(tmp_path / "dist" / f"TallyCloud-{version}.zip") as z:
         assert z.read("VERSION").decode().strip() == version
         assert f'__version__ = "{version}"' in z.read("app/backend/app/__init__.py").decode()
-        assert "install.cmd" in z.namelist() and "app/deploy/windows/install-server.ps1" in z.namelist()
+        assert "run.bat" in z.namelist() and "app/deploy/windows/run.ps1" in z.namelist() and "app/deploy/windows/install-server.ps1" in z.namelist()
     tags = subprocess.run(["git", "-C", str(clone), "tag", "--list", f"v{version}"], capture_output=True, text=True).stdout
     assert tags.strip() == f"v{version}"
     # Changed code without a new version is refused.
@@ -558,7 +558,10 @@ def test_portal_publishes_its_own_installer_for_customers(db, admin, portal, tmp
     with zipfile.ZipFile(io.BytesIO(package.build("2.3.4", root, public_key="PUB"))) as z:
         names = set(z.namelist())
         assert z.read("VERSION").decode().strip() == "2.3.4" and z.read("license_public_key.txt").decode().strip() == "PUB"
-    assert names == {"VERSION", "install.cmd", "README.txt", "license_public_key.txt",
+        bat = z.read("run.bat").decode()       # one file: installs the first time, later starts it
+        assert '"%~dp0app\\deploy\\windows\\run.ps1"' in bat and "\r\n" in bat and "\r\r" not in bat
+        assert "run.bat" in z.read("README.txt").decode() and "start.bat" in z.read("README.txt").decode()
+    assert names == {"VERSION", "run.bat", "README.txt", "license_public_key.txt",
                      "app/backend/app/main.py", "app/deploy/windows/install-server.ps1"}
 
     # A customer sees "no installer" until the portal publishes its own version; then it is there.

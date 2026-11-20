@@ -32,21 +32,26 @@ SKIP_FILES = {".env"}
 SKIP_SUFFIXES = (".pyc", ".pyo", ".docx", ".doc", ".xlsx", ".xlsm", ".xls", ".csv", ".pdf", ".log", ".pem", ".key",
                  ".zip", ".part")
 
-INSTALL_CMD = """@echo off\r
-rem Installs Tally Cloud. Right-click this file and choose "Run as administrator".\r
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0app\\deploy\\windows\\install-server.ps1" %*\r
-pause\r
+# Raw strings (Windows paths keep their backslashes); written with Windows line ends.
+RUN_BAT = r"""@echo off
+rem Tally Cloud. Double-click: the first time it installs Tally Cloud (Windows asks to allow it),
+rem later it just starts it and opens the browser. After installing, the "Tally Cloud" icon on the
+rem desktop (C:\TallyCloud\start.bat) does the same.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0app\deploy\windows\run.ps1" %*
 """
 
-README = """Tally Cloud {version}\r
-\r
-First installation (Windows server or PC, next to Tally):\r
-  1. Unpack this zip, e.g. to C:\\TallyCloud-setup\r
-  2. Right-click install.cmd and choose "Run as administrator"\r
-  3. When the browser opens, enter your licence key and create the manager's user ID and password\r
-  Other users then open  http://<this computer's name>:8080  on the office network.\r
-\r
-Updates: the manager opens Licence -> Check for updates -> Install update.\r
+README = r"""Tally Cloud {version}
+
+Install and run (Windows server or PC, next to Tally):
+  1. Unpack this zip, e.g. to C:\TallyCloud-setup
+  2. Double-click run.bat and choose "Yes" when Windows asks to allow it.
+     The first time it installs everything (a few minutes) and opens Tally Cloud in the browser:
+     enter your licence key and create the manager's user ID and password.
+  3. Next time: double-click "Tally Cloud" on the desktop (or C:\TallyCloud\start.bat, or run.bat again).
+     Tally Cloud also starts by itself with Windows.
+  Other users open  http://<this computer's name>:8080  on the office network.
+
+Updates: the manager opens Licence -> Check for updates -> Install update. Nothing to unpack by hand.
 """
 
 
@@ -64,8 +69,8 @@ def build(version: str = __version__, root: Path = REPO, public_key: str | None 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("VERSION", version + "\n")
-        z.writestr("install.cmd", INSTALL_CMD)
-        z.writestr("README.txt", README.format(version=version))
+        z.writestr("run.bat", RUN_BAT.replace("\n", "\r\n"))
+        z.writestr("README.txt", README.format(version=version).replace("\n", "\r\n"))
         if public_key:
             z.writestr("license_public_key.txt", public_key + "\n")
         for path, rel in package_files(root):
