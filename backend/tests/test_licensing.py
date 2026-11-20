@@ -589,3 +589,31 @@ def test_installer_never_packs_business_files(tmp_path):
     (tmp_path / "localdb").mkdir()
     (tmp_path / "localdb" / "pg.conf").write_text("x")
     assert [rel for _, rel in package_files(tmp_path)] == ["run.bat"]
+
+
+def test_admins_see_the_key_and_a_new_activation_key_replaces_it(db, admin, portal):
+    cid = customer(admin)
+    lic = licence(admin, cid)
+    key = lic["license_key"]
+    assert lic["activation"]["label"] == "Not activated" and lic["key_viewable"]
+    # the super admin and the customer's own company admin can show the key again
+    assert api.get(f"{V1}/admin/licenses/{lic['id']}/key", headers=admin).json()["license_key"] == key
+    boss = company_admin(admin, cid, "acme-boss")
+    assert api.get(f"{V1}/portal/licenses/{lic['id']}/key", headers=boss).json()["license_key"] == key
+    other = company_admin(admin, customer(admin, "BETA", "Beta Ltd"), "beta-boss")
+    assert api.get(f"{V1}/portal/licenses/{lic['id']}/key", headers=other).status_code == 404   # not their licence
+    assert api.get(f"{V1}/admin/licenses/{lic['id']}/key", headers=boss).status_code == 403
+
+    assert activate(key).status_code == 200
+    out = api.get(f"{V1}/admin/customers/{cid}", headers=admin).json()["license_list"][0]
+    assert out["activation"]["activated"] and out["activation"]["label"] == "Activated"
+    assert "license_key" not in out                                   # never in the lists, only on Show key
+
+    # reactivation: a new key; the old one stops working and the server must activate again
+    r = api.post(f"{V1}/admin/licenses/{lic['id']}/action", headers=admin,
+                 json={"action": "new_activation_key", "reason": "server replaced"}).json()
+    new = r["license_key"]
+    assert new != key and r["released"] == 1 and r["activation"]["label"] == "Not activated"
+    assert activate(key, "inst-0000000000000009").status_code != 200
+    assert api.get(f"{V1}/portal/licenses/{lic['id']}/key", headers=boss).json()["license_key"] == new
+    assert activate(new, "inst-0000000000000009").status_code == 200

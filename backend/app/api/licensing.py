@@ -27,7 +27,8 @@ from app.core.config import settings
 from app.core.security import check_password_rules, hash_key, hash_password
 from app.licensing import service
 from app.licensing.core import (
-    MODULES, effective_status, hash_license_key, new_license_key, sign_bytes, version_allowed, version_tuple,
+    MODULES, decrypt_key, effective_status, encrypt_key, hash_license_key, new_license_key, sign_bytes, version_allowed,
+    version_tuple,
 )
 from app.licensing.enforce import customer_entitlement, live_users
 from app.models import (
@@ -273,7 +274,12 @@ def _license_out(db, lic: License, *, admin: bool = False) -> dict:
             "product_version": i.product_version, "status": i.status, "activated_at": i.activated_at,
             "last_seen_at": i.last_seen_at, **({"last_ip": i.last_ip} if admin else {})} for i in lic.installations],
         "active_installations": sum(1 for i in lic.installations if i.status == "active"),
+        "key_viewable": bool(lic.key_encrypted),
     }
+    active = [i for i in lic.installations if i.status == "active"]
+    out["activation"] = ({"activated": True, "label": "Activated", "since": min(i.activated_at for i in active),
+                          "servers": [i.server_label or i.hostname or i.installation_id[:10] for i in active]}
+                         if active else {"activated": False, "label": "Not activated", "since": None, "servers": []})
     if admin:
         out.update(notes=lic.notes, created_by=lic.created_by, created_at=lic.created_at,
                    customer_id=lic.customer_id, customer=lic.customer.legal_name)
@@ -705,7 +711,7 @@ def _new_license(db, user: User, c: Customer, body: LicenseIn) -> tuple[License,
     data = body.model_dump(include=set(LicenseIn.model_fields) - {"plan", "starts_at", "expires_at"}, exclude_none=True)
     data.setdefault("modules", list(MODULES))
     lic = License(customer_id=c.id, plan=plan, starts_at=start, expires_at=expires, key_hash=hash_license_key(key),
-                  key_hint=key[-4:], status="pending", created_by=user.username, **data)
+                  key_hint=key[-4:], key_encrypted=encrypt_key(key), status="pending", created_by=user.username, **data)
     db.add(lic)
     db.flush()
     service.event(db, "license_create", lic=lic, actor=user.username, plan=plan,
@@ -724,7 +730,7 @@ def create_license(body: NewLicenseIn, db: DB, user: CurrentUser):
     db.commit()
     db.refresh(lic)
     return {**_license_out(db, lic, admin=True), "license_key": key,
-            "note": "The licence key is shown only now. Give it to the customer's company admin."}
+            "note": "Give this licence key to the customer's company admin. It can be shown again with Show key."}
 
 
 @router.patch("/admin/licenses/{license_id}")
@@ -749,7 +755,7 @@ def update_license(license_id: uuid.UUID, body: LicenseIn, db: DB, user: Current
 
 
 class LicenseActionIn(BaseModel):
-    action: Literal["activate", "suspend", "resume", "revoke", "cancel", "renew", "reissue_key"]
+    action: Literal["activate", "suspend", "resume", "revoke", "cancel", "renew", "reissue_key", "new_activation_key"]
     expires_at: date | None = None     # renew: the new expiry date (default: one more plan period)
     reason: str | None = None
 
@@ -762,7 +768,7 @@ def license_action(license_id: uuid.UUID, body: LicenseActionIn, db: DB, user: C
         raise HTTPException(404, "Licence not found")
     before = {"status": lic.status, "expires_at": lic.expires_at}
     extra = {}
-    if lic.status == "revoked" and body.action != "reissue_key":
+    if lic.status == "revoked" and body.action not in ("reissue_key", "new_activation_key"):
         raise HTTPException(409, "A revoked licence cannot be used again; create a new licence")
     if body.action in ("activate", "resume"):
         lic.status = "active"
@@ -782,12 +788,26 @@ def license_action(license_id: uuid.UUID, body: LicenseActionIn, db: DB, user: C
         lic.expires_at = body.expires_at or service.default_expiry(lic.plan, base + timedelta(days=1))
         if lic.status in ("suspended", "cancelled", "pending"):
             lic.status = "active"
-    elif body.action == "reissue_key":   # the old key stops working; activated servers keep working
+    elif body.action in ("reissue_key", "new_activation_key"):   # the old key stops working
+        if lic.status == "revoked":
+            raise HTTPException(409, "A revoked licence cannot be used again; create a new licence")
         key = new_license_key()
-        lic.key_hash, lic.key_hint = hash_license_key(key), key[-4:]
-        extra = {"license_key": key, "note": "The new licence key is shown only now. The old key no longer works."}
+        lic.key_hash, lic.key_hint, lic.key_encrypted = hash_license_key(key), key[-4:], encrypt_key(key)
+        released = 0
+        if body.action == "new_activation_key":   # reactivation: every server must activate again with the new key
+            for i in lic.installations:
+                if i.status == "active":
+                    i.status, i.deactivated_at = "deactivated", utcnow()
+                    released += 1
+        extra = {"license_key": key, "released": released,
+                 "note": ("New activation key. The old key no longer works"
+                          + (f" and {released} server(s) were deactivated: activate them again with this key."
+                             if released else "; activate the server with this key.")
+                          if body.action == "new_activation_key"
+                          else "New licence key. The old key no longer works; servers already activated keep working.")}
     service.event(db, f"license_{body.action}", lic=lic, actor=user.username, reason=body.reason,
-                  expires_at=lic.expires_at.isoformat() if lic.expires_at else None)
+                  expires_at=lic.expires_at.isoformat() if lic.expires_at else None,
+                  **({"released_servers": extra["released"]} if "released" in extra else {}))
     audit.record(db, actor_of(user), f"license.{body.action}", "license", lic.id, before=before,
                  after={"status": lic.status, "expires_at": lic.expires_at}, reason=body.reason)
     db.commit()
@@ -797,6 +817,36 @@ def license_action(license_id: uuid.UUID, body: LicenseActionIn, db: DB, user: C
                           f"{'ed' if body.action.endswith('w') else 'd'}."
                           + (f" It now runs until {lic.expires_at:%d %b %Y}." if body.action == "renew" else ""))
     return {**_license_out(db, lic, admin=True), **extra}
+
+
+def _key_out(db, user: User, lic: License) -> dict:
+    key = decrypt_key(lic.key_encrypted)
+    if key is None:
+        raise HTTPException(409, "This licence key was made before keys could be shown again. "
+                                 "Ask Voyager for a new activation key.")
+    service.event(db, "license_key_view", lic=lic, actor=user.username)
+    audit.record(db, actor_of(user), "license.key_view", "license", lic.id)
+    db.commit()
+    return {"license_key": key, "key_hint": f"…{lic.key_hint}", "activation": _license_out(db, lic)["activation"]}
+
+
+@router.get("/admin/licenses/{license_id}/key")
+def admin_license_key(license_id: uuid.UUID, db: DB, user: CurrentUser):
+    _superadmin(user)
+    lic = db.get(License, license_id)
+    if lic is None:
+        raise HTTPException(404, "Licence not found")
+    return _key_out(db, user, lic)
+
+
+@router.get("/portal/licenses/{license_id}/key")
+def portal_license_key(license_id: uuid.UUID, db: DB, user: CurrentUser):
+    """The customer's company admin sees their own licence key (to activate or reinstall a server)."""
+    customer = _my_customer(db, user)
+    lic = db.get(License, license_id)
+    if lic is None or lic.customer_id != customer.id:
+        raise HTTPException(404, "Licence not found")
+    return _key_out(db, user, lic)
 
 
 class InstallationActionIn(BaseModel):

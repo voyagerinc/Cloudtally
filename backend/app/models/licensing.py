@@ -37,6 +37,7 @@ class License(IdMixin, TimestampMixin, Base):
     product: Mapped[str] = mapped_column(String(40), default="tallycloud")
     key_hash: Mapped[str] = mapped_column(String(64), unique=True)      # the key itself is shown once
     key_hint: Mapped[str] = mapped_column(String(10))                   # last characters, to recognise it
+    key_encrypted: Mapped[str | None] = mapped_column(Text)             # so an admin can see it again (core.encrypt_key)
     plan: Mapped[str] = mapped_column(String(20))                       # trial | monthly | annual | perpetual
     # pending | active | suspended | revoked | cancelled ("expired" and "grace" follow from the dates)
     status: Mapped[str] = mapped_column(String(20), default="pending")

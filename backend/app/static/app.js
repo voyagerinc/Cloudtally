@@ -2524,10 +2524,19 @@ function licenceBox(l, admin) {
           : `<button type="button" class="secondary small" data-inst="${i.id}" data-act="unblock">Unblock</button>`}</td>` : ""}</tr>`).join("")}</tbody></table>`
     : `<p class="muted small">Not activated on any server yet.</p>`;
   const actions = admin ? `<div class="row">${[
-    ["renew", "Renew"], ["suspend", "Suspend"], ["resume", "Resume"], ["reissue_key", "New key"], ["cancel", "Cancel"], ["revoke", "Revoke"]]
+    ["renew", "Renew"], ["suspend", "Suspend"], ["resume", "Resume"], ["new_activation_key", "New activation key"],
+    ["reissue_key", "New key (servers keep working)"], ["cancel", "Cancel"], ["revoke", "Revoke"]]
     .map(([a, t]) => `<button type="button" class="secondary small ${a === "revoke" ? "danger" : ""}" data-lic="${l.id}" data-act="${a}">${t}</button>`).join("")}
     <button type="button" class="small" data-lic-edit="${l.id}">Change</button></div>` : "";
-  return `<div class="lic-box"><div class="row between"><h4>${esc(l.plan[0].toUpperCase() + l.plan.slice(1))} licence ${esc(l.key_hint)}</h4>${chip(l.effective_status)}</div>
+  const act = l.activation || { activated: l.active_installations > 0, label: l.active_installations ? "Activated" : "Not activated" };
+  const keyRow = `<div class="row small"><span class="muted">Licence key</span> <span class="keyline" id="lk-${l.id}">${esc(l.key_hint)}</span>
+    ${l.key_viewable ? `<button type="button" class="secondary small" data-showkey="${l.id}" data-admin="${admin ? 1 : 0}">Show key</button>`
+      : `<span class="muted">(made before keys could be shown again${admin ? ": use New activation key" : ": ask Voyager for a new activation key"})</span>`}
+    · <b class="${act.activated ? "okmsg" : "muted"}">${esc(act.label)}</b>${act.activated && act.since ? ` <span class="muted">since ${when(act.since)}${
+      act.servers && act.servers.length ? ` on ${esc(act.servers.join(", "))}` : ""}</span>` : ""}</div>`;
+  return `<div class="lic-box"><div class="row between"><h4>${esc(l.plan[0].toUpperCase() + l.plan.slice(1))} licence ${esc(l.key_hint)}</h4>
+    <span>${chip(act.activated ? "activated" : "not activated")} ${chip(l.effective_status)}</span></div>
+    ${keyRow}
     <div class="grid small">
       <div><span class="muted">Valid</span><br>${fmtDate(l.starts_at)} – ${l.expires_at ? fmtDate(l.expires_at) : "no end"} (${days})</div>
       <div><span class="muted">Users at the same time</span><br>${l.max_users}</div>
@@ -2539,6 +2548,19 @@ function licenceBox(l, admin) {
     <p class="small"><span class="muted">Modules:</span> ${l.modules.map((m) => esc(m.label)).join(", ") || "none"}</p>
     ${inst}${actions}</div>`;
 }
+
+document.addEventListener("click", async (e) => {   // Show key on a licence box (super admin or the customer's admin)
+  const b = e.target.closest("[data-showkey]");
+  if (!b) return;
+  e.preventDefault();
+  try {
+    if (b.dataset.key) { await navigator.clipboard.writeText(b.dataset.key); b.textContent = "Copied"; return; }
+    const r = await api(b.dataset.admin === "1" ? `/admin/licenses/${b.dataset.showkey}/key` : `/portal/licenses/${b.dataset.showkey}/key`);
+    const el = document.getElementById(`lk-${b.dataset.showkey}`);
+    if (el) el.textContent = r.license_key;
+    b.dataset.key = r.license_key; b.textContent = "Copy";
+  } catch (err) { alert(err.message); }
+});
 
 // ------------------------------------------------------------------ licence portal: super admin
 let custCache = [];
@@ -2597,7 +2619,7 @@ $("#ncf").onsubmit = async (e) => {
     $("#newcust-dlg").close();
     await renderers.customers();
     await openCustomer(c.id);
-    $("#cd-key").innerHTML = `<div class="lic-box"><p><b>Licence key</b> (shown only now): give it to ${esc(c.admin_username)}.
+    $("#cd-key").innerHTML = `<div class="lic-box"><p><b>Licence key</b> (Show key on the licence brings it back later): give it to ${esc(c.admin_username)}.
       They enter it when installing the software.</p><div class="keyline">${esc(c.license_key)}</div></div>`;
     showLink(c, c.admin_username);
   } catch (err) { $("#ncf-msg").textContent = err.message; } finally { btn.disabled = false; }
@@ -2687,8 +2709,14 @@ function wireCustomer(c) {
     const a = b.dataset.act, body = { action: a };
     const ask = { suspend: "Suspend this licence? Its servers become read-only at their next check-in.",
       revoke: "Revoke this licence for good? Its servers are released and it cannot be used again.",
-      cancel: "Cancel this licence?", reissue_key: "Make a new licence key? The old key stops working; servers already activated keep working." }[a];
+      cancel: "Cancel this licence?", reissue_key: "Make a new licence key? The old key stops working; servers already activated keep working.",
+      new_activation_key: "Release a new activation key? The old key stops working and every server activated with it is deactivated: it must be activated again with the new key." }[a];
     if (ask && !confirm(ask)) return;
+    if (a === "new_activation_key") {
+      const why = prompt("Reason for the new activation key (e.g. server replaced, reinstalled):", "");
+      if (why === null) return;
+      body.reason = why;
+    }
     if (a === "renew") {
       const until = prompt("Renew until (YYYY-MM-DD). Leave empty for one more plan period.", "");
       if (until === null) return;

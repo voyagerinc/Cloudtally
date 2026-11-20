@@ -126,6 +126,31 @@ def _private_key() -> Ed25519PrivateKey:
         return serialization.load_pem_private_key(f.read(), password=None)
 
 
+def _vault():
+    """Encrypts licence keys at rest so an admin can see a key again. The secret is derived from the
+    portal's signing key, which never leaves the licence server."""
+    from cryptography.fernet import Fernet
+    raw = _private_key().private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+                                       serialization.NoEncryption())
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(b"tallycloud-licence-key-vault:" + raw).digest()))
+
+
+def encrypt_key(key: str) -> str | None:
+    try:
+        return _vault().encrypt(key.encode()).decode()
+    except RuntimeError:    # no signing key (e.g. a client installation): keep only the hash
+        return None
+
+
+def decrypt_key(token: str | None) -> str | None:
+    if not token:
+        return None
+    try:
+        return _vault().decrypt(token.encode()).decode()
+    except Exception:       # another signing key, or damaged
+        return None
+
+
 def public_key_b64() -> str:
     pub = _private_key().public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     return base64.b64encode(pub).decode()
