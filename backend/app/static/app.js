@@ -492,6 +492,7 @@ async function openVoucher(id) {
       <td>${e.bills.map((b) => esc(`${b.type} ${b.name || ""}`)).join(", ")}</td><td>${e.bank.map((b) => esc(`${b.transaction_type || ""} ${b.instrument_no || ""}`)).join(", ")}</td></tr>`).join("")}
     </tbody></table>
     ${d.inventory.length ? inventoryTable(d.inventory, v.item_groups || {}) : ""}
+    ${statutoryHtml(d.statutory || {})}
     <p class="small muted">${v.tally ? `Tally: MasterID ${esc(v.tally.master_id)} · AlterID ${esc(v.tally.alter_id)} · GUID ${esc(v.tally.guid)} · last sync ${when(v.tally.last_synced_at)}
       ${v.tally.last_error ? `<br><span class="error">${esc(v.tally.error_code)}: ${esc(v.tally.last_error)}</span>` : ""}` : "Not yet in Tally"}</p>
     <div class="row">${!["cancelled", "deleted"].includes(v.status) ? `<button data-edit>Edit</button>` : ""}
@@ -517,6 +518,18 @@ async function openVoucher(id) {
     const box = $("#vhist"); box.hidden = false; box.innerHTML = await historyHtml(id);
   };
   el.scrollIntoView({ behavior: "smooth" });
+}
+
+// E-invoice and e-way bill details of a voucher, as read from Tally.
+function statutoryHtml(s) {
+  const part = (title, rows) => (rows.some(([, v]) => v) ? `<div><b>${title}</b> ${rows.filter(([, v]) => v)
+    .map(([k, v]) => `<span class="muted">${k}</span> ${esc(v)}`).join(" · ")}</div>` : "");
+  const html = part("E-invoice:", [["IRN", s.irn ? `${s.irn.slice(0, 20)}…` : ""], ["Ack no.", s.ack_no], ["Ack date", s.ack_date]])
+    + part("E-way bill:", [["No.", s.eway_bill_no], ["Date", s.eway_bill_date], ["Valid upto", s.eway_valid_upto],
+      ["Status", s.eway_cancelled ? "Cancelled" : ""], ["From", s.eway_from_place || s.eway_from_state], ["To", s.eway_to_place || s.eway_to_state],
+      ["PIN", s.eway_to_pincode], ["Transporter", s.transporter], ["Transporter ID", s.transporter_id], ["Vehicle", s.vehicle_no],
+      ["Mode", s.transport_mode], ["Distance", s.distance_km ? `${s.distance_km} km` : ""]]);
+  return html ? `<div class="small lic-box">${html}</div>` : "";
 }
 
 // ------------------------------------------------------------------ voucher entry (keyboard first)
@@ -935,6 +948,8 @@ function reportUrl(fmt) {
   if (name === "outstanding-payable") { path = "outstanding"; p.set("kind", "payable"); }
   if (name.startsWith("register-")) { path = "register"; p.set("base_type", name.split("-")[1]); }
   if (["balance-sheet", "outstanding"].includes(path)) { if (t) p.set("as_of", t); }
+  if (path === "outstanding") { p.set("ageing", ageingSetting().periods); p.set("age_by", ageingSetting().by); }
+  if (path === "hsn-summary") p.set("side", gstChoice.hsnSide);
   else { if (f) p.set("from_date", f); if (t) p.set("to_date", t); }
   if (name === "stock-journal" || name.startsWith("material-transfer-wip") || name === "wo-manufacturing") {
     const f2 = analysisParams();
@@ -1653,6 +1668,8 @@ renderers.reports = async () => {
     "mis-finance-sheet": misSheetView, "mis-pl": misPlView, "mis-expense": misExpenseView, "mis-exp-breakup": (el) => misBreakupView(el),
     "mis-deferred": misDeferredView,
     "fifo-costing": fifoView,
+    gstr1: (el) => gstrView(el, "gstr1"), gstr2: (el) => gstrView(el, "gstr2"), "hsn-summary": hsnView,
+    einvoice: einvoiceView, "eway-bill": ewayView,
   };
   await drillTo(label, roots[name] || ((el) => registerView(el, name.split("-")[1])));
 };
@@ -1755,21 +1772,180 @@ async function stockItemView(el, itemId) {
   ], [...months.values()], { title: "Month / movement" });
 }
 
+// Receivables / payables: Dr and Cr columns (never a minus sign) and ageing periods the user sets on the report.
+function ageingSetting() {
+  let v = null;
+  try { v = JSON.parse(localStorage.getItem("erp_ageing") || "null"); } catch (_) { v = null; }
+  return { periods: (v && v.periods) || "30,60,90", by: (v && v.by) || "bill" };
+}
+const drcr = (p) => (!p ? "" : `${rupees(Math.abs(p))} ${p > 0 ? "Dr" : "Cr"}`);
 async function outstandingView(el, kind) {
-  const r = await api(`/reports/outstanding?${rParams({ kind }, { asOf: true })}`);
+  const set = ageingSetting();
+  const p = new URLSearchParams(rParams({ kind }, { asOf: true }));
+  p.set("ageing", set.periods); p.set("age_by", set.by);
+  const r = await api(`/reports/outstanding?${p}`);
+  const sign = kind === "receivable" ? 1 : -1;            // "pending" is positive for what is normally due
+  const books = (v) => paise(v) * sign;                    // back to the books' side: Dr positive, Cr negative
   const parties = new Map();
   for (const b of r.bills) {
-    if (!parties.has(b.party)) parties.set(b.party, { label: b.party, amount: 0, children: [
+    if (!parties.has(b.party)) parties.set(b.party, { label: b.party, dr: 0, cr: 0, by: {}, children: [
       { label: "Ledger statement ›", cls: "muted", open: () => openLedgerStatement(b.ledger_id, b.party) }] });
-    const p = parties.get(b.party);
-    p.amount += paise(b.pending);
-    p.children.push({ label: b.bill || "(on account)", amount: paise(b.pending), b, open: () => drillVoucher(b.voucher_id, `Bill ${b.bill}`) });
+    const pt = parties.get(b.party);
+    pt.dr += paise(b.dr); pt.cr += paise(b.cr);
+    pt.by[b.bucket] = (pt.by[b.bucket] || 0) + books(b.pending);
+    pt.children.push({ label: b.bill || "(on account)", dr: paise(b.dr), cr: paise(b.cr), by: { [b.bucket]: books(b.pending) }, b,
+      open: () => drillVoucher(b.voucher_id, `Bill ${b.bill}`) });
   }
-  el.innerHTML = `<div class="cards">${Object.entries(r.ageing).map(([k, v]) => `<div class="card"><div class="k">${k} days</div><div class="v">${money(v)}</div></div>`).join("")}
-    <div class="card"><div class="k">Total</div><div class="v">${money(r.total)}</div></div></div><div id="t"></div>`;
-  treeTable($("#t"), [{ label: "Date", get: (n) => (n.b ? esc(n.b.date) : "") }, { label: "Due", get: (n) => (n.b ? esc(n.b.due_date) : "") },
-    { label: "Pending", num: true, get: (n) => (n.amount == null ? "" : rupees(n.amount)) },
-    { label: "Overdue days", num: true, get: (n) => (n.b ? n.b.overdue_days : "") }], [...parties.values()].sort(byName), { title: "Party / bill" });
+  const net = books(r.total);
+  el.innerHTML = `<form id="age-form" class="row wrap filters">
+      <label>Ageing periods (days) <input id="age-periods" value="${esc(set.periods)}" size="18" title="Upper limit of each period, e.g. 15,30,60,90,180"></label>
+      <label>Age by <select id="age-by"><option value="bill" ${set.by === "bill" ? "selected" : ""}>Bill date</option>
+        <option value="due" ${set.by === "due" ? "selected" : ""}>Due date (days overdue)</option></select></label>
+      <button>Apply</button>
+      <span class="small muted">e.g. 30,60,90 gives 0-30, 31-60, 61-90 and Above 90 · 15,30,45,60 · 30,90,180,365</span></form>
+    <div class="cards">${r.periods.map((k) => `<div class="card"><div class="k">${esc(k)} days</div><div class="v">${drcr(books(r.ageing[k]))}</div></div>`).join("")}
+      <div class="card"><div class="k">Total (Dr ${money(r.total_dr)} · Cr ${money(r.total_cr)})</div><div class="v">${drcr(net)}</div></div></div><div id="t"></div>`;
+  $("#age-form").onsubmit = (e) => {
+    e.preventDefault();
+    const periods = $("#age-periods").value.split(/[\s,;]+/).map((x) => parseInt(x, 10)).filter((x) => x > 0);
+    if (!periods.length) return alert("Enter the ageing periods in days, e.g. 30,60,90");
+    const v = { periods: [...new Set(periods)].sort((a, b) => a - b).join(","), by: $("#age-by").value };
+    try { localStorage.setItem("erp_ageing", JSON.stringify(v)); } catch (_) { /* private window */ }
+    outstandingView(el, kind).catch((err) => alert(err.message));
+  };
+  const amt = (v) => (v ? rupees(v) : "");
+  treeTable($("#t"), [
+    { label: "Date", get: (n) => (n.b ? esc(n.b.date) : "") },
+    { label: "Due", get: (n) => (n.b ? esc(n.b.due_date) : "") },
+    { label: "Dr", num: true, get: (n) => (n.dr == null ? "" : amt(n.dr)) },
+    { label: "Cr", num: true, get: (n) => (n.cr == null ? "" : amt(n.cr)) },
+    ...r.periods.map((k) => ({ label: `${k} days`, num: true, get: (n) => (n.by ? drcr(n.by[k] || 0) : "") })),
+    { label: "Balance", num: true, get: (n) => (n.dr == null ? "" : drcr(n.dr - n.cr)) },
+    { label: "Overdue days", num: true, get: (n) => (n.b ? n.b.overdue_days : "") },
+  ], [...parties.values()].sort(byName), { title: "Party / bill" });
+}
+
+// ------------------------------------------------------------------ GST reports
+const gstChoice = { hsnSide: "outward", einvoice: "", eway: "" };
+const HEADS = [["igst", "IGST"], ["cgst", "CGST"], ["sgst", "SGST/UTGST"], ["cess", "Cess"]];
+// "Read e-invoice / e-way details from Tally": re-reads the period's invoices (read only), then redraws.
+function gstRefreshButton(el, redraw) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "secondary small"; b.textContent = "Read e-invoice / e-way details from Tally";
+  b.title = "Re-reads the IRN, acknowledgement and e-way bill of this period's invoices from Tally (nothing is written to Tally)";
+  b.onclick = async () => {
+    b.disabled = true; b.textContent = "Reading from Tally…";
+    try {
+      const r = await api(`/reports/gst/refresh-from-tally?${rParams()}`, { method: "POST" });
+      alert(`${r.read} of ${r.invoices} invoices read from Tally; ${r.updated} had new e-invoice / e-way details.`
+        + (r.skipped_count ? `
+
+Tally did not answer in time for ${r.skipped_count} batch(es): click again later (or when Tally is less busy) to read those.` : ""));
+      await redraw();
+    } catch (err) { alert(err.message); b.disabled = false; b.textContent = "Read e-invoice / e-way details from Tally"; }
+  };
+  return b;
+}
+async function gstrView(el, name) {
+  const r = await api(`/reports/${name}?${rParams()}`);
+  const inward = name === "gstr2";
+  const card = (k, v, sub) => `<div class="card"><div class="k">${esc(k)}</div><div class="v">${v}</div><div class="small muted">${sub || ""}</div></div>`;
+  el.innerHTML = `<p class="muted small">${esc(r.from)} to ${esc(r.to)} · ${inward ? "purchases and debit notes; input tax" : "sales and credit notes"} ·
+      notes are taken off the totals · click a section, then a document for its rate-wise lines</p>
+    <div class="cards">${r.sections.map((s) => card(`${s.section}: ${s.label}`, money(s.taxable),
+      `${s.count} document${s.count === 1 ? "" : "s"} · tax ${money(HEADS.reduce((t, [h]) => t + Number(s[h]), 0))} · value ${money(s.value)}`)).join("")}
+      ${card("Total taxable value", money(r.total.taxable), `IGST ${money(r.total.igst)} · CGST ${money(r.total.cgst)} · SGST ${money(r.total.sgst)}${Number(r.total.cess) ? ` · Cess ${money(r.total.cess)}` : ""}`)}</div>
+    <div id="gst-tools" class="row"></div><div id="t"></div>`;
+  $("#gst-tools").append(gstRefreshButton(el, () => gstrView(el, name)));
+  const docs = new Map(r.sections.map((s) => [s.section, { label: `${s.section} · ${s.label}`, s, children: [] }]));
+  for (const d of r.documents) {
+    docs.get(d.section).children.push({
+      label: `${d.voucher_type} ${d.number}`, d,
+      children: d.rates.length > 1 ? d.rates.map((x) => ({ label: `${Number(x.rate)}%`, x })) : undefined,
+      open: () => drillVoucher(d.id, `${d.voucher_type} ${d.number}`),
+    });
+  }
+  const val = (n, k) => (n.d ? money(n.d[k]) : n.s ? money(n.s[k]) : n.x ? (k === "value" ? "" : money(n.x[k])) : "");
+  treeTable($("#t"), [
+    { label: "Date", get: (n) => (n.d ? esc(n.d.date) : "") },
+    { label: inward ? "Supplier" : "Party", get: (n) => (n.d ? esc(n.d.party) : n.s ? `${n.s.count} docs` : "") },
+    { label: "GSTIN", get: (n) => (n.d ? esc(n.d.gstin) : "") },
+    { label: "Place of supply", get: (n) => (n.d ? esc(n.d.place_of_supply) : "") },
+    { label: "RCM", get: (n) => (n.d && n.d.reverse_charge === "Y" ? "Y" : "") },
+    { label: "Rate", num: true, get: (n) => (n.x ? `${Number(n.x.rate)}%` : n.d && n.d.rates.length === 1 ? `${Number(n.d.rates[0].rate)}%` : "") },
+    { label: "Invoice value", num: true, get: (n) => val(n, "value") },
+    { label: "Taxable", num: true, get: (n) => val(n, "taxable") },
+    ...HEADS.map(([h, label]) => ({ label, num: true, get: (n) => val(n, h) })),
+    ...(inward ? [] : [{ label: "IRN", get: (n) => (n.d ? (n.d.irn ? "yes" : "") : "") }]),
+  ], [...docs.values()], { title: "Section / document" });
+}
+async function hsnView(el) {
+  const p = new URLSearchParams(rParams()); p.set("side", gstChoice.hsnSide);
+  const r = await api(`/reports/hsn-summary?${p}`);
+  el.innerHTML = `<div class="row wrap filters"><label>Supplies <select id="hsn-side">
+      <option value="outward" ${gstChoice.hsnSide === "outward" ? "selected" : ""}>Outward (GSTR-1)</option>
+      <option value="inward" ${gstChoice.hsnSide === "inward" ? "selected" : ""}>Inward (purchases)</option></select></label>
+      <span class="muted small">${esc(r.from)} to ${esc(r.to)} · item lines by HSN, unit (UQC) and rate; notes taken off · B2B and B2C as on the portal</span></div>
+    ${r.items_without_hsn_count ? `<p class="error small">${r.items_without_hsn_count} item(s) sold without an HSN code in the item or its stock group:
+      ${r.items_without_hsn.slice(0, 15).map(esc).join(", ")}${r.items_without_hsn_count > 15 ? "…" : ""}. Set the HSN in Tally and sync.</p>` : ""}
+    <div id="t"></div>`;
+  $("#hsn-side").onchange = (e) => { gstChoice.hsnSide = e.target.value; hsnView(el).catch((err) => alert(err.message)); };
+  const rows = [...r.rows, { type: "Total", hsn: "", description: "", uqc: "", quantity: "", rate: "", items: "", ...r.total, _class: "total" }];
+  table($("#t"), [
+    { label: "Type", key: "type" }, { label: "HSN", key: "hsn" }, { label: "Description", key: "description", wrap: true },
+    { label: "UQC", key: "uqc" }, { label: "Quantity", num: true, key: "quantity" }, { label: "Rate %", num: true, get: (x) => (x.rate === "" ? "" : Number(x.rate)) },
+    { label: "Total value", num: true, get: (x) => money(x.value) }, { label: "Taxable value", num: true, get: (x) => money(x.taxable) },
+    ...HEADS.map(([h, label]) => ({ label, num: true, get: (x) => money(x[h]) })), { label: "Items", num: true, key: "items" },
+  ], rows);
+}
+async function einvoiceView(el) {
+  const r = await api(`/reports/einvoice?${rParams()}`);
+  const f = gstChoice.einvoice;
+  const rows = r.rows.filter((x) => !f || x.status === f);
+  el.innerHTML = `<p class="muted small">${esc(r.from)} to ${esc(r.to)} · an IRN is needed for B2B invoices, exports and notes to registered parties
+      (turnover above the e-invoicing limit) · click a row to open the voucher</p>
+    <div class="cards">${["Generated", "Missing", "Not applicable"].map((k) => `<div class="card click" data-st="${k}"><div class="k">${k}</div>
+      <div class="v ${k === "Missing" && r.counts[k] ? "error" : ""}">${r.counts[k] || 0}</div></div>`).join("")}</div>
+    <div class="row wrap"><label>Show <select id="ei-filter"><option value="">All</option>
+      ${["Generated", "Missing", "Not applicable"].map((k) => `<option ${k === f ? "selected" : ""}>${k}</option>`).join("")}</select></label>
+      <span id="gst-tools"></span></div><table id="t"></table>`;
+  $("#gst-tools").append(gstRefreshButton(el, () => einvoiceView(el)));
+  $("#ei-filter").onchange = (e) => { gstChoice.einvoice = e.target.value; einvoiceView(el); };
+  el.querySelectorAll("[data-st]").forEach((c) => (c.onclick = () => { gstChoice.einvoice = c.dataset.st; einvoiceView(el); }));
+  table($("#t"), [
+    { label: "Date", key: "date" }, { label: "Voucher", get: (x) => `${x.voucher_type} ${x.number}` }, { label: "Party", key: "party", wrap: true },
+    { label: "GSTIN", key: "gstin" }, { label: "Section", key: "section" }, { label: "Value", num: true, get: (x) => money(x.value) },
+    { label: "Status", html: (x) => `<span class="${x.status === "Missing" ? "error" : x.status === "Generated" ? "okmsg" : "muted"}">${esc(x.status)}</span>` },
+    { label: "Ack no.", key: "ack_no" }, { label: "Ack date", key: "ack_date" },
+    { label: "IRN", html: (x) => (x.irn ? `<span class="small" title="${esc(x.irn)}">${esc(x.irn.slice(0, 16))}…</span>` : "") },
+  ], rows, (x) => drillVoucher(x.id, `${x.voucher_type} ${x.number}`));
+}
+async function ewayView(el) {
+  const r = await api(`/reports/eway-bill?${rParams()}`);
+  const f = gstChoice.eway;
+  const rows = r.rows.filter((x) => !f || x.status === f);
+  el.innerHTML = `<p class="muted small">${esc(r.from)} to ${esc(r.to)} · every sales invoice, credit note and debit note, whatever its amount ·
+      click a row to open the voucher</p>
+    <div class="cards">${["Generated", "Not generated", "Cancelled"].map((k) => `<div class="card click" data-st="${k}"><div class="k">${k}</div>
+      <div class="v">${r.counts[k] || 0}</div></div>`).join("")}</div>
+    <div class="row wrap"><label>Show <select id="ew-filter"><option value="">All</option>
+      ${["Generated", "Not generated", "Cancelled"].map((k) => `<option ${k === f ? "selected" : ""}>${k}</option>`).join("")}</select></label>
+      <span id="gst-tools"></span></div>
+    ${r.counts["Not generated"] && !r.counts.Generated ? `<p class="small muted">No e-way bill numbers were found yet for this period: click
+      <b>Read e-invoice / e-way details from Tally</b> to read them from Tally.</p>` : ""}
+    <table id="t"></table>`;
+  $("#gst-tools").append(gstRefreshButton(el, () => ewayView(el)));
+  $("#ew-filter").onchange = (e) => { gstChoice.eway = e.target.value; ewayView(el); };
+  el.querySelectorAll("[data-st]").forEach((c) => (c.onclick = () => { gstChoice.eway = c.dataset.st; ewayView(el); }));
+  table($("#t"), [
+    { label: "Date", key: "date" }, { label: "Voucher", get: (x) => `${x.voucher_type} ${x.number}` },
+    { label: "Party", key: "party", wrap: true }, { label: "GSTIN", key: "gstin" }, { label: "Place of supply", key: "place_of_supply" },
+    { label: "Value", num: true, get: (x) => money(x.value) },
+    { label: "Status", html: (x) => `<span class="${x.status === "Generated" ? "okmsg" : x.status === "Cancelled" ? "error" : "muted"}">${esc(x.status)}</span>` },
+    { label: "E-way bill no.", key: "eway_no" }, { label: "Date", key: "eway_date" }, { label: "Valid upto", key: "valid_upto" },
+    { label: "From → to", key: "route", wrap: true }, { label: "Transporter", key: "transporter", wrap: true },
+    { label: "Vehicle", key: "vehicle_no" }, { label: "Km", num: true, key: "distance_km" },
+  ], rows, (x) => drillVoucher(x.id, `${x.voucher_type} ${x.number}`));
 }
 
 // Vouchers grouped by month (registers) or by day (day book), each opening the voucher
@@ -1840,6 +2016,7 @@ async function voucherView(el, id) {
     <p>${esc(d.narration || "")}</p>
     ${d.entries.length ? `<table id="v-e"></table>` : `<p class="muted">No ledger entries (stock-only voucher)</p>`}
     ${d.inventory.length ? inventoryTable(d.inventory, v.item_groups || {}) : ""}
+    ${statutoryHtml(d.statutory || {})}
     <div id="v-hist"><p class="muted">Loading history…</p></div>`;
   historyHtml(id).then((html) => { if ($("#v-hist")) $("#v-hist").innerHTML = html; }).catch(() => {});
   if ($("#v-xlsx")) $("#v-xlsx").onclick = () => download(`/vouchers/${id}/xlsx`, `${d.voucher_type} ${d.voucher_number}.xlsx`.replace(/[\\/:*?"<>|]/g, "-"));
@@ -2440,19 +2617,101 @@ async function clientUpdateView() {
   if (!l.activated) $("#svc-msg").textContent = "Activate this server on the Licence tab first.";
   else if (!l.can_install_updates) $("#svc-msg").textContent = "This server was not set up with the Windows installer, so updates are installed by hand.";
 }
-$("#svc-update").onclick = async (e) => {
-  const btn = e.target, msg = $("#svc-msg");
-  btn.disabled = true; msg.className = "muted"; msg.textContent = "Asking the licence server…";
+// "Update now" on a customer's server: a download bar (bytes from the licence server), then an installation bar
+// (the steps of update-server.ps1; while Tally Cloud restarts it cannot answer, so the bar moves on by itself).
+function updateBars(box) {
+  box.hidden = false;
+  box.innerHTML = `<div class="upd-row"><b>Download</b><div class="upd-bar" id="ub-dl"><div></div></div><span class="small num" id="ub-dl-p"></span>
+      <span class="small muted upd-step" id="ub-dl-t">Waiting…</span></div>
+    <div class="upd-row"><b>Installation</b><div class="upd-bar" id="ub-in"><div></div></div><span class="small num" id="ub-in-p"></span>
+      <span class="small muted upd-step" id="ub-in-t">Starts after the download</span></div>`;
+  const set = (which, pct, text, cls = "") => {
+    const bar = box.querySelector(`#ub-${which}`);
+    bar.className = `upd-bar ${cls}`;
+    if (pct != null) bar.firstElementChild.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+    box.querySelector(`#ub-${which}-p`).textContent = pct == null ? "" : `${Math.round(pct)}%`;
+    box.querySelector(`#ub-${which}-t`).textContent = text;
+  };
+  return { dl: (p, t, c) => set("dl", p, t, c), inst: (p, t, c) => set("in", p, t, c) };
+}
+async function downloadWithBar(bars) {
+  let timer = null;
+  const poll = async () => {
+    try {
+      const d = (await api("/licence/update/progress")).download || {};
+      if (d.state === "checking") bars.dl(null, "Asking the licence server for a newer version…", "busy");
+      else if (d.state === "downloading") {
+        const pct = d.total ? (100 * d.done) / d.total : null;
+        bars.dl(pct, `Downloading version ${d.version}: ${size(d.done || 0)}${d.total ? ` of ${size(d.total)}` : ""}`, pct == null ? "busy" : "");
+      } else if (d.state === "verifying") bars.dl(100, "Checking Voyager's signature and the file's fingerprint…");
+    } catch (_) { /* next time */ }
+    timer = setTimeout(poll, 500);
+  };
+  bars.dl(null, "Asking the licence server for a newer version…", "busy");
+  poll();
+  try { return await api("/licence/update/download", { method: "POST" }); }
+  finally { clearTimeout(timer); }
+}
+async function installWithBar(bars, version) {
+  bars.inst(5, "Starting the installer…");
+  await api("/licence/update/install", { method: "POST" });
+  const started = Date.now();
+  let pct = 5, down = false;
+  return new Promise((resolve) => {
+    const poll = async () => {
+      let p = null;
+      try { p = await api("/licence/update/progress"); } catch (_) { p = null; }
+      const i = p && p.install;
+      if (i && i.version === version && i.state === "done" && p.running_version === version) {
+        bars.inst(100, `Updated to ${version}. Reloading…`, "done");
+        setTimeout(() => location.reload(), 1500);
+        return resolve(true);
+      }
+      if (i && i.state === "failed" && p.running_version !== version) {
+        bars.inst(100, `${i.step}${i.message ? ` (${i.message})` : ""}. See logs\\update.log on the server.`, "bad");
+        return resolve(false);
+      }
+      if (p && i && i.version === version) { pct = Math.max(pct, i.percent || 0); bars.inst(pct, `${i.step}…`); down = false; }
+      else if (!p) {   // restarting: nothing answers for a minute or two
+        down = true;
+        pct = Math.min(95, Math.max(pct, 50) + 1);
+        bars.inst(pct, "Installing and restarting Tally Cloud… this page carries on when it is back.");
+      }
+      if (Date.now() - started > 15 * 60000) {
+        bars.inst(pct, "The update is taking long. Reload this page; System admin shows the version that runs.", "bad");
+        return resolve(false);
+      }
+      setTimeout(poll, down ? 3000 : 1500);
+    };
+    setTimeout(poll, 1500);
+  });
+}
+// download (if needed), confirm, install: System admin's button (where Update now leads) and the Licence tab
+async function runClientUpdate({ box, msg, download = true, install = true, version = null }) {
+  const bars = updateBars(box);
+  msg.className = "muted"; msg.textContent = "";
   try {
-    const r = await api("/licence/update/download", { method: "POST" });
-    if (!r.update) { msg.textContent = r.message; return; }
-    await clientUpdateView();
-    if (!confirm(`Version ${r.update.version} is downloaded and checked (signed by Voyager).\n\n${r.update.release_notes || ""}\n\n`
-      + "Install it now? Tally Cloud restarts and everyone is disconnected for a minute or two.")) { msg.textContent = r.message; return; }
-    const i = await api("/licence/update/install", { method: "POST" });
-    msg.textContent = i.message;
-    waitForRestart(r.update.version, msg);
-  } catch (err) { msg.className = "error"; msg.textContent = err.message; }
+    if (download) {
+      const r = await downloadWithBar(bars);
+      if (!r.update) { bars.dl(100, r.message, "done"); bars.inst(null, "Nothing to install"); msg.textContent = r.message; return; }
+      version = r.update.version;
+      bars.dl(100, `Version ${version} downloaded and checked (signed by Voyager)`, "done");
+      if (!install) { msg.textContent = r.message; return; }
+      if (!confirm(`Version ${version} is downloaded and checked (signed by Voyager).\n\n${r.update.release_notes || ""}\n\n`
+        + "Install it now? Tally Cloud restarts and everyone is disconnected for a minute or two.")) {
+        bars.inst(null, "Not installed yet: click Update again to install it"); return;
+      }
+    } else bars.dl(100, `Version ${version} already downloaded and checked`, "done");
+    await installWithBar(bars, version);
+  } catch (err) {
+    msg.className = "error"; msg.textContent = err.message;
+    bars.dl(null, err.message, "bad");
+  }
+}
+$("#svc-update").onclick = async (e) => {
+  const btn = e.target;
+  btn.disabled = true;
+  try { await runClientUpdate({ box: $("#svc-progress"), msg: $("#svc-msg") }); await clientUpdateView().catch(() => {}); }
   finally { btn.disabled = false; }
 };
 
@@ -2894,8 +3153,8 @@ renderers.licence = async () => {
   if (inst) inst.onclick = async () => {
     if (!confirm(`Install version ${u.version}? Tally Cloud restarts: everyone is disconnected for a minute or two. `
       + "If the new version does not start, the previous one comes back by itself.")) return;
-    try { const r = await api("/licence/update/install", { method: "POST" }); alert(r.message); waitForRestart(u.version); }
-    catch (err) { $("#lc-error").textContent = err.message; }
+    inst.disabled = true;
+    await runClientUpdate({ box: $("#lc-progress"), msg: $("#lc-error"), download: false, version: u.version });
   };
   $("#lc-form").elements.namedItem("server_url").value = l.server_url || "";
 };
@@ -2908,24 +3167,10 @@ $("#lc-form").onsubmit = async (e) => {
   catch (err) { $("#lc-error").textContent = err.message; } finally { btn.disabled = false; }
 };
 async function getUpdate() {
-  $("#lc-error").textContent = "Looking for updates…";
-  try { const r = await api("/licence/update/download", { method: "POST" }); $("#lc-error").textContent = r.message; await renderers.licence(); }
-  catch (err) { $("#lc-error").textContent = err.message; }
+  await runClientUpdate({ box: $("#lc-progress"), msg: $("#lc-error"), install: false });
+  await renderers.licence().catch(() => {});
 }
 $("#lc-get-update").onclick = () => getUpdate();
-function waitForRestart(version, out = $("#lc-error")) {
-  out.textContent = `Installing ${version}… this page reloads when Tally Cloud is back.`;
-  const started = Date.now();
-  const poll = async () => {
-    try {
-      const l = await api("/licence");
-      if (l.version === version) { location.reload(); return; }
-    } catch (_) { /* restarting */ }
-    if (Date.now() - started < 10 * 60000) setTimeout(poll, 5000);
-    else out.textContent = "The update is taking long. Reload this page; the Licence tab shows the version that runs.";
-  };
-  setTimeout(poll, 10000);
-}
 $("#lc-check").onclick = async () => { try { await api("/licence/check", { method: "POST" }); await renderers.licence(); refreshBanner(); } catch (err) { $("#lc-error").textContent = err.message; } };
 $("#lc-deactivate").onclick = async () => {
   if (!confirm("Deactivate this server? Its licence slot is given back so you can activate another server. This server becomes read-only; no data is deleted.")) return;

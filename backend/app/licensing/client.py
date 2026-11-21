@@ -138,18 +138,44 @@ def check_signature(sha256_hex: str, signature: str | None) -> bool:
         return False
 
 
-def _get_file(url: str, dest) -> str:
-    """Streams a download to `dest`; returns its SHA-256."""
+# Progress of "Update now", for the bars on the page: the download here (in memory), the installation in
+# updates/progress.json, written by update-server.ps1 (that file outlives the restart).
+DOWNLOAD = {"state": "idle"}
+
+
+def update_progress() -> dict:
+    import json
+    install = None
+    f = updates_dir() / "progress.json"
+    if f.is_file():
+        try:
+            install = json.loads(f.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            install = None
+    return {"download": dict(DOWNLOAD), "install": install, "running_version": __version__}
+
+
+def _install_progress(**data) -> None:
+    import json
+    from datetime import datetime
+    (updates_dir() / "progress.json").write_text(json.dumps({**data, "at": datetime.now().isoformat(timespec="seconds")}),
+                                                encoding="utf-8")
+
+
+def _get_file(url: str, dest, total: int | None = None) -> str:
+    """Streams a download to `dest`; returns its SHA-256. DOWNLOAD shows how far it is."""
     import hashlib
     digest = hashlib.sha256()
     try:
         with httpx.stream("GET", url, timeout=120, follow_redirects=False) as r:
             if r.status_code >= 400:
                 raise LicenceError(f"The download failed ({r.status_code})")
+            DOWNLOAD.update(total=int(r.headers.get("content-length") or 0) or total or 0, done=0)
             with open(dest, "wb") as f:
-                for chunk in r.iter_bytes(1 << 20):
+                for chunk in r.iter_bytes(1 << 18):
                     digest.update(chunk)
                     f.write(chunk)
+                    DOWNLOAD["done"] += len(chunk)
     except httpx.HTTPError as exc:
         raise LicenceError(f"The download failed: {exc.__class__.__name__}") from exc
     return digest.hexdigest()
@@ -159,6 +185,18 @@ def fetch_update(db: Session) -> dict | None:
     """Asks the cloud for a newer permitted release, downloads it and checks hash and signature.
 
     Returns the update (with "file" set once it is downloaded and verified), or None when up to date."""
+    DOWNLOAD.clear()
+    DOWNLOAD.update(state="checking", done=0, total=0)
+    try:
+        upd = _fetch_update(db)
+    except Exception as exc:
+        DOWNLOAD.update(state="error", message=str(exc))
+        raise
+    DOWNLOAD.update(state="downloaded" if upd else "up_to_date", version=upd["version"] if upd else None)
+    return upd
+
+
+def _fetch_update(db: Session) -> dict | None:
     st = state(db)
     if not st.installation_secret:
         raise LicenceError("This installation is not activated yet")
@@ -174,7 +212,9 @@ def fetch_update(db: Session) -> dict | None:
         raise LicenceError(f"Version {offer['version']} is not signed by Voyager. It was not downloaded.")
     dest = updates_dir() / f"TallyCloud-{offer['version']}.zip"
     part = dest.with_suffix(".part")
-    got = _get_file(base.rstrip("/") + offer["url"], part)
+    DOWNLOAD.update(state="downloading", version=offer["version"], total=offer.get("file_size") or 0)
+    got = _get_file(base.rstrip("/") + offer["url"], part, offer.get("file_size"))
+    DOWNLOAD.update(state="verifying")
     if got != offer["sha256"]:
         part.unlink(missing_ok=True)
         raise LicenceError("The downloaded file does not match its fingerprint (SHA-256). Try again.")
@@ -201,6 +241,7 @@ def install_update(db: Session) -> str:
     # Run a copy: the script replaces the app folder it lives in.
     script = updates_dir() / "update-server.ps1"
     shutil.copyfile(Path(settings.install_dir) / "app" / "deploy" / "windows" / "update-server.ps1", script)
+    _install_progress(state="installing", percent=5, step="Starting the installer", version=upd["version"], previous=__version__)
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     subprocess.Popen(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
                       "-Package", str(pkg), "-InstallDir", settings.install_dir],

@@ -224,6 +224,8 @@ def apply_item(db: Session, company: Company, conn: TallyConnector, item: SyncIn
                         v.sync_status = SyncStatus.SYNCED
                 mapping.tally_alter_id, mapping.tally_master_id = item.tally_alter_id, item.tally_master_id
                 mapping.last_synced_hash = incoming_hash
+                if doc.get("statutory") and doc["statutory"] != (v.statutory or {}):
+                    v.statutory = doc["statutory"]   # e-invoice / e-way details: not accounting content
                 return _finish(item, "ignored", erp_id=v.id, error="no content change")
             local_unsynced = v.version > (mapping.erp_version_synced or 0) and v.content_hash != mapping.last_synced_hash
             if local_unsynced:

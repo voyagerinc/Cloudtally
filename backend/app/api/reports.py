@@ -12,6 +12,7 @@ from sqlalchemy import select
 from app import audit, reports
 from app.reports import analysis, xlsx
 from app.api.deps import DB, CurrentUser, actor_of, authorize
+from app.connectors.tally import TallyError
 from app.core.security import Perm
 from app.models import FinancialYear
 
@@ -24,6 +25,7 @@ CSV_ROWS = {
     "sales-analysis": "rows", "purchase-analysis": "rows", "sales-rm-cost": "rows", "fifo-costing": "items",
     "sales-fifo-cost": "rows", "sales-group-wise": "rows", "stock-journal": "rows", "material-transfer-wip": "rows",
     "material-transfer-wip-main": "rows", "wo-manufacturing": "rows",
+    "gstr1": "rows", "gstr2": "rows", "hsn-summary": "rows", "einvoice": "rows", "eway-bill": "rows",
 }
 
 
@@ -143,10 +145,87 @@ def stock_item(company_id: uuid.UUID, item_id: uuid.UUID, db: DB, user: CurrentU
 
 @router.get("/outstanding")
 def outstanding(company_id: uuid.UUID, db: DB, user: CurrentUser, as_of: date | None = None,
-                kind: Literal["receivable", "payable"] = "receivable", format: Fmt = "json"):
+                kind: Literal["receivable", "payable"] = "receivable", ageing: str = "30,60,90",
+                age_by: Literal["bill", "due"] = "bill", format: Fmt = "json"):
+    """ageing: the periods' upper limits in days, e.g. "15,30,60,90,180" (the user chooses them on the report)."""
     authorize(db, user, company_id, Perm.report("receivables" if kind == "receivable" else "payables"))
+    try:
+        limits = sorted({int(x) for x in ageing.replace(" ", "").split(",") if x})
+    except ValueError:
+        raise HTTPException(422, "Ageing periods are whole numbers of days, e.g. 30,60,90")
+    if not limits or len(limits) > 12 or limits[0] < 1 or limits[-1] > 3650:
+        raise HTTPException(422, "Give 1 to 12 ageing periods between 1 and 3650 days, e.g. 30,60,90")
     _, t = _default_period(db, company_id, None, as_of)
-    return _respond(db, user, company_id, "outstanding", reports.outstanding(db, company_id, t, kind), format)
+    return _respond(db, user, company_id, "outstanding",
+                    reports.outstanding(db, company_id, t, kind, ageing=limits, age_by=age_by), format)
+
+
+# ------------------------------------------------------------------ GST
+
+@router.get("/gstr1")
+def gstr1(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None, to_date: date | None = None,
+          format: Fmt = "json"):
+    """Outward supplies by GSTR-1 section (B2B, B2CL, B2CS, exports, credit/debit notes), one row per invoice and rate."""
+    from app.reports import gst
+    authorize(db, user, company_id, Perm.report("gstr1"))
+    f, t = _default_period(db, company_id, from_date, to_date)
+    return _respond(db, user, company_id, "gstr1", gst.gstr(db, company_id, f, t, "outward"), format)
+
+
+@router.get("/gstr2")
+def gstr2(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None, to_date: date | None = None,
+          format: Fmt = "json"):
+    """Inward supplies (purchases, debit notes) by section with input tax, one row per invoice and rate."""
+    from app.reports import gst
+    authorize(db, user, company_id, Perm.report("gstr2"))
+    f, t = _default_period(db, company_id, from_date, to_date)
+    return _respond(db, user, company_id, "gstr2", gst.gstr(db, company_id, f, t, "inward"), format)
+
+
+@router.get("/hsn-summary")
+def hsn_summary(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                to_date: date | None = None, side: Literal["outward", "inward"] = "outward", format: Fmt = "json"):
+    from app.reports import gst
+    authorize(db, user, company_id, Perm.report("hsn-summary"))
+    f, t = _default_period(db, company_id, from_date, to_date)
+    return _respond(db, user, company_id, "hsn-summary", gst.hsn_summary(db, company_id, f, t, side), format)
+
+
+@router.get("/einvoice")
+def einvoice(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+             to_date: date | None = None, format: Fmt = "json"):
+    from app.reports import gst
+    authorize(db, user, company_id, Perm.report("einvoice"))
+    f, t = _default_period(db, company_id, from_date, to_date)
+    return _respond(db, user, company_id, "einvoice", gst.einvoice(db, company_id, f, t), format)
+
+
+@router.get("/eway-bill")
+def eway_bill(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+              to_date: date | None = None, format: Fmt = "json"):
+    from app.reports import gst
+    authorize(db, user, company_id, Perm.report("eway-bill"))
+    f, t = _default_period(db, company_id, from_date, to_date)
+    return _respond(db, user, company_id, "eway-bill", gst.eway_bill(db, company_id, f, t), format)
+
+
+@router.post("/gst/refresh-from-tally")
+def gst_refresh(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                to_date: date | None = None):
+    """Re-read e-invoice (IRN, acknowledgement) and e-way bill details of the period's invoices from Tally (read only)."""
+    from app.services.sync import gst_details
+    authorize(db, user, company_id, Perm.SYNC_READ)
+    f, t = _default_period(db, company_id, from_date, to_date)
+    try:
+        r = gst_details.refresh(db, company_id, f, t)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    except TallyError as exc:
+        raise HTTPException(502, f"Tally: {exc.message}")
+    audit.record(db, actor_of(user), "gst.refresh_from_tally", "company", company_id, company_id=company_id,
+                 after={"from": str(f), "to": str(t), **r})
+    db.commit()
+    return r
 
 
 @router.get("/register")

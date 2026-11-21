@@ -1001,3 +1001,26 @@ def test_stock_journal_made_in_the_software_goes_to_tally_as_consumption_and_pro
     m = db.scalar(select(TallyMapping).where(TallyMapping.erp_id == v.id))
     stored = tc.vouchers[m.tally_master_id]
     assert stored.find("INVENTORYENTRIESIN.LIST") is not None and stored.find("INVENTORYENTRIESOUT.LIST") is not None
+
+
+def test_einvoice_and_eway_details_are_read_again_from_tally(db, company, tc, mock):
+    from app.services.sync import gst_details
+    sync()
+    mid = mock.enter_voucher(tc, """<VOUCHER VCHTYPE="Sales"><DATE>20260426</DATE><VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+        <VOUCHERNUMBER>INV-77</VOUCHERNUMBER><PARTYLEDGERNAME>Acme Traders</PARTYLEDGERNAME>
+        <IRN>f00d</IRN><IRNACKNO>1124</IRNACKNO><IRNACKDATE>20260426</IRNACKDATE>
+        <EWAYBILLDETAILS.LIST><BILLNUMBER>331000000077</BILLNUMBER><BILLDATE>20260426</BILLDATE></EWAYBILLDETAILS.LIST>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>Acme Traders</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-1000.00</AMOUNT></ALLLEDGERENTRIES.LIST>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>Sales</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>1000.00</AMOUNT></ALLLEDGERENTRIES.LIST>
+        </VOUCHER>""")
+    sync()
+    m = db.scalar(select(TallyMapping).where(TallyMapping.tally_master_id == mid, TallyMapping.entity_type == "voucher"))
+    v = db.get(Voucher, m.erp_id)
+    assert v.statutory["eway_bill_no"] == "331000000077" and v.statutory["ack_no"] == "1124"   # read with the voucher
+    v.statutory = {}                                                    # as for vouchers synced before these were read
+    db.commit()
+    r = gst_details.refresh(db, company.id, date(2026, 4, 1), date(2026, 4, 30))
+    db.refresh(v)
+    assert r["updated"] >= 1 and r["skipped_count"] == 0
+    assert v.statutory == {"irn": "f00d", "ack_no": "1124", "ack_date": "2026-04-26",
+                           "eway_bill_no": "331000000077", "eway_bill_date": "2026-04-26"}

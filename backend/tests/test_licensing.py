@@ -423,7 +423,7 @@ def test_installation_downloads_checks_and_offers_its_update(db, admin, portal, 
             raise lic_client.LicenceError(r.json()["detail"])
         return r.json()
 
-    def get_via_portal(url, dest):
+    def get_via_portal(url, dest, total=None):
         monkeypatch.setattr(settings, "license_mode", "server")
         try:
             r = api.get(url.split("tallycloud.voyager.co.in", 1)[-1])
@@ -457,6 +457,13 @@ def test_installation_downloads_checks_and_offers_its_update(db, admin, portal, 
     upd = r.json()["update"]
     assert upd["version"] == newer and upd["verified"]
     assert (tmp_path / "updates" / f"TallyCloud-{newer}.zip").read_bytes() == _package(newer)
+    # The page's bars: the download is reported, and the installer's steps are read from its progress file.
+    prog = api.get(f"{V1}/licence/update/progress", headers=admin).json()
+    assert prog["download"]["state"] == "downloaded" and prog["download"]["version"] == newer and prog["install"] is None
+    (tmp_path / "updates" / "progress.json").write_text(
+        '{"state": "installing", "percent": 50, "step": "Installing Python packages", "version": "%s"}' % newer, encoding="utf-8-sig")
+    inst = api.get(f"{V1}/licence/update/progress", headers=admin).json()["install"]
+    assert (inst["state"], inst["percent"], inst["version"]) == ("installing", 50, newer)
     s = api.get(f"{V1}/licence", headers=admin).json()
     assert s["update_available"]["version"] == newer and s["can_install_updates"]
     # Once that version runs, the offer is no longer shown (the update bar goes away by itself).
@@ -617,3 +624,25 @@ def test_admins_see_the_key_and_a_new_activation_key_replaces_it(db, admin, port
     assert activate(key, "inst-0000000000000009").status_code != 200
     assert api.get(f"{V1}/portal/licenses/{lic['id']}/key", headers=boss).json()["license_key"] == new
     assert activate(new, "inst-0000000000000009").status_code == 200
+
+
+def test_the_download_reports_how_far_it_is(tmp_path, monkeypatch):
+    import contextlib
+    import httpx
+    seen = []
+
+    class Resp:
+        status_code = 200
+        headers = {"content-length": "1000000"}
+
+        def iter_bytes(self, size):
+            for _ in range(4):
+                seen.append(dict(lic_client.DOWNLOAD))
+                yield b"x" * 250000
+
+    monkeypatch.setattr(httpx, "stream", lambda *a, **k: contextlib.nullcontext(Resp()))
+    lic_client.DOWNLOAD.clear()
+    digest = lic_client._get_file("https://portal/x.zip", tmp_path / "x.part", total=5)
+    assert len(digest) == 64 and (tmp_path / "x.part").stat().st_size == 1000000
+    assert [s["done"] for s in seen] == [0, 250000, 500000, 750000] and seen[0]["total"] == 1000000   # server's size wins
+    assert lic_client.DOWNLOAD["done"] == 1000000

@@ -301,8 +301,23 @@ def ledger_statement(db: Session, company_id: uuid.UUID, ledger_id: uuid.UUID, f
             "total_credit": bal["credit"], "closing": bal["closing"]}
 
 
-def outstanding(db: Session, company_id: uuid.UUID, as_of: date, kind: str = "receivable") -> dict:
-    """Bill-wise outstanding with ageing buckets for Sundry Debtors (receivable) or Creditors (payable)."""
+def ageing_buckets(limits) -> list[tuple[str, int | None]]:
+    """[30, 60, 90] -> [("0-30", 30), ("31-60", 60), ("61-90", 90), ("Above 90", None)]: label and upper limit."""
+    out, lo = [], 0
+    for hi in sorted({int(x) for x in limits if int(x) > 0}):
+        out.append((f"{lo}-{hi}", hi))
+        lo = hi + 1
+    out.append((f"Above {lo - 1}" if out else "All", None))
+    return out
+
+
+def outstanding(db: Session, company_id: uuid.UUID, as_of: date, kind: str = "receivable", *,
+                ageing: list[int] | None = None, age_by: str = "bill") -> dict:
+    """Bill-wise outstanding with ageing buckets for Sundry Debtors (receivable) or Creditors (payable).
+
+    ageing: upper limits of the periods in days (default 30, 60, 90); age_by: "bill" (bill date) or "due"
+    (days past the due date; bills not yet due fall in the first period). Amounts are also split as Dr / Cr:
+    a receivable is normally Dr (an advance from a customer is Cr), a payable normally Cr."""
     root_name = "Sundry Debtors" if kind == "receivable" else "Sundry Creditors"
     groups = _groups(db, company_id)
     wanted = {gid for gid, g in groups.items() if root_name in g["path"]}
@@ -323,8 +338,10 @@ def outstanding(db: Session, company_id: uuid.UUID, as_of: date, kind: str = "re
         if ref_type in ("New Ref", "Advance") and vdate <= b["date"]:
             b["date"], b["due"], b["voucher_id"] = vdate, due or b["due"], vid
     sign = 1 if kind == "receivable" else -1
-    buckets = ("0-30", "31-60", "61-90", "90+")
+    periods = ageing_buckets(ageing or (30, 60, 90))
+    buckets = tuple(label for label, _ in periods)
     rows, totals = [], dict.fromkeys(buckets, ZERO)
+    dr_total = cr_total = ZERO
     for (lid, name), b in sorted(bills.items(), key=lambda kv: (ledgers[kv[0][0]].name, kv[1]["date"])):
         pending = b["amount"] * sign
         if pending == ZERO:
@@ -333,13 +350,19 @@ def outstanding(db: Session, company_id: uuid.UUID, as_of: date, kind: str = "re
         due = b["due"] or (b["date"] + timedelta(days=led.credit_days or 0))
         overdue = (as_of - due).days
         age = (as_of - b["date"]).days
-        bucket = buckets[0] if age <= 30 else buckets[1] if age <= 60 else buckets[2] if age <= 90 else buckets[3]
+        days = max(0, overdue) if age_by == "due" else age
+        bucket = next(label for label, hi in periods if hi is None or days <= hi)
         totals[bucket] += pending
+        dr, cr = (b["amount"], ZERO) if b["amount"] > 0 else (ZERO, -b["amount"])   # the books' side of the bill
+        dr_total += dr
+        cr_total += cr
         rows.append({"party": led.name, "ledger_id": str(lid), "voucher_id": str(b["voucher_id"]),
                      "bill": name, "date": str(b["date"]), "due_date": str(due),
-                     "pending": m(pending), "age_days": age, "overdue_days": max(0, overdue), "bucket": bucket})
-    return {"as_of": str(as_of), "kind": kind, "bills": rows, "ageing": {k: m(v) for k, v in totals.items()},
-            "total": m(sum(totals.values(), ZERO))}
+                     "dr": m(dr), "cr": m(cr), "pending": m(pending), "age_days": age, "overdue_days": max(0, overdue),
+                     "bucket": bucket})
+    return {"as_of": str(as_of), "kind": kind, "age_by": age_by, "periods": list(buckets), "bills": rows,
+            "ageing": {k: m(v) for k, v in totals.items()}, "total": m(sum(totals.values(), ZERO)),
+            "total_dr": m(dr_total), "total_cr": m(cr_total)}
 
 
 def _is_tax_ledger(ledger, groups: dict) -> bool:

@@ -211,6 +211,11 @@
       <option value="outstanding-payable" data-report="payables">Payables (ageing)</option>
       <option value="register-Sales" data-report="sales-register">Sales Register</option>
       <option value="register-Purchase" data-report="purchase-register">Purchase Register</option>
+      <option value="gstr1" data-report="gstr1">GST: GSTR-1 (outward supplies)</option>
+      <option value="gstr2" data-report="gstr2">GST: GSTR-2 (inward supplies)</option>
+      <option value="hsn-summary" data-report="hsn-summary">GST: HSN summary</option>
+      <option value="einvoice" data-report="einvoice">GST: E-invoice status</option>
+      <option value="eway-bill" data-report="eway-bill">GST: E-way bill status</option>
       <option value="sales-analysis" data-report="sales-analysis">Sales analysis</option>
       <option value="purchase-analysis" data-report="purchase-analysis">Purchase analysis</option>
       <option value="sales-rm-cost" data-report="sales-rm-cost">Sales with raw-material cost</option>
@@ -430,6 +435,7 @@
       <button type="button" id="svc-update">Update from licence server</button>
       <span id="svc-msg" class="muted" aria-live="polite"></span>
     </div>
+    <div id="svc-progress" class="upd-box" hidden></div>
   </div>
   <div id="sv-github">
   <p class="muted small"><b>Deploy &amp; restart</b> pulls the latest code from GitHub, installs Python packages,
@@ -504,6 +510,7 @@
     <button>Activate</button>
   </form>
   <div id="lc-update" class="lic-box" hidden></div>
+  <div id="lc-progress" class="upd-box" hidden></div>
   <div class="row" id="lc-actions" hidden>
     <button type="button" id="lc-check" class="secondary">Check now</button>
     <button type="button" id="lc-get-update" class="secondary">Check for updates</button>

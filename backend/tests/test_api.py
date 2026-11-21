@@ -156,6 +156,19 @@ def test_reports_balance(books, admin):
     assert bs["difference"] == "0.00", bs
     os_ = client.get(f"/api/v1/reports/outstanding?company_id={books}&as_of=2026-06-30", headers=admin).json()
     assert os_["total"] == "6800.00" and os_["bills"][0]["bill"] == "INV-001"
+    bill = os_["bills"][0]
+    assert (bill["dr"], bill["cr"]) == ("6800.00", "0.00") and os_["total_dr"] == "6800.00"      # Dr / Cr, no minus
+    assert os_["periods"] == ["0-30", "31-60", "61-90", "Above 90"]
+    age = bill["age_days"]
+    own = client.get(f"/api/v1/reports/outstanding?company_id={books}&as_of=2026-06-30&ageing=15,45",
+                     headers=admin).json()                                                         # the user's periods
+    assert own["periods"] == ["0-15", "16-45", "Above 45"]
+    assert own["bills"][0]["bucket"] == ("0-15" if age <= 15 else "16-45" if age <= 45 else "Above 45")
+    assert own["ageing"][own["bills"][0]["bucket"]] == "6800.00"
+    due = client.get(f"/api/v1/reports/outstanding?company_id={books}&as_of=2026-06-30&ageing=15,45&age_by=due",
+                     headers=admin).json()
+    assert due["age_by"] == "due" and due["bills"][0]["bucket"] in due["periods"]
+    assert client.get(f"/api/v1/reports/outstanding?company_id={books}&ageing=abc", headers=admin).status_code == 422
     led = next(x for x in tb["lines"] if x["name"] == "HDFC Bank")
     st = client.get(f"/api/v1/reports/ledger?company_id={books}&ledger_id={led['ledger_id']}&from_date=2026-04-01&to_date=2027-03-31",
                     headers=admin).json()

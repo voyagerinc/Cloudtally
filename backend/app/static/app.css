@@ -153,3 +153,14 @@ tr.muted td { color: var(--muted); }
 .chip.expired, .chip.suspended, .chip.revoked, .chip.blocked, .chip.withdrawn, .chip.denied, .chip.read_only, .chip.not_activated { background: var(--chip-bad); color: var(--bad); }
 .chip.grace, .chip.cancelled, .chip.deactivated, .chip.archived { background: var(--chip-warn); color: var(--warn); }
 .lines input.auto-rate { background: color-mix(in srgb, var(--accent, #2b6cb0) 8%, transparent); }
+
+/* Update now: download and installation progress bars */
+.upd-box { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--line, #d9dee5); border-radius: 8px; max-width: 760px; }
+.upd-row { display: grid; grid-template-columns: 110px 1fr 70px; align-items: center; gap: 4px 10px; margin: 6px 0; }
+.upd-bar { height: 12px; background: #e9edf2; border-radius: 6px; overflow: hidden; }
+.upd-bar > div { height: 100%; width: 0; background: #2563eb; border-radius: 6px; transition: width .4s ease; }
+.upd-bar.done > div { background: #16a34a; }
+.upd-bar.bad > div { background: #dc2626; }
+.upd-bar.busy > div { width: 35% !important; animation: upd-slide 1.2s ease-in-out infinite alternate; }
+@keyframes upd-slide { from { margin-left: 0; } to { margin-left: 65%; } }
+.upd-step { grid-column: 2 / 4; }

@@ -117,3 +117,39 @@ def test_names_with_symbols_reach_tally_as_character_references(monkeypatch):
     client = TallyClient("127.0.0.1", 9, "Demo")
     client.post('<ENVELOPE><X>STICKER ACE ROUND (Ø57 mm)</X></ENVELOPE>')
     assert b"(&#216;57 mm)" in sent["body"] and all(b < 128 for b in sent["body"])
+
+
+def test_einvoice_and_eway_bill_details_are_read():
+    from lxml import etree
+    from app.connectors.tally import codec
+    el = etree.fromstring("<VOUCHER><IRN>abc</IRN><IRNACKNO>112410</IRNACKNO><IRNACKDATE>20261020</IRNACKDATE>"
+                          "<EWAYBILLDETAILS.LIST><BILLNUMBER>331012345678</BILLNUMBER><BILLDATE>20261021</BILLDATE>"
+                          "</EWAYBILLDETAILS.LIST></VOUCHER>")
+    assert codec.statutory(el) == {"irn": "abc", "ack_no": "112410", "ack_date": "2026-10-20",
+                                   "eway_bill_no": "331012345678", "eway_bill_date": "2026-10-21"}
+    assert codec.statutory(etree.fromstring("<VOUCHER><EWAYBILLNO>3310</EWAYBILLNO></VOUCHER>")) == {"eway_bill_no": "3310"}
+    assert codec.statutory(etree.fromstring("<VOUCHER/>")) == {}
+
+
+def test_eway_bill_transport_details_as_tallyprime_keeps_them():
+    """Shape seen in a real TallyPrime voucher (Nov 2026, values made up): empty dates are 000000000."""
+    from lxml import etree
+    from app.connectors.tally import codec
+    el = etree.fromstring(
+        "<VOUCHER><IRN>f00d</IRN><IRNACKNO>100000000000001</IRNACKNO><IRNACKDATE>20261113</IRNACKDATE>"
+        "<EWAYBILLDETAILS.LIST><BILLDATE>20261113</BILLDATE><BILLNUMBER>700000000001</BILLNUMBER>"
+        "<CONSIGNORPLACE>CITY A</CONSIGNORPLACE><CONSIGNEEPLACE>CITY B</CONSIGNEEPLACE><CONSIGNEEPINCODE>400001</CONSIGNEEPINCODE>"
+        "<SHIPPEDFROMSTATE>Delhi</SHIPPEDFROMSTATE><SHIPPEDTOSTATE>Maharashtra</SHIPPEDTOSTATE><ISCANCELLED/>"
+        "<VALIDUPTO>000000000</VALIDUPTO><CANCELDATE>000000000</CANCELDATE>"
+        "<TRANSPORTDETAILS.LIST><TRANSPORTERID>07AAAAA0000A1Z5</TRANSPORTERID><TRANSPORTERNAME>ROADWAYS TRANSPORT</TRANSPORTERNAME>"
+        "<OLDVEHICLETYPE> Not Applicable</OLDVEHICLETYPE><VEHICLENUMBER>DL01AB1234</VEHICLENUMBER><DISTANCE> 1477</DISTANCE>"
+        "</TRANSPORTDETAILS.LIST></EWAYBILLDETAILS.LIST></VOUCHER>")
+    s = codec.statutory(el)
+    assert (s["eway_bill_no"], s["eway_bill_date"], s["ack_date"]) == ("700000000001", "2026-11-13", "2026-11-13")
+    assert (s["transporter"], s["transporter_id"], s["vehicle_no"], s["distance_km"]) == \
+        ("ROADWAYS TRANSPORT", "07AAAAA0000A1Z5", "DL01AB1234", "1477")
+    assert (s["eway_from_place"], s["eway_to_place"], s["eway_to_state"], s["eway_to_pincode"]) == ("CITY A", "CITY B", "Maharashtra", "400001")
+    assert "eway_valid_upto" not in s and "eway_cancelled" not in s          # 000000000 is no date
+    cancelled = etree.fromstring("<VOUCHER><EWAYBILLDETAILS.LIST><BILLNUMBER>1</BILLNUMBER><CANCELDATE>20261114</CANCELDATE>"
+                                 "</EWAYBILLDETAILS.LIST></VOUCHER>")
+    assert codec.statutory(cancelled)["eway_cancelled"] == "Yes"

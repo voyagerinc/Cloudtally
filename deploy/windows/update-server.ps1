@@ -42,27 +42,44 @@ function Prepare {   # packages and schema for the code now in $app
 }
 
 $old = (Get-Content (Join-Path $InstallDir "VERSION") -ErrorAction SilentlyContinue | Select-Object -First 1)
+$new = $null
+# The page shows these steps as a progress bar (GET /licence/update/progress reads this file, also after the restart).
+function Step($percent, $text, $state = "installing", $message = $null) {
+  try {
+    @{ state = $state; percent = $percent; step = $text; version = $new; previous = $old; message = $message;
+       at = (Get-Date -Format s) } | ConvertTo-Json -Compress |
+      Set-Content -Path (Join-Path $InstallDir "updates\progress.json") -Encoding UTF8
+  } catch { }
+}
 try {
+  Step 10 "Unpacking the new version"
   Write-Host "$(Get-Date -Format s)  update from $old using $Package"
   if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
   Expand-Archive -Path $Package -DestinationPath $staging
   $new = (Get-Content (Join-Path $staging "VERSION") | Select-Object -First 1).Trim()
   if (-not (Test-Path (Join-Path $staging "app\backend\app\main.py"))) { throw "This is not a Tally Cloud package" }
 
+  Step 25 "Stopping Tally Cloud"
   Stop-App
+  Step 35 "Replacing the application files"
   if (Test-Path $previous) { Remove-Item $previous -Recurse -Force }
   Move-Item $app $previous
   Move-Item (Join-Path $staging "app") $app
+  Step 50 "Installing Python packages and updating the database"
   Prepare
   Set-Content (Join-Path $InstallDir "VERSION") $new -Encoding ASCII
+  Step 85 "Starting Tally Cloud $new"
   Start-ScheduledTask -TaskName $task
   if (-not (Healthy)) { throw "Version $new did not start" }
   Write-Host "Updated to $new."
+  Step 100 "Updated to $new" "done"
   # start.bat runs this copy: keep it the new version's
   $runPs = Join-Path $app "deploy\windows\run.ps1"
   if (Test-Path $runPs) { Copy-Item $runPs (Join-Path $InstallDir "run.ps1") -Force }
 } catch {
-  Write-Host "!! $($_.Exception.Message). Going back to $old."
+  $why = $_.Exception.Message
+  Write-Host "!! $why. Going back to $old."
+  Step 90 "Going back to version $old" "rolling_back" $why
   Stop-App
   if (Test-Path $previous) {
     if (Test-Path $app) { Remove-Item $app -Recurse -Force }
@@ -71,6 +88,7 @@ try {
     Set-Content (Join-Path $InstallDir "VERSION") $old -Encoding ASCII
   }
   Start-ScheduledTask -TaskName $task
+  Step 100 "Not updated: version $old is running again" "failed" $why
 } finally {
   if (Test-Path $staging) { Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue }
   Stop-Transcript | Out-Null

@@ -96,6 +96,7 @@ VOUCHER_FETCH = [
     "DATE", "EFFECTIVEDATE", "VOUCHERTYPENAME", "VOUCHERNUMBER", "GUID", "MASTERID", "ALTERID", "REMOTEID",
     "REFERENCE", "REFERENCEDATE", "PARTYLEDGERNAME", "NARRATION", "ISCANCELLED", "ISDELETED", "ISOPTIONAL",
     "ISINVOICE", "PERSISTEDVIEW", "PLACEOFSUPPLY", "ISREVERSECHARGEAPPLICABLE", "IRN", "EWAYBILLNO",
+    "IRNACKNO", "IRNACKDATE", "EWAYBILLDETAILS",
     "ALLLEDGERENTRIES", "LEDGERENTRIES", "ALLINVENTORYENTRIES",
 ]
 
@@ -332,6 +333,35 @@ def _parse_inventory(el: etree._Element, default_ledger: str | None = None) -> t
     return line, allocs
 
 
+def statutory(el: etree._Element) -> dict:
+    """E-invoice (IRN, acknowledgement no. and date) and e-way bill of a voucher, as TallyPrime keeps them
+    (checked live, Nov 2026): EWAYBILLDETAILS.LIST holds the bill number and date, validity, from / to state and
+    place, and TRANSPORTDETAILS.LIST the transporter, vehicle and distance. Older releases: EWAYBILLNO."""
+    def day(e, tag):
+        raw = X.txt(e, tag) if e is not None else None
+        if not raw or not raw.strip("0 "):          # Tally writes 000000000 for "no date"
+            return None
+        d = X.parse_date(raw[:8])
+        return str(d) if d else None
+
+    ewb = el.find("EWAYBILLDETAILS.LIST")
+    trn = ewb.find("TRANSPORTDETAILS.LIST") if ewb is not None else None
+    get = (lambda e, t: X.txt(e, t) if e is not None else None)
+    cancelled = ewb is not None and (X.logical(X.txt(ewb, "ISCANCELLED") or "No") or bool(day(ewb, "CANCELDATE")))
+    pairs = (
+        ("irn", X.txt(el, "IRN")), ("ack_no", X.txt(el, "IRNACKNO")), ("ack_date", day(el, "IRNACKDATE")),
+        ("eway_bill_no", X.txt(el, "EWAYBILLNO") or get(ewb, "BILLNUMBER")), ("eway_bill_date", day(ewb, "BILLDATE")),
+        ("eway_valid_upto", day(ewb, "VALIDUPTO")), ("eway_cancelled", "Yes" if cancelled and get(ewb, "BILLNUMBER") else None),
+        ("eway_from_state", get(ewb, "SHIPPEDFROMSTATE")), ("eway_to_state", get(ewb, "SHIPPEDTOSTATE")),
+        ("eway_from_place", get(ewb, "CONSIGNORPLACE")), ("eway_to_place", get(ewb, "CONSIGNEEPLACE")),
+        ("eway_to_pincode", get(ewb, "CONSIGNEEPINCODE")),
+        ("transporter", get(trn, "TRANSPORTERNAME")), ("transporter_id", get(trn, "TRANSPORTERID")),
+        ("vehicle_no", get(trn, "VEHICLENUMBER")), ("transport_mode", get(trn, "TRANSPORTMODE")),
+        ("distance_km", (get(trn, "DISTANCE") or "").strip() if (get(trn, "DISTANCE") or "").strip() not in ("", "0") else None),
+    )
+    return {k: v.strip() for k, v in pairs if v and v.strip() and v.strip() != "Not Applicable"}
+
+
 def parse_voucher(el: etree._Element) -> TallyVoucher:
     vdate = X.parse_date(X.txt(el, "DATE"))
     all_entries = [e for e in el.findall("ALLLEDGERENTRIES.LIST") if X.txt(e, "LEDGERNAME")]
@@ -379,7 +409,7 @@ def parse_voucher(el: etree._Element) -> TallyVoucher:
         "is_invoice": X.logical(X.txt(el, "ISINVOICE")),
         "is_reverse_charge": X.logical(X.txt(el, "ISREVERSECHARGEAPPLICABLE")),
         "is_cancelled": X.logical(X.txt(el, "ISCANCELLED")),
-        "statutory": {k: v for k, v in (("irn", X.txt(el, "IRN")), ("eway_bill_no", X.txt(el, "EWAYBILLNO"))) if v},
+        "statutory": statutory(el),
         "entries": [e for e in entries if Decimal(e["amount"]) != ZERO],
         "inventory": inventory,
     }

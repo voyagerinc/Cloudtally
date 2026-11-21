@@ -101,6 +101,13 @@ def download_update(db: DB, user: CurrentUser):
             else f"This server runs the newest version ({__version__})."}
 
 
+@router.get("/update/progress")
+def update_progress(user: CurrentUser):
+    """How far "Update now" is: the download (bytes) and the installation steps (also after the restart)."""
+    _client_admin(user)
+    return client.update_progress()
+
+
 @router.post("/update/install", status_code=202)
 def install_update(db: DB, user: CurrentUser):
     _client_admin(user)
