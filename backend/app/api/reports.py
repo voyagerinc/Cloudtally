@@ -146,8 +146,9 @@ def stock_item(company_id: uuid.UUID, item_id: uuid.UUID, db: DB, user: CurrentU
 @router.get("/outstanding")
 def outstanding(company_id: uuid.UUID, db: DB, user: CurrentUser, as_of: date | None = None,
                 kind: Literal["receivable", "payable"] = "receivable", ageing: str = "30,60,90",
-                age_by: Literal["bill", "due"] = "bill", format: Fmt = "json"):
-    """ageing: the periods' upper limits in days, e.g. "15,30,60,90,180" (the user chooses them on the report)."""
+                age_by: Literal["bill", "due"] = "bill", fifo: bool = True, format: Fmt = "json"):
+    """ageing: the periods' upper limits in days, e.g. "15,30,60,90,180" (the user chooses them on the report).
+    fifo: set On Account payments / receipts / journals off against the oldest bills."""
     authorize(db, user, company_id, Perm.report("receivables" if kind == "receivable" else "payables"))
     try:
         limits = sorted({int(x) for x in ageing.replace(" ", "").split(",") if x})
@@ -157,7 +158,7 @@ def outstanding(company_id: uuid.UUID, db: DB, user: CurrentUser, as_of: date | 
         raise HTTPException(422, "Give 1 to 12 ageing periods between 1 and 3650 days, e.g. 30,60,90")
     _, t = _default_period(db, company_id, None, as_of)
     return _respond(db, user, company_id, "outstanding",
-                    reports.outstanding(db, company_id, t, kind, ageing=limits, age_by=age_by), format)
+                    reports.outstanding(db, company_id, t, kind, ageing=limits, age_by=age_by, fifo=fifo), format)
 
 
 # ------------------------------------------------------------------ GST

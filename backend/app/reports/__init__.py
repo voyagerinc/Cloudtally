@@ -312,12 +312,15 @@ def ageing_buckets(limits) -> list[tuple[str, int | None]]:
 
 
 def outstanding(db: Session, company_id: uuid.UUID, as_of: date, kind: str = "receivable", *,
-                ageing: list[int] | None = None, age_by: str = "bill") -> dict:
+                ageing: list[int] | None = None, age_by: str = "bill", fifo: bool = True) -> dict:
     """Bill-wise outstanding with ageing buckets for Sundry Debtors (receivable) or Creditors (payable).
 
     ageing: upper limits of the periods in days (default 30, 60, 90); age_by: "bill" (bill date) or "due"
     (days past the due date; bills not yet due fall in the first period). Amounts are also split as Dr / Cr:
-    a receivable is normally Dr (an advance from a customer is Cr), a payable normally Cr."""
+    a receivable is normally Dr (an advance from a customer is Cr), a payable normally Cr.
+
+    fifo: payments, receipts and journals of a party that are not adjusted against a bill reference (On
+    Account, or with no bill-wise details) are set off against the party's oldest open bills first."""
     root_name = "Sundry Debtors" if kind == "receivable" else "Sundry Creditors"
     groups = _groups(db, company_id)
     wanted = {gid for gid, g in groups.items() if root_name in g["path"]}
@@ -331,22 +334,43 @@ def outstanding(db: Session, company_id: uuid.UUID, as_of: date, kind: str = "re
             .where(Voucher.company_id == company_id, Voucher.status == POSTED, Voucher.voucher_date <= as_of,
                    VoucherType.affects_accounts.is_(True), VoucherEntry.ledger_id.in_(ledgers.keys())))
     bills: dict[tuple, dict] = {}
-    for lid, name, ref_type, amount, due, vdate, vid in db.execute(stmt):
-        key = (lid, name or f"({ref_type})")
-        b = bills.setdefault(key, {"amount": ZERO, "date": vdate, "due": due, "voucher_id": vid})
+    unadjusted: list[dict] = []            # On Account amounts: not set off against any bill
+    allocated: dict[uuid.UUID, Decimal] = defaultdict(lambda: ZERO)
+    for lid, name, ref_type, amount, due, vdate, vid, eid in db.execute(stmt.add_columns(VoucherEntry.id)):
+        allocated[eid] += amount
+        if ref_type == "On Account" or not name:
+            unadjusted.append({"lid": lid, "amount": amount, "date": vdate, "voucher_id": vid})
+            continue
+        b = bills.setdefault((lid, name), {"lid": lid, "bill": name, "amount": ZERO, "date": vdate, "due": due,
+                                           "voucher_id": vid})
         b["amount"] += amount
         if ref_type in ("New Ref", "Advance") and vdate <= b["date"]:
             b["date"], b["due"], b["voucher_id"] = vdate, due or b["due"], vid
+    # Party lines with no bill-wise details at all (or only partly allocated) are On Account too.
+    lines = (select(VoucherEntry.id, VoucherEntry.ledger_id, VoucherEntry.amount, Voucher.voucher_date, Voucher.id)
+             .join(Voucher, Voucher.id == VoucherEntry.voucher_id)
+             .join(VoucherType, VoucherType.id == Voucher.voucher_type_id)
+             .where(Voucher.company_id == company_id, Voucher.status == POSTED, Voucher.voucher_date <= as_of,
+                    VoucherType.affects_accounts.is_(True), VoucherEntry.ledger_id.in_(ledgers.keys())))
+    for eid, lid, amount, vdate, vid in db.execute(lines):
+        rest = amount - allocated.get(eid, ZERO)
+        if rest != ZERO:
+            unadjusted.append({"lid": lid, "amount": rest, "date": vdate, "voucher_id": vid})
+    items = [{**b, "adjusted": ZERO} for b in bills.values() if b["amount"] != ZERO]
+    if fifo:
+        _fifo_adjust(items, unadjusted)
+    else:
+        items += [{**u, "bill": "On Account", "due": None, "adjusted": ZERO} for u in unadjusted]
     sign = 1 if kind == "receivable" else -1
     periods = ageing_buckets(ageing or (30, 60, 90))
     buckets = tuple(label for label, _ in periods)
     rows, totals = [], dict.fromkeys(buckets, ZERO)
     dr_total = cr_total = ZERO
-    for (lid, name), b in sorted(bills.items(), key=lambda kv: (ledgers[kv[0][0]].name, kv[1]["date"])):
+    for b in sorted(items, key=lambda b: (ledgers[b["lid"]].name, b["date"], b["bill"])):
         pending = b["amount"] * sign
         if pending == ZERO:
             continue
-        led = ledgers[lid]
+        led = ledgers[b["lid"]]
         due = b["due"] or (b["date"] + timedelta(days=led.credit_days or 0))
         overdue = (as_of - due).days
         age = (as_of - b["date"]).days
@@ -356,13 +380,42 @@ def outstanding(db: Session, company_id: uuid.UUID, as_of: date, kind: str = "re
         dr, cr = (b["amount"], ZERO) if b["amount"] > 0 else (ZERO, -b["amount"])   # the books' side of the bill
         dr_total += dr
         cr_total += cr
-        rows.append({"party": led.name, "ledger_id": str(lid), "voucher_id": str(b["voucher_id"]),
-                     "bill": name, "date": str(b["date"]), "due_date": str(due),
-                     "dr": m(dr), "cr": m(cr), "pending": m(pending), "age_days": age, "overdue_days": max(0, overdue),
-                     "bucket": bucket})
-    return {"as_of": str(as_of), "kind": kind, "age_by": age_by, "periods": list(buckets), "bills": rows,
-            "ageing": {k: m(v) for k, v in totals.items()}, "total": m(sum(totals.values(), ZERO)),
+        rows.append({"party": led.name, "ledger_id": str(b["lid"]), "voucher_id": str(b["voucher_id"]),
+                     "bill": b["bill"], "date": str(b["date"]), "due_date": str(due),
+                     "dr": m(dr), "cr": m(cr), "pending": m(pending), "fifo_adjusted": m(b["adjusted"]),
+                     "age_days": age, "overdue_days": max(0, overdue), "bucket": bucket})
+    return {"as_of": str(as_of), "kind": kind, "age_by": age_by, "fifo": fifo, "periods": list(buckets),
+            "bills": rows, "ageing": {k: m(v) for k, v in totals.items()}, "total": m(sum(totals.values(), ZERO)),
             "total_dr": m(dr_total), "total_cr": m(cr_total)}
+
+
+def _fifo_adjust(items: list[dict], unadjusted: list[dict]) -> None:
+    """Set each party's On Account amounts (payments, receipts, journals not adjusted against a bill) off
+    against that party's oldest open amounts of the other side, first in first out. What cannot be set off
+    is added to items as an "On Account" line. items' amounts are reduced in place; "adjusted" records by how
+    much (in the books' sign of the bill)."""
+    by_party: dict[uuid.UUID, list[dict]] = defaultdict(list)
+    for b in items:
+        by_party[b["lid"]].append(b)
+    for u in sorted(unadjusted, key=lambda u: u["date"]):
+        if u["amount"] == ZERO:
+            continue
+        open_ = by_party[u["lid"]]
+        left = u["amount"]
+        for b in sorted(open_, key=lambda b: b["date"]):     # oldest first
+            if left == ZERO:
+                break
+            if b["amount"] == ZERO or (b["amount"] > 0) == (left > 0):
+                continue
+            take = min(abs(left), abs(b["amount"]))
+            step = take if b["amount"] > 0 else -take
+            b["amount"] -= step
+            b["adjusted"] += step
+            left += step
+        if left != ZERO:
+            rest = {**u, "amount": left, "bill": "On Account", "due": None, "adjusted": ZERO}
+            open_.append(rest)                # a later opposite amount can still be set off against it
+            items.append(rest)
 
 
 def _is_tax_ledger(ledger, groups: dict) -> bool:

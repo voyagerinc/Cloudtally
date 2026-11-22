@@ -948,7 +948,7 @@ function reportUrl(fmt) {
   if (name === "outstanding-payable") { path = "outstanding"; p.set("kind", "payable"); }
   if (name.startsWith("register-")) { path = "register"; p.set("base_type", name.split("-")[1]); }
   if (["balance-sheet", "outstanding"].includes(path)) { if (t) p.set("as_of", t); }
-  if (path === "outstanding") { p.set("ageing", ageingSetting().periods); p.set("age_by", ageingSetting().by); }
+  if (path === "outstanding") { p.set("ageing", ageingSetting().periods); p.set("age_by", ageingSetting().by); p.set("fifo", ageingSetting().fifo); }
   if (path === "hsn-summary") p.set("side", gstChoice.hsnSide);
   else { if (f) p.set("from_date", f); if (t) p.set("to_date", t); }
   if (name === "stock-journal" || name.startsWith("material-transfer-wip") || name === "wo-manufacturing") {
@@ -1776,13 +1776,13 @@ async function stockItemView(el, itemId) {
 function ageingSetting() {
   let v = null;
   try { v = JSON.parse(localStorage.getItem("erp_ageing") || "null"); } catch (_) { v = null; }
-  return { periods: (v && v.periods) || "30,60,90", by: (v && v.by) || "bill" };
+  return { periods: (v && v.periods) || "30,60,90", by: (v && v.by) || "bill", fifo: !(v && v.fifo === false) };
 }
 const drcr = (p) => (!p ? "" : `${rupees(Math.abs(p))} ${p > 0 ? "Dr" : "Cr"}`);
 async function outstandingView(el, kind) {
   const set = ageingSetting();
   const p = new URLSearchParams(rParams({ kind }, { asOf: true }));
-  p.set("ageing", set.periods); p.set("age_by", set.by);
+  p.set("ageing", set.periods); p.set("age_by", set.by); p.set("fifo", set.fifo);
   const r = await api(`/reports/outstanding?${p}`);
   const sign = kind === "receivable" ? 1 : -1;            // "pending" is positive for what is normally due
   const books = (v) => paise(v) * sign;                    // back to the books' side: Dr positive, Cr negative
@@ -1793,7 +1793,9 @@ async function outstandingView(el, kind) {
     const pt = parties.get(b.party);
     pt.dr += paise(b.dr); pt.cr += paise(b.cr);
     pt.by[b.bucket] = (pt.by[b.bucket] || 0) + books(b.pending);
+    pt.fifo = (pt.fifo || 0) + paise(b.fifo_adjusted);
     pt.children.push({ label: b.bill || "(on account)", dr: paise(b.dr), cr: paise(b.cr), by: { [b.bucket]: books(b.pending) }, b,
+      fifo: paise(b.fifo_adjusted),
       open: () => drillVoucher(b.voucher_id, `Bill ${b.bill}`) });
   }
   const net = books(r.total);
@@ -1801,6 +1803,7 @@ async function outstandingView(el, kind) {
       <label>Ageing periods (days) <input id="age-periods" value="${esc(set.periods)}" size="18" title="Upper limit of each period, e.g. 15,30,60,90,180"></label>
       <label>Age by <select id="age-by"><option value="bill" ${set.by === "bill" ? "selected" : ""}>Bill date</option>
         <option value="due" ${set.by === "due" ? "selected" : ""}>Due date (days overdue)</option></select></label>
+      <label title="Payments, receipts and journals not adjusted against a bill reference are set off against the oldest bills first"><input type="checkbox" id="age-fifo" ${set.fifo ? "checked" : ""}> Adjust On Account by FIFO</label>
       <button>Apply</button>
       <span class="small muted">e.g. 30,60,90 gives 0-30, 31-60, 61-90 and Above 90 · 15,30,45,60 · 30,90,180,365</span></form>
     <div class="cards">${r.periods.map((k) => `<div class="card"><div class="k">${esc(k)} days</div><div class="v">${drcr(books(r.ageing[k]))}</div></div>`).join("")}
@@ -1809,7 +1812,7 @@ async function outstandingView(el, kind) {
     e.preventDefault();
     const periods = $("#age-periods").value.split(/[\s,;]+/).map((x) => parseInt(x, 10)).filter((x) => x > 0);
     if (!periods.length) return alert("Enter the ageing periods in days, e.g. 30,60,90");
-    const v = { periods: [...new Set(periods)].sort((a, b) => a - b).join(","), by: $("#age-by").value };
+    const v = { periods: [...new Set(periods)].sort((a, b) => a - b).join(","), by: $("#age-by").value, fifo: $("#age-fifo").checked };
     try { localStorage.setItem("erp_ageing", JSON.stringify(v)); } catch (_) { /* private window */ }
     outstandingView(el, kind).catch((err) => alert(err.message));
   };
@@ -1819,6 +1822,7 @@ async function outstandingView(el, kind) {
     { label: "Due", get: (n) => (n.b ? esc(n.b.due_date) : "") },
     { label: "Dr", num: true, get: (n) => (n.dr == null ? "" : amt(n.dr)) },
     { label: "Cr", num: true, get: (n) => (n.cr == null ? "" : amt(n.cr)) },
+    ...(r.fifo ? [{ label: "Adj. by FIFO", num: true, get: (n) => (n.fifo ? drcr(-n.fifo) : "") }] : []),
     ...r.periods.map((k) => ({ label: `${k} days`, num: true, get: (n) => (n.by ? drcr(n.by[k] || 0) : "") })),
     { label: "Balance", num: true, get: (n) => (n.dr == null ? "" : drcr(n.dr - n.cr)) },
     { label: "Overdue days", num: true, get: (n) => (n.b ? n.b.overdue_days : "") },

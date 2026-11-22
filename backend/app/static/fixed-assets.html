@@ -48,6 +48,7 @@ th{background:#f3f5f8;font-size:12px;font-weight:600;color:#3b4252;position:stic
 td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 tr.tot td{font-weight:700;background:#f3f5f8}
 tr.grp td{background:#fafbfc;padding-top:8px}
+tr.py td{font-style:italic;color:#475569;border-top:2px solid #e2e8f0}
 @media print{.no-print{display:none}}
 tr.sub td{font-weight:600;background:#f8f9fb}
 tbody tr:hover{background:var(--row)}
@@ -929,6 +930,21 @@ function repStatement(out){
     totals[sec] = true;
   }
   if(Object.keys(totals).length > 1) rows.push(line(`<b>TOTAL (${Object.keys(totals).join("+")})</b>`, grand, "tot"));
+  // PREVIOUS YEAR: its closing is this year's opening (from the books); the rest is entered once per company.
+  const py = S.settings.prevYear || {};
+  const has = k => py[k] !== undefined && py[k] !== null && py[k] !== "";
+  const pyRow = {openGross: num(py.openGross), add: num(py.add), del: num(py.del), closeGross: grand.openGross,
+                 openAcc: num(py.openAcc), dep: num(py.dep), adj: num(py.adj), closeAcc: grand.openAcc, closeNet: grand.openNet,
+                 openNet: num(py.openGross) - num(py.openAcc)};
+  const pyCell = (k, auto) => `<td class="n">${auto || has(k) || (k === "openNet" && (has("openGross") || has("openAcc"))) ? f(pyRow[k]) : ""}</td>`;
+  rows.push(`<tr class="py"><td>PREVIOUS YEAR</td>${["openGross","add","del"].map(k => pyCell(k)).join("")}${pyCell("closeGross", 1)}
+    ${["openAcc","dep","adj"].map(k => pyCell(k)).join("")}${pyCell("closeAcc", 1)}${pyCell("closeNet", 1)}${pyCell("openNet")}</tr>`);
+  const pyCheck = [];
+  const pyTol = v => Math.max(1, Math.abs(v) * 0.0001);   // figures typed from a statement in lakhs carry its rounding
+  if(has("openGross") && Math.abs(pyRow.openGross + pyRow.add - pyRow.del - pyRow.closeGross) > pyTol(pyRow.closeGross))
+    pyCheck.push(`gross block: ${f(pyRow.openGross)} + ${f(pyRow.add)} − ${f(pyRow.del)} is not this year's opening ${f(pyRow.closeGross)}`);
+  if(has("openAcc") && Math.abs(pyRow.openAcc + pyRow.dep - pyRow.adj - pyRow.closeAcc) > pyTol(pyRow.closeAcc))
+    pyCheck.push(`depreciation: ${f(pyRow.openAcc)} + ${f(pyRow.dep)} − ${f(pyRow.adj)} is not this year's opening ${f(pyRow.closeAcc)}`);
   const eh = `<tr><th></th><th colspan="4" style="text-align:center">G R O S S &nbsp; B L O C K</th><th colspan="4" style="text-align:center">D E P R E C I A T I O N</th>
     <th colspan="2" style="text-align:center">N E T &nbsp; B L O C K</th></tr>`;
   out.innerHTML = `<div class="toolbar no-print"><label class="small">Amounts in <select id="stUnit"><option value="lakh" ${unit === "lakh" ? "selected" : ""}>Lakhs</option>
@@ -939,8 +955,21 @@ function repStatement(out){
          {t:`As on ${dmy(S.to)}`,n:1},{t:`As on ${dmy(S.from)}`,n:1}], rows, eh) +
     `<p class="small muted">Groups are the fixed-asset groups in Tally; software, licences and other intangibles are under B.
       ${estimated ? "Depreciation written back on sales is estimated in proportion to the cost sold; enter the actual figure per asset (Assets → Edit) to replace it." : ""}
-      If a Tally ledger holds net WDV (depreciation credited to the asset), its gross block is that WDV: enter cost and accumulated depreciation per asset for a true gross block.</p>`;
+      If a Tally ledger holds net WDV (depreciation credited to the asset), its gross block is that WDV: enter cost and accumulated depreciation per asset for a true gross block.</p>` +
+    (pyCheck.length ? `<p class="small" style="color:#b45309">Previous year does not add up — ${pyCheck.map(esc).join("; ")}.</p>` : "") +
+    `<details class="no-print"${Object.keys(py).length ? "" : " open"}><summary class="small"><b>Previous year figures</b> (in rupees; its closing comes from this year's opening)</summary>
+      <div class="grid2" style="margin-top:6px">
+        ${[["openGross", `Gross block as on ${dmy(`${+S.from.slice(0, 4) - 1}${S.from.slice(4)}`)}`], ["add", "Additions during the previous year"],
+           ["del", "Sale during the previous year"], ["openAcc", "Depreciation up to the start of the previous year"],
+           ["dep", "Depreciation for the previous year"], ["adj", "Depreciation adjusted on sales (previous year)"]]
+          .map(([k, label]) => `<label class="field">${esc(label)} <input type="number" step="0.01" data-py="${k}" value="${has(k) ? py[k] : ""}"></label>`).join("")}
+      </div><div class="foot"><button class="primary" id="pySave">Save previous year</button></div></details>`;
   $("#stUnit").onchange = e => { S.settings.statementUnit = e.target.value; changed(); renderReport(); };
+  $("#pySave").onclick = () => {
+    const v = {};
+    out.querySelectorAll("[data-py]").forEach(i => { if(i.value.trim() !== "") v[i.dataset.py] = r2(num(i.value)); });
+    S.settings.prevYear = v; changed(); renderReport();
+  };
 }
 
 function repSchedule(out){

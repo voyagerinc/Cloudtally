@@ -419,3 +419,27 @@ def test_only_the_system_admin_changes_security(db):
     headers = make_user(db, "sec-clerk")
     assert TestClient(app).put("/api/v1/admin/security", headers=headers,
                                json={"allow_public_tally": True, "confirm": "ALLOW"}).status_code == 403
+
+
+def test_outstanding_fifo_sets_off_on_account(books, admin):
+    """Receipts / journals not adjusted against a bill reduce the party's oldest bills first (FIFO)."""
+    voucher(books, admin)                                                              # INV-001 11,800 on 20 Apr
+    two = voucher(books, admin, date="2026-05-10", entries=[
+        {"ledger": "Acme Traders", "debit": "5900", "bills": [{"type": "New Ref", "name": "INV-002", "amount": "5900"}]},
+        {"ledger": "Sales", "credit": "5000"}, {"ledger": "Output IGST", "credit": "900"}])
+    assert two.status_code == 201, two.text
+    for d, amt, bills in (("2026-05-20", "12000", [{"type": "On Account", "name": "", "amount": "-12000"}]),
+                          ("2026-05-25", "1000", [])):                                 # On Account / no bill details
+        r = client.post(f"/api/v1/companies/{books}/vouchers", headers=admin, json={
+            "voucher_type": "Receipt", "date": d, "action": "post",
+            "entries": [{"ledger": "HDFC Bank", "debit": amt}, {"ledger": "Acme Traders", "credit": amt, "bills": bills}]})
+        assert r.status_code == 201, r.text
+    q = f"/api/v1/reports/outstanding?company_id={books}&as_of=2026-06-30"
+    r = client.get(q, headers=admin).json()
+    assert r["fifo"] is True and r["total"] == "4700.00"                              # 17,700 - 13,000
+    assert [(b["bill"], b["pending"], b["fifo_adjusted"]) for b in r["bills"]] == [("INV-002", "4700.00", "1200.00")]
+    off = client.get(q + "&fifo=false", headers=admin).json()                          # as booked, On Account apart
+    assert off["total"] == "4700.00"
+    assert sorted((b["bill"], b["dr"], b["cr"]) for b in off["bills"]) == [
+        ("INV-001", "11800.00", "0.00"), ("INV-002", "5900.00", "0.00"),
+        ("On Account", "0.00", "1000.00"), ("On Account", "0.00", "12000.00")]
