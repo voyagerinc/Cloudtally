@@ -24,7 +24,7 @@ from app import audit
 from app.api.deps import DB, CurrentUser, actor_of
 from app.audit import Actor
 from app.core.config import settings
-from app.core.security import check_password_rules, hash_key, hash_password
+from app.core.security import REPORTS, check_password_rules, hash_key, hash_password
 from app.licensing import service
 from app.licensing.core import (
     MODULES, decrypt_key, effective_status, encrypt_key, hash_license_key, new_license_key, sign_bytes, version_allowed,
@@ -266,6 +266,7 @@ def _license_out(db, lic: License, *, admin: bool = False) -> dict:
         "starts_at": lic.starts_at, "expires_at": lic.expires_at,
         "days_left": (lic.expires_at - today).days if lic.expires_at else None,
         "key_hint": f"…{lic.key_hint}", "modules": [{"code": m, "label": MODULES.get(m, m)} for m in lic.modules or []],
+        "reports": None if lic.reports is None else [{"code": k, "label": REPORTS.get(k, k)} for k in lic.reports],
         "max_users": lic.max_users, "max_installations": lic.max_installations, "max_companies": lic.max_companies,
         "offline_grace_days": lic.offline_grace_days, "heartbeat_hours": lic.heartbeat_hours,
         "min_version": lic.min_version, "max_version": lic.max_version,
@@ -434,6 +435,7 @@ class LicenseIn(BaseModel):
     max_installations: int | None = Field(None, ge=1, le=1000)
     max_companies: int | None = Field(None, ge=1, le=10000)
     modules: list[str] | None = None
+    reports: list[str] | None = None        # None: every report
     offline_grace_days: int | None = Field(None, ge=0, le=90)
     heartbeat_hours: int | None = Field(None, ge=1, le=168)
     min_version: str | None = Field(None, max_length=30)
@@ -445,6 +447,16 @@ class LicenseIn(BaseModel):
     def _modules(cls, v):
         if v is not None and (bad := set(v) - set(MODULES)):
             raise ValueError(f"unknown modules: {', '.join(sorted(bad))}")
+        return v
+
+    @field_validator("reports")
+    @classmethod
+    def _reports(cls, v):
+        from app.core.security import REPORTS
+        if v is not None:
+            if bad := set(v) - set(REPORTS):
+                raise ValueError(f"unknown reports: {', '.join(sorted(bad))}")
+            v = sorted(set(v))
         return v
 
 

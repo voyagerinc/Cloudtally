@@ -646,3 +646,33 @@ def test_the_download_reports_how_far_it_is(tmp_path, monkeypatch):
     assert len(digest) == 64 and (tmp_path / "x.part").stat().st_size == 1000000
     assert [s["done"] for s in seen] == [0, 250000, 500000, 750000] and seen[0]["total"] == 1000000   # server's size wins
     assert lic_client.DOWNLOAD["done"] == 1000000
+
+
+def test_licence_allows_only_the_reports_given_to_the_customer(db, admin, portal):
+    """A customer's licence can allow only some reports (e.g. one made for that customer); None means all."""
+    cid = customer(admin)
+    books = api.post(f"{V1}/companies", headers=admin, json={"name": "Acme Books", "books_from": "2026-04-01"}).json()
+    lic = licence(admin, cid)
+    assert lic["reports"] is None                                          # default: every report
+    assert api.put(f"{V1}/admin/customers/{cid}/companies", headers=admin,
+                   json={"company_ids": [books["id"]]}).status_code == 200
+    ha = company_admin(admin, cid, "acme-admin")
+    q = f"company_id={books['id']}&from_date=2026-04-01&to_date=2026-04-30"
+    assert api.get(f"{V1}/reports/trial-balance?{q}", headers=ha).status_code == 200
+    r = api.patch(f"{V1}/admin/licenses/{lic['id']}", headers=admin, json={"reports": ["wo-manufacturing", "trial-balance"]})
+    assert r.status_code == 200 and [x["code"] for x in r.json()["reports"]] == ["trial-balance", "wo-manufacturing"]
+    enforce.forget_cached()
+    assert api.get(f"{V1}/reports/trial-balance?{q}", headers=ha).status_code == 200
+    r = api.get(f"{V1}/reports/profit-loss?{q}", headers=ha)
+    assert r.status_code == 403 and "Profit & Loss" in r.json()["detail"]
+    assert api.get(f"{V1}/licence?company_id={books['id']}", headers=ha).json()["reports"] == \
+        ["trial-balance", "wo-manufacturing"]
+    assert api.patch(f"{V1}/admin/licenses/{lic['id']}", headers=admin, json={"reports": ["nope"]}).status_code == 422
+    assert api.patch(f"{V1}/admin/licenses/{lic['id']}", headers=admin, json={"reports": None}).json()["reports"] is None
+    assert api.get(f"{V1}/reports/profit-loss?{q}", headers=ha).status_code == 200      # all reports again
+    # The installation's signed entitlement carries the list too.
+    payload = {"installation_id": "i1", "status": "active", "reports": ["gstr1"]}
+    ent = core.entitlement_from_token(payload, "i1", utcnow(), utcnow())
+    assert ent.allows_report("gstr1") and not ent.allows_report("gstr2")
+    assert core.entitlement_from_token({"installation_id": "i1", "status": "active"}, "i1", utcnow(),
+                                       utcnow()).allows_report("gstr2")          # older licence server: all

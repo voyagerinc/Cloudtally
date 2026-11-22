@@ -611,6 +611,11 @@
       <label>Highest version<input name="max_version" placeholder="any"></label>
     </div>
     <fieldset><legend>Modules</legend><div id="licf-modules" class="row wrap"></div></fieldset>
+    <fieldset><legend>Reports this customer can use</legend>
+      <div class="row wrap"><label class="check"><input type="checkbox" id="licf-allrep" checked> All reports (also new ones)</label>
+        <button type="button" class="small" id="licf-rep-none">Untick all</button>
+        <span class="small muted">Untick "All reports" to allow only the ticked reports, e.g. a report made for this customer.</span></div>
+      <div id="licf-reports" class="row wrap" style="max-height:220px;overflow:auto"></div></fieldset>
     <label>Notes<input name="notes" maxlength="2000"></label>
   </form>
 </dialog>

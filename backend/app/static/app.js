@@ -101,7 +101,10 @@ function isAdmin() {   // company admin or accounts admin in the selected compan
   const a = (state.user?.companies || []).find((c) => c.company_id === state.company);
   return !!a && ["owner", "accounts_admin"].includes(a.role);
 }
+// Reports the customer's licence includes (set on the licence server). null: every report.
+const licensedReport = (key) => !state.licReports || state.licReports.includes(key);
 function can(perm) {
+  if (perm.startsWith("report.") && !licensedReport(perm.slice(7))) return false;
   const p = myPerms();
   return p === null || p.has(perm) || (perm.startsWith("report.") && p.has("reports.read"));
 }
@@ -2495,7 +2498,8 @@ renderers.users = async () => {
 function drawPerms() {
   const self = editingUser && editingUser.id === state.user.id;
   const all = chosenPerms.has("reports.read");
-  $("#uf-perms").innerHTML = permCatalog.groups.map((g) => `<fieldset><legend>${esc(g.name)}</legend>${g.permissions.map((p) => {
+  $("#uf-perms").innerHTML = permCatalog.groups.map((g) => `<fieldset><legend>${esc(g.name)}</legend>${g.permissions
+    .filter((p) => !p.key.startsWith("report.") || licensedReport(p.key.slice(7))).map((p) => {
     const sub = p.key.startsWith("report.");
     const on = chosenPerms.has(p.key) || (sub && all);
     // An admin can only hand out what they may do themselves; your own ticks are changed by another admin.
@@ -2792,6 +2796,8 @@ async function refreshBanner() {
   if (!state.user || state.user.license_mode === "off") { b.hidden = true; return; }
   try {
     const l = await api(`/licence${state.company ? `?company_id=${state.company}` : ""}`);
+    const reports = l.reports || null;
+    if (JSON.stringify(reports) !== JSON.stringify(state.licReports || null)) { state.licReports = reports; applyPerms(); }
     const text = l.read_only ? l.reason : (l.warnings || []).join(" ");
     // On a customer's server the manager sees every new version at once, with one click to install it.
     const upd = l.update_available ? `Version ${esc(l.update_available.version)} is available on the licence server `
@@ -2840,6 +2846,7 @@ function licenceBox(l, admin) {
       <div><span class="muted">Offline grace</span><br>${l.offline_grace_days} days</div>
     </div>
     <p class="small"><span class="muted">Modules:</span> ${l.modules.map((m) => esc(m.label)).join(", ") || "none"}</p>
+    <p class="small"><span class="muted">Reports:</span> ${l.reports == null ? "All reports" : `${l.reports.length} selected: ${l.reports.map((r) => esc(r.label)).join(", ") || "none"}`}</p>
     ${inst}${actions}</div>`;
 }
 
@@ -3034,6 +3041,18 @@ function wireCustomer(c) {
 }
 
 let licEditing = null;
+// Reports the licence allows: every report, or only the ticked ones (a report made for one customer).
+async function licenceReportsForm(l) {
+  const box = $("#licf-reports"), all = $("#licf-allrep");
+  const cat = await catalog();
+  const chosen = new Set(l && l.reports ? l.reports.map((r) => r.code) : []);
+  all.checked = !l || l.reports == null;
+  box.innerHTML = cat.reports.map((r) => `<label class="check"><input type="checkbox" data-rep="${esc(r.key)}"
+    ${all.checked || chosen.has(r.key) ? "checked" : ""}> ${esc(r.label)}</label>`).join("");
+  const sync = () => box.querySelectorAll("input").forEach((x) => { x.disabled = all.checked; if (all.checked) x.checked = true; });
+  all.onchange = sync; sync();
+  $("#licf-rep-none").onclick = () => { all.checked = false; sync(); box.querySelectorAll("input").forEach((x) => (x.checked = false)); };
+}
 function openLicenceForm(l, c) {
   licEditing = { lic: l, customer: c };
   const f = $("#licf"), el = (n) => f.elements.namedItem(n);
@@ -3042,6 +3061,7 @@ function openLicenceForm(l, c) {
   const mods = new Set(l ? l.modules.map((m) => m.code) : Object.keys(MODULE_LABELS));
   $("#licf-modules").innerHTML = Object.entries(MODULE_LABELS).map(([k, v]) =>
     `<label class="check"><input type="checkbox" data-mod="${k}" ${mods.has(k) ? "checked" : ""}> ${esc(v)}</label>`).join("");
+  licenceReportsForm(l);
   if (l) for (const k of ["plan", "starts_at", "expires_at", "max_users", "max_installations", "max_companies", "offline_grace_days", "heartbeat_hours", "min_version", "max_version", "notes"])
     el(k).value = l[k] ?? "";
   else el("starts_at").value = today();
@@ -3055,7 +3075,9 @@ $("#licf").onsubmit = async (e) => {
   const body = { plan: el("plan"), starts_at: el("starts_at") || null, max_users: num("max_users"), max_installations: num("max_installations"),
     max_companies: num("max_companies"), offline_grace_days: num("offline_grace_days"), heartbeat_hours: num("heartbeat_hours"),
     min_version: el("min_version") || null, max_version: el("max_version") || null, notes: el("notes") || null,
-    modules: [...document.querySelectorAll("#licf-modules [data-mod]:checked")].map((x) => x.dataset.mod) };
+    modules: [...document.querySelectorAll("#licf-modules [data-mod]:checked")].map((x) => x.dataset.mod),
+    reports: $("#licf-allrep").checked ? null : [...document.querySelectorAll("#licf-reports [data-rep]:checked")].map((x) => x.dataset.rep) };
+  if (body.reports && !body.reports.length && !confirm("No report is ticked: this customer will not see any report. Save anyway?")) return;
   if (el("expires_at") || licEditing.lic) body.expires_at = el("expires_at") || null;
   const { lic, customer } = licEditing;
   try {

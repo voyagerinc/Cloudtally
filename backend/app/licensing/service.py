@@ -136,6 +136,7 @@ def entitlement_token(db: Session, lic: License, inst: Installation) -> dict:
             lic.status, lic.starts_at, lic.expires_at, today),
         "starts_at": lic.starts_at.isoformat(), "expires_at": lic.expires_at.isoformat() if lic.expires_at else None,
         "modules": sorted(lic.modules or []), "max_users": lic.max_users, "max_companies": lic.max_companies,
+        "reports": sorted(lic.reports) if lic.reports is not None else None,
         "offline_grace_days": lic.offline_grace_days, "heartbeat_hours": lic.heartbeat_hours,
         "min_version": lic.min_version, "max_version": lic.max_version, "issued_at": utcnow().isoformat(),
     }

@@ -47,6 +47,8 @@ class License(IdMixin, TimestampMixin, Base):
     max_installations: Mapped[int] = mapped_column(Integer, default=1)
     max_companies: Mapped[int | None] = mapped_column(Integer)          # Tally companies; None: no limit
     modules: Mapped[list] = mapped_column(JSON, default=list)
+    # Reports this customer may use (keys of app.core.security.REPORTS). None: every report.
+    reports: Mapped[list | None] = mapped_column(JSON)
     offline_grace_days: Mapped[int] = mapped_column(Integer, default=7)
     heartbeat_hours: Mapped[int] = mapped_column(Integer, default=24)
     min_version: Mapped[str | None] = mapped_column(String(30))

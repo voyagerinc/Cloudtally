@@ -88,6 +88,10 @@ def check_perm(db: Session, company_id: uuid.UUID | None, perm: str) -> None:
     module = module_of(perm)
     if not ent.allows_module(module):
         raise HTTPException(403, f"Your licence does not include {MODULES[module]}. Contact Voyager to add it.")
+    if perm.startswith("report.") and not ent.allows_report(perm[len("report."):]):
+        from app.core.security import REPORTS
+        name = REPORTS.get(perm[len("report."):], perm[len("report."):])
+        raise HTTPException(403, f"Your licence does not include the report \"{name}\". Contact Voyager to add it.")
     if ent.read_only and perm in WRITE_PERMS:
         raise HTTPException(403, ent.reason)
 

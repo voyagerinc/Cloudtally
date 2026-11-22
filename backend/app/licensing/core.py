@@ -184,6 +184,7 @@ class Entitlement:
     state: str                          # unlicensed | active | grace | read_only | not_activated
     reason: str = ""
     modules: set[str] | None = None     # None: every module
+    reports: set[str] | None = None     # None: every report the modules include
     max_users: int | None = None
     max_companies: int | None = None
     read_only: bool = False
@@ -195,9 +196,13 @@ class Entitlement:
     def allows_module(self, module: str | None) -> bool:
         return module is None or self.modules is None or module in self.modules
 
+    def allows_report(self, key: str) -> bool:
+        return self.reports is None or key in self.reports
+
     def public(self) -> dict:
         return {"state": self.state, "reason": self.reason, "read_only": self.read_only,
                 "modules": sorted(self.modules) if self.modules is not None else None,
+                "reports": sorted(self.reports) if self.reports is not None else None,
                 "max_users": self.max_users, "max_companies": self.max_companies, "warnings": self.warnings,
                 "expires_at": self.expires_at, "customer": self.customer, "plan": self.plan}
 
@@ -219,6 +224,7 @@ def entitlement_from_license(lic, today: date) -> Entitlement:
     """Hosted books on the cloud server: the customer's licence, read live from the database."""
     status = effective_status(lic.status, lic.starts_at, lic.expires_at, today)
     ent = Entitlement(state="active", modules=set(lic.modules or []), max_users=lic.max_users,
+                      reports=set(lic.reports) if lic.reports is not None else None,
                       max_companies=lic.max_companies, expires_at=lic.expires_at.isoformat() if lic.expires_at else None,
                       customer=lic.customer.legal_name if lic.customer else None, plan=lic.plan)
     return _apply_status(ent, status, lic.expires_at, today)
@@ -251,6 +257,7 @@ def entitlement_from_token(payload: dict, installation_id: str, last_check_at: d
     expires = date.fromisoformat(payload["expires_at"]) if payload.get("expires_at") else None
     starts = date.fromisoformat(payload["starts_at"]) if payload.get("starts_at") else None
     ent = Entitlement(state="active", modules=set(payload.get("modules") or []), max_users=payload.get("max_users"),
+                      reports=set(payload["reports"]) if payload.get("reports") is not None else None,
                       max_companies=payload.get("max_companies"), expires_at=payload.get("expires_at"),
                       customer=payload.get("customer_name"), plan=payload.get("plan"))
     ent = _apply_status(ent, effective_status(payload.get("status", "active"), starts, expires, today), expires, today)
