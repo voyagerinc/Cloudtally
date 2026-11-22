@@ -676,3 +676,24 @@ def test_licence_allows_only_the_reports_given_to_the_customer(db, admin, portal
     assert ent.allows_report("gstr1") and not ent.allows_report("gstr2")
     assert core.entitlement_from_token({"installation_id": "i1", "status": "active"}, "i1", utcnow(),
                                        utcnow()).allows_report("gstr2")          # older licence server: all
+
+
+def test_fixed_assets_is_a_module_of_the_licence(db, admin, portal):
+    cid = customer(admin)
+    books = api.post(f"{V1}/companies", headers=admin, json={"name": "Acme Books", "books_from": "2026-04-01"}).json()
+    lic = licence(admin, cid)
+    assert "fixed_assets" in [m["code"] for m in lic["modules"]]          # a new licence has every module
+    assert api.put(f"{V1}/admin/customers/{cid}/companies", headers=admin,
+                   json={"company_ids": [books["id"]]}).status_code == 200
+    ha = company_admin(admin, cid, "acme-admin")
+    fa = f"{V1}/fixed-assets"
+    assert api.get(f"{fa}/state", headers=ha, params={"company": "Acme Books"}).status_code == 200
+    api.patch(f"{V1}/admin/licenses/{lic['id']}", headers=admin, json={"modules": ["accounting", "reports"]})
+    enforce.forget_cached()
+    r = api.get(f"{fa}/state", headers=ha, params={"company": "Acme Books"})
+    assert r.status_code == 403 and "Fixed assets" in r.json()["detail"]
+    assert api.get(f"{fa}/status", headers=ha).json()["companies"] == []
+    assert "fixed_assets" not in api.get(f"{V1}/licence?company_id={books['id']}", headers=ha).json()["modules"]
+    api.patch(f"{V1}/admin/licenses/{lic['id']}", headers=admin, json={"modules": ["accounting", "reports", "fixed_assets"]})
+    enforce.forget_cached()
+    assert api.get(f"{fa}/state", headers=ha, params={"company": "Acme Books"}).status_code == 200

@@ -122,6 +122,7 @@ function applyPerms() {
   document.querySelectorAll("#tabs button").forEach((b) => {
     const special = SPECIAL_TABS[b.dataset.perm];
     b.hidden = special ? !special() : b.dataset.perm === "report" ? !reportOpts.some((o) => !o.disabled) : !can(b.dataset.perm);
+    if (b.dataset.tab === "fixedassets" && state.licModules && !state.licModules.includes("fixed_assets")) b.hidden = true;   // licence module
   });
   $("#r-csv").hidden = $("#r-xlsx").hidden = $("#errors-csv").hidden = !can("export");
   $("#l-new").hidden = $("#ld-edit").hidden = !can("masters.write");
@@ -2796,8 +2797,10 @@ async function refreshBanner() {
   if (!state.user || state.user.license_mode === "off") { b.hidden = true; return; }
   try {
     const l = await api(`/licence${state.company ? `?company_id=${state.company}` : ""}`);
-    const reports = l.reports || null;
-    if (JSON.stringify(reports) !== JSON.stringify(state.licReports || null)) { state.licReports = reports; applyPerms(); }
+    const reports = l.reports || null, modules = l.modules || null;
+    if (JSON.stringify([reports, modules]) !== JSON.stringify([state.licReports || null, state.licModules || null])) {
+      state.licReports = reports; state.licModules = modules; applyPerms();
+    }
     const text = l.read_only ? l.reason : (l.warnings || []).join(" ");
     // On a customer's server the manager sees every new version at once, with one click to install it.
     const upd = l.update_available ? `Version ${esc(l.update_available.version)} is available on the licence server `
@@ -2812,7 +2815,8 @@ async function refreshBanner() {
 
 const fmtDate = (d) => (d ? new Date(d + (d.length === 10 ? "T00:00:00" : "")).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "");
 const size = (n) => (n > 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`);
-const MODULE_LABELS = { accounting: "Vouchers and ledgers", inventory: "Inventory", reports: "Reports", tally_sync: "Tally sync", export: "Export to CSV" };
+const MODULE_LABELS = { accounting: "Vouchers and ledgers", inventory: "Inventory", reports: "Reports", tally_sync: "Tally sync", export: "Export to CSV",
+  fixed_assets: "Fixed assets & depreciation" };
 
 function licenceBox(l, admin) {
   const days = l.days_left == null ? "never expires" : l.days_left < 0 ? `expired ${-l.days_left} day(s) ago` : `${l.days_left} day(s) left`;

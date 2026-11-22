@@ -26,6 +26,7 @@ MODULES: dict[str, str] = {
     "reports": "Reports",
     "tally_sync": "Tally sync",
     "export": "Export to CSV",
+    "fixed_assets": "Fixed assets & depreciation",
 }
 ALL_MODULES = list(MODULES)
 

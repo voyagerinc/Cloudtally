@@ -30,7 +30,13 @@ def _companies(db, user) -> list[Company]:
     stmt = select(Company).order_by(Company.name)
     if ids is not None:
         stmt = stmt.where(Company.id.in_(ids))
-    return [c for c in db.scalars(stmt) if has_perm(db, user, c.id, Perm.REPORTS_READ)]
+    return [c for c in db.scalars(stmt) if has_perm(db, user, c.id, Perm.REPORTS_READ) and _licensed(db, c.id)]
+
+
+def _licensed(db, company_id) -> bool:
+    """Fixed assets is a module of the customer's licence (ticked on the licence server)."""
+    from app.licensing.enforce import entitlement_for
+    return entitlement_for(db, company_id).allows_module("fixed_assets")
 
 
 def _company(db, user, name: str, perm: str = Perm.REPORTS_READ) -> Company:
@@ -38,6 +44,9 @@ def _company(db, user, name: str, perm: str = Perm.REPORTS_READ) -> Company:
     c = next((c for c in _companies(db, user) if c.name == name), None) or \
         next((c for c in _companies(db, user) if c.name.lower().strip() == (name or "").lower().strip()), None)
     if c is None:
+        if any(c.name.lower().strip() == (name or "").lower().strip() and not _licensed(db, c.id)
+               for c in db.scalars(select(Company))):
+            raise HTTPException(403, "Your licence does not include Fixed assets & depreciation. Contact Voyager to add it.")
         raise HTTPException(404, f"Company '{name}' not found")
     authorize(db, user, c.id, perm)
     return c
