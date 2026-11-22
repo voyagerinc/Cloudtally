@@ -27,8 +27,13 @@ MODULES: dict[str, str] = {
     "tally_sync": "Tally sync",
     "export": "Export to CSV",
     "fixed_assets": "Fixed assets & depreciation",
+    "tally_two_way": "Two-way Tally sync (software to Tally)",
 }
 ALL_MODULES = list(MODULES)
+# Given only to approved customers: a new licence starts without it (Tally to software only).
+APPROVAL_MODULES = {"tally_two_way"}
+# Without two-way sync, a Tally-connected company's data is entered in Tally: these are refused in the software.
+TWO_WAY_PERMS = {"voucher.write", "voucher.post", "voucher.approve", "voucher.delete", "masters.write"}
 
 
 def module_of(perm: str) -> str | None:

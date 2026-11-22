@@ -27,7 +27,7 @@ from app.core.config import settings
 from app.core.security import REPORTS, check_password_rules, hash_key, hash_password
 from app.licensing import service
 from app.licensing.core import (
-    MODULES, decrypt_key, effective_status, encrypt_key, hash_license_key, new_license_key, sign_bytes, version_allowed,
+    APPROVAL_MODULES, MODULES, decrypt_key, effective_status, encrypt_key, hash_license_key, new_license_key, sign_bytes, version_allowed,
     version_tuple,
 )
 from app.licensing.enforce import customer_entitlement, live_users
@@ -721,7 +721,7 @@ def _new_license(db, user: User, c: Customer, body: LicenseIn) -> tuple[License,
         raise HTTPException(422, "The expiry date is before the start date")
     key = new_license_key()
     data = body.model_dump(include=set(LicenseIn.model_fields) - {"plan", "starts_at", "expires_at"}, exclude_none=True)
-    data.setdefault("modules", list(MODULES))
+    data.setdefault("modules", [m for m in MODULES if m not in APPROVAL_MODULES])
     lic = License(customer_id=c.id, plan=plan, starts_at=start, expires_at=expires, key_hash=hash_license_key(key),
                   key_hint=key[-4:], key_encrypted=encrypt_key(key), status="pending", created_by=user.username, **data)
     db.add(lic)

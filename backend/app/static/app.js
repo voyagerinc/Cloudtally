@@ -103,8 +103,11 @@ function isAdmin() {   // company admin or accounts admin in the selected compan
 }
 // Reports the customer's licence includes (set on the licence server). null: every report.
 const licensedReport = (key) => !state.licReports || state.licReports.includes(key);
+// Licence without two-way Tally sync: a Tally-connected company's data is entered in Tally, not here.
+const ONE_WAY_PERMS = ["voucher.write", "voucher.post", "voucher.approve", "voucher.delete", "masters.write"];
 function can(perm) {
   if (perm.startsWith("report.") && !licensedReport(perm.slice(7))) return false;
+  if (state.oneWay && ONE_WAY_PERMS.includes(perm)) return false;
   const p = myPerms();
   return p === null || p.has(perm) || (perm.startsWith("report.") && p.has("reports.read"));
 }
@@ -2797,11 +2800,12 @@ async function refreshBanner() {
   if (!state.user || state.user.license_mode === "off") { b.hidden = true; return; }
   try {
     const l = await api(`/licence${state.company ? `?company_id=${state.company}` : ""}`);
-    const reports = l.reports || null, modules = l.modules || null;
-    if (JSON.stringify([reports, modules]) !== JSON.stringify([state.licReports || null, state.licModules || null])) {
-      state.licReports = reports; state.licModules = modules; applyPerms();
+    const reports = l.reports || null, modules = l.modules || null, oneWay = !!l.tally_one_way;
+    if (JSON.stringify([reports, modules, oneWay]) !== JSON.stringify([state.licReports || null, state.licModules || null, !!state.oneWay])) {
+      state.licReports = reports; state.licModules = modules; state.oneWay = oneWay; applyPerms();
     }
-    const text = l.read_only ? l.reason : (l.warnings || []).join(" ");
+    const text = l.read_only ? l.reason : [...(l.warnings || []),
+      ...(oneWay ? ["Tally to software only: this company's vouchers and masters are entered in Tally (two-way sync needs Voyager's approval)."] : [])].join(" ");
     // On a customer's server the manager sees every new version at once, with one click to install it.
     const upd = l.update_available ? `Version ${esc(l.update_available.version)} is available on the licence server `
       + `(this server runs ${esc(l.version)}). <button type="button" class="small" id="banner-update">Update now</button>` : "";
@@ -2816,7 +2820,8 @@ async function refreshBanner() {
 const fmtDate = (d) => (d ? new Date(d + (d.length === 10 ? "T00:00:00" : "")).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "");
 const size = (n) => (n > 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`);
 const MODULE_LABELS = { accounting: "Vouchers and ledgers", inventory: "Inventory", reports: "Reports", tally_sync: "Tally sync", export: "Export to CSV",
-  fixed_assets: "Fixed assets & depreciation" };
+  fixed_assets: "Fixed assets & depreciation", tally_two_way: "Two-way Tally sync (software to Tally) - approved customers only" };
+const APPROVAL_MODULES = ["tally_two_way"];   // a new licence starts without these
 
 function licenceBox(l, admin) {
   const days = l.days_left == null ? "never expires" : l.days_left < 0 ? `expired ${-l.days_left} day(s) ago` : `${l.days_left} day(s) left`;
@@ -3062,7 +3067,7 @@ function openLicenceForm(l, c) {
   const f = $("#licf"), el = (n) => f.elements.namedItem(n);
   f.reset(); $("#licf-msg").textContent = "";
   $("#licf-title").textContent = l ? `Change licence ${l.key_hint}` : `New licence for ${c.legal_name}`;
-  const mods = new Set(l ? l.modules.map((m) => m.code) : Object.keys(MODULE_LABELS));
+  const mods = new Set(l ? l.modules.map((m) => m.code) : Object.keys(MODULE_LABELS).filter((k) => !APPROVAL_MODULES.includes(k)));
   $("#licf-modules").innerHTML = Object.entries(MODULE_LABELS).map(([k, v]) =>
     `<label class="check"><input type="checkbox" data-mod="${k}" ${mods.has(k) ? "checked" : ""}> ${esc(v)}</label>`).join("");
   licenceReportsForm(l);

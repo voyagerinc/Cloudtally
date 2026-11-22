@@ -44,8 +44,10 @@ def recover_stale(db: Session) -> int:
 def claim(db: Session, limit: int, company_id: uuid.UUID | None = None) -> list[uuid.UUID]:
     """Lock and mark a batch of due events. SKIP LOCKED lets several workers run safely."""
     conns = {c.company_id: c for c in db.scalars(select(TallyConnector))}
+    from app.licensing.enforce import entitlement_for
     runnable = [cid for cid, c in conns.items()
-                if c.enabled and c.outbound_enabled and not c.freeze_outbound and (company_id in (None, cid))]
+                if c.enabled and c.outbound_enabled and not c.freeze_outbound and (company_id in (None, cid))
+                and entitlement_for(db, cid).allows_module("tally_two_way")]   # one-way licence: nothing to Tally
     if not runnable:
         return []
     stmt = (select(SyncOutbox)

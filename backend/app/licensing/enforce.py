@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.licensing.core import FULL, MODULES, WRITE_PERMS, Entitlement, entitlement_from_license, \
+from app.licensing.core import FULL, MODULES, TWO_WAY_PERMS, WRITE_PERMS, Entitlement, entitlement_from_license, \
     entitlement_from_token, effective_status, module_of, utc, verify
 from app.models import Company, Customer, License, LicenseState, User, UserCompanyAccess, UserSession
 from app.models.base import utcnow
@@ -94,6 +94,24 @@ def check_perm(db: Session, company_id: uuid.UUID | None, perm: str) -> None:
         raise HTTPException(403, f"Your licence does not include the report \"{name}\". Contact Voyager to add it.")
     if ent.read_only and perm in WRITE_PERMS:
         raise HTTPException(403, ent.reason)
+    if perm in TWO_WAY_PERMS and one_way(db, company_id, ent):
+        raise HTTPException(403, ONE_WAY_MESSAGE)
+
+
+ONE_WAY_MESSAGE = ("Your licence syncs from Tally to the software only: enter and change this company's vouchers and "
+                   "masters in Tally, then Sync now. Contact Voyager to approve two-way sync.")
+
+
+def one_way(db: Session, company_id: uuid.UUID | None, ent: Entitlement | None = None) -> bool:
+    """True when the company is connected to Tally and the licence does not include two-way sync."""
+    if company_id is None:
+        return False
+    ent = ent or entitlement_for(db, company_id)
+    if ent.allows_module("tally_two_way"):
+        return False
+    from app.models import TallyConnector
+    conn = db.get(TallyConnector, company_id)
+    return conn is not None and conn.enabled
 
 
 def _customer_of(db: Session, company_id: uuid.UUID | None) -> uuid.UUID | None:

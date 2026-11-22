@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.core.security import check_password_rules, hash_password
 from app.licensing import client, service
 from app.licensing.core import version_tuple
-from app.licensing.enforce import entitlement_for, seats_in_use
+from app.licensing.enforce import entitlement_for, one_way, seats_in_use
 from app.models import Company, User
 
 router = APIRouter(prefix="/licence", tags=["licence"])
@@ -22,7 +22,8 @@ def licence_status(db: DB, user: CurrentUser, company_id: uuid.UUID | None = Non
         company_id = None
     ent = entitlement_for(db, company_id)
     out = {"mode": settings.license_mode, "version": __version__, **ent.public(),
-           "users_used": seats_in_use(db, company_id) if ent.max_users is not None else None}
+           "users_used": seats_in_use(db, company_id) if ent.max_users is not None else None,
+           "tally_one_way": one_way(db, company_id, ent)}
     if settings.license_mode == "client" and user.is_superadmin:
         st = client.state(db)
         out.update(installation_id=st.installation_id, server_url=st.server_url or settings.license_server_url,

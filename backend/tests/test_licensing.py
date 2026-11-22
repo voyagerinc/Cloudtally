@@ -697,3 +697,37 @@ def test_fixed_assets_is_a_module_of_the_licence(db, admin, portal):
     api.patch(f"{V1}/admin/licenses/{lic['id']}", headers=admin, json={"modules": ["accounting", "reports", "fixed_assets"]})
     enforce.forget_cached()
     assert api.get(f"{fa}/state", headers=ha, params={"company": "Acme Books"}).status_code == 200
+
+
+def test_two_way_sync_only_for_approved_customers(db, admin, portal):
+    """Without the two-way module a Tally-connected company works Tally -> software only."""
+    import uuid
+    from app.models import TallyConnector
+    from app.services.sync import outbound
+    cid = customer(admin)
+    books = api.post(f"{V1}/companies", headers=admin, json={"name": "Acme Books", "books_from": "2026-04-01"}).json()
+    lic = licence(admin, cid)
+    assert activate(lic["license_key"]).status_code == 200                   # pending until first activated
+    enforce.forget_cached()
+    mods = [m["code"] for m in lic["modules"]]
+    assert "tally_two_way" not in mods and "tally_sync" in mods               # new licence: one way until approved
+    assert api.put(f"{V1}/admin/customers/{cid}/companies", headers=admin,
+                   json={"company_ids": [books["id"]]}).status_code == 200
+    ha = company_admin(admin, cid, "acme-admin")
+    new_ledger = lambda name: api.post(f"{V1}/companies/{books['id']}/masters/ledgers", headers=ha,  # noqa: E731
+                                       json={"name": name, "group": "Indirect Expenses"})
+    r = new_ledger("Rent")
+    assert r.status_code == 201, r.text                                       # not connected to Tally: own books
+    company_id = uuid.UUID(books["id"])
+    db.add(TallyConnector(company_id=company_id, tally_company_name="Acme", enabled=True, outbound_enabled=True))
+    db.commit()
+    r = new_ledger("Power")
+    assert r.status_code == 403 and "Tally to the software only" in r.json()["detail"]
+    assert api.get(f"{V1}/licence?company_id={books['id']}", headers=ha).json()["tally_one_way"] is True
+    assert api.get(f"{V1}/companies/{books['id']}/vouchers", headers=ha).status_code == 200   # viewing works
+    assert outbound.claim(db, 10, company_id) == []                         # nothing is sent to Tally
+    api.patch(f"{V1}/admin/licenses/{lic['id']}", headers=admin, json={"modules": mods + ["tally_two_way"]})
+    enforce.forget_cached()
+    assert new_ledger("Power").status_code == 201                             # approved: two-way
+    assert api.get(f"{V1}/licence?company_id={books['id']}", headers=ha).json()["tally_one_way"] is False
+    assert len(outbound.claim(db, 10, company_id)) == 1                      # "Power" goes to Tally now
