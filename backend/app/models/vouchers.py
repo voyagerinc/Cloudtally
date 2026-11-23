@@ -55,6 +55,8 @@ class Voucher(IdMixin, TimestampMixin, Base):
     is_invoice: Mapped[bool] = mapped_column(default=False)
     is_reverse_charge: Mapped[bool] = mapped_column(default=False)
     statutory: Mapped[dict] = mapped_column(JSON, default=dict)   # e-invoice IRN, e-way bill no., etc.
+    # Fields a Tally customisation (TDL) keeps, e.g. chassis / motor no.: codec.custom_fields_of. Not accounting content.
+    custom_fields: Mapped[dict | None] = mapped_column(JSON)
 
     status: Mapped[str] = mapped_column(String(20), default=VoucherStatus.DRAFT, index=True)
     sync_status: Mapped[str] = mapped_column(String(20), default=SyncStatus.NOT_SYNCED)

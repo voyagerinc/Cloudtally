@@ -158,7 +158,7 @@ def test_reports_balance(books, admin):
     assert os_["total"] == "6800.00" and os_["bills"][0]["bill"] == "INV-001"
     bill = os_["bills"][0]
     assert (bill["dr"], bill["cr"]) == ("6800.00", "0.00") and os_["total_dr"] == "6800.00"      # Dr / Cr, no minus
-    assert os_["periods"] == ["0-30", "31-60", "61-90", "Above 90"]
+    assert os_["periods"] == ["0-30", "31-60", "61-90", "91-120", "121-150", "151-180", "181-365", "Above 365"]
     age = bill["age_days"]
     own = client.get(f"/api/v1/reports/outstanding?company_id={books}&as_of=2026-06-30&ageing=15,45",
                      headers=admin).json()                                                         # the user's periods
@@ -357,7 +357,13 @@ def test_page_loads_the_current_version_of_its_script():
     from app import __version__
     r = client.get("/")
     assert r.headers["cache-control"] == "no-cache"
-    assert f'/static/app.js?v={__version__}"' in r.text and f'/static/app.css?v={__version__}"' in r.text
+    import re
+    js = re.search(r'/static/app\.js\?v=([^"]+)"', r.text).group(1)
+    assert js.startswith(f"{__version__}-") and f'/static/app.css?v={__version__}-' in r.text
+    # Tagged by content too: a change to app.js between releases gets a new tag, so it is never a stale copy.
+    from app import main
+    main._tags["app.js"] = (("app.js", 0, 0), "old")           # as if the file had been different before
+    assert re.search(r'/static/app\.js\?v=([^"]+)"', client.get("/").text).group(1) == js
 
 
 def test_masters_menu_lists(db, books, admin):
@@ -443,3 +449,98 @@ def test_outstanding_fifo_sets_off_on_account(books, admin):
     assert sorted((b["bill"], b["dr"], b["cr"]) for b in off["bills"]) == [
         ("INV-001", "11800.00", "0.00"), ("INV-002", "5900.00", "0.00"),
         ("On Account", "0.00", "1000.00"), ("On Account", "0.00", "12000.00")]
+
+
+def test_cash_flow_and_funds_flow(books, admin):
+    voucher(books, admin)                                                   # sale 11,800 to Acme (on credit)
+    client.post(f"/api/v1/companies/{books}/vouchers", headers=admin, json={
+        "voucher_type": "Receipt", "date": "2026-05-05", "action": "post",
+        "entries": [{"ledger": "HDFC Bank", "debit": "5000"}, {"ledger": "Acme Traders", "credit": "5000"}]})
+    client.post(f"/api/v1/companies/{books}/vouchers", headers=admin, json={
+        "voucher_type": "Payment", "date": "2026-05-06", "action": "post",
+        "entries": [{"ledger": "Rent", "debit": "2500"}, {"ledger": "HDFC Bank", "credit": "2500"}]})
+    q = f"company_id={books}&from_date=2026-04-01&to_date=2027-03-31"
+    cf = client.get(f"/api/v1/reports/cash-flow?{q}", headers=admin).json()
+    assert (cf["opening"], cf["total_inflow"], cf["total_outflow"], cf["closing"]) == ("100000.00", "5000.00", "2500.00", "102500.00")
+    assert cf["difference"] == "0.00" and cf["inflow"][0]["group"] == "Sundry Debtors"
+    assert cf["outflow"][0]["ledgers"] == [{"ledger": "Rent", "amount": "2500.00"}]
+    assert [(x["month"], x["net"]) for x in cf["months"]] == [("2026-05", "2500.00")]
+    ff = client.get(f"/api/v1/reports/funds-flow?{q}", headers=admin).json()
+    assert ff["net_profit"] == "7500.00" and ff["sources"][0] == {"particulars": "Net profit", "amount": "7500.00"}
+    assert ff["difference"] == "0.00" and ff["working_capital_change"] == "7500.00"
+    assert client.get(f"/api/v1/reports/cash-flow?{q}&format=xlsx", headers=admin).status_code == 200
+
+
+def test_receivables_ageing_from_the_eway_bill_date(db, books, admin):
+    import uuid as _uuid
+    from app.models import Voucher
+    v = voucher(books, admin).json()                                        # INV-001 dated 20 Apr
+    row = db.get(Voucher, _uuid.UUID(v["id"]))
+    row.statutory = {"eway_bill_no": "391000000001", "eway_bill_date": "2026-05-25"}
+    db.commit()
+    q = f"/api/v1/reports/outstanding?company_id={books}&as_of=2026-06-30&ageing=30,60"
+    by_voucher = client.get(q, headers=admin).json()["bills"][0]
+    by_eway = client.get(q + "&basis=eway", headers=admin).json()
+    bill = by_eway["bills"][0]
+    assert by_eway["basis"] == "eway" and (bill["eway_bill_no"], bill["eway_bill_date"]) == ("391000000001", "2026-05-25")
+    assert (by_voucher["age_days"], bill["age_days"]) == (71, 36)            # 20 Apr vs 25 May to 30 Jun
+    assert (by_voucher["bucket"], bill["bucket"]) == ("Above 60", "31-60") and bill["aged_from"] == "E-way bill"
+    row.statutory = {}
+    db.commit()
+    assert client.get(q + "&basis=eway", headers=admin).json()["bills"][0]["aged_from"] == "Voucher date"
+
+
+def test_ageing_includes_opening_bills_and_opening_on_account(db, books, admin):
+    """Opening bills from Tally are bills; the rest of the opening balance is on account (set off by FIFO)."""
+    import uuid as _uuid
+    from decimal import Decimal as D
+    from sqlalchemy import select
+    from app.models import Ledger
+    acme = db.scalar(select(Ledger).where(Ledger.company_id == _uuid.UUID(books), Ledger.name == "Acme Traders"))
+    acme.opening_balance = D("5000")
+    acme.opening_bills = [{"name": "OB-1", "date": "2026-02-10", "amount": "3000.00", "due_date": None},
+                          {"name": "ADVANCE", "date": "2026-03-31", "amount": "-500.00", "due_date": None}]
+    db.commit()
+    client.post(f"/api/v1/companies/{books}/vouchers", headers=admin, json={
+        "voucher_type": "Receipt", "date": "2026-05-05", "action": "post",
+        "entries": [{"ledger": "HDFC Bank", "debit": "1000"},
+                    {"ledger": "Acme Traders", "credit": "1000", "bills": [{"type": "Agst Ref", "name": "OB-1", "amount": "-1000"}]}]})
+    r = client.get(f"/api/v1/reports/outstanding?company_id={books}&as_of=2026-06-30", headers=admin).json()
+    got = {b["bill"]: (b["pending"], b["date"]) for b in r["bills"]}
+    # 5,000 opening = OB-1 3,000 + advance -500 + 2,500 on account; 1,000 received against OB-1.
+    # FIFO sets the on-account 2,500 off against the 500 advance.
+    assert got == {"OB-1": ("2000.00", "2026-02-10"), "Opening balance": ("2000.00", "2026-03-31")}
+    assert r["total"] == "4000.00"
+    off = client.get(f"/api/v1/reports/outstanding?company_id={books}&as_of=2026-06-30&fifo=false", headers=admin).json()
+    assert {b["bill"]: b["pending"] for b in off["bills"]} == {"OB-1": "2000.00", "ADVANCE": "-500.00",
+                                                               "Opening balance": "2500.00"}
+
+
+def test_fifo_sets_dr_and_cr_off_for_each_party(books, admin):
+    """A credit against a reference that is not open (or an advance) clears the oldest debit bills first."""
+    voucher(books, admin)                                                    # INV-001 11,800 on 20 Apr
+    voucher(books, admin, date="2026-05-10", entries=[
+        {"ledger": "Acme Traders", "debit": "5900", "bills": [{"type": "New Ref", "name": "INV-002", "amount": "5900"}]},
+        {"ledger": "Sales", "credit": "5000"}, {"ledger": "Output IGST", "credit": "900"}])
+    r = client.post(f"/api/v1/companies/{books}/vouchers", headers=admin, json={
+        "voucher_type": "Receipt", "date": "2026-05-20", "action": "post",
+        "entries": [{"ledger": "HDFC Bank", "debit": "13000"},
+                    {"ledger": "Acme Traders", "credit": "13000", "bills": [{"type": "Advance", "name": "ADV-9", "amount": "-13000"}]}]})
+    assert r.status_code == 201, r.text
+    q = f"/api/v1/reports/outstanding?company_id={books}&as_of=2026-06-30"
+    fifo = client.get(q, headers=admin).json()
+    assert [(b["bill"], b["dr"], b["cr"], b["pending"]) for b in fifo["bills"]] == [("INV-002", "4700.00", "0.00", "4700.00")]
+    assert fifo["total"] == "4700.00"
+    booked = client.get(q + "&fifo=false", headers=admin).json()             # as booked: both sides shown
+    assert sorted(b["bill"] for b in booked["bills"]) == ["ADV-9", "INV-001", "INV-002"] and booked["total"] == "4700.00"
+
+
+def test_ageing_shows_each_bills_opening_amount(books, admin):
+    voucher(books, admin)                                                    # INV-001 11,800
+    client.post(f"/api/v1/companies/{books}/vouchers", headers=admin, json={
+        "voucher_type": "Receipt", "date": "2026-05-05", "action": "post",
+        "entries": [{"ledger": "HDFC Bank", "debit": "5000"},
+                    {"ledger": "Acme Traders", "credit": "5000", "bills": [{"type": "Agst Ref", "name": "INV-001", "amount": "-5000"}]}]})
+    bill = client.get(f"/api/v1/reports/outstanding?company_id={books}&as_of=2026-06-30", headers=admin).json()["bills"][0]
+    assert (bill["bill"], bill["opening_amount"], bill["pending"]) == ("INV-001", "11800.00", "6800.00")
+    assert "state" in bill and "address" in bill                             # shown after the party name

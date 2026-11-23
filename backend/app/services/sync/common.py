@@ -13,7 +13,15 @@ from app.services.canonical import diff
 
 
 def client_for(conn: TallyConnector) -> TallyClient:
-    return TallyClient(conn.host, conn.port, conn.tally_company_name)
+    client = TallyClient(conn.host, conn.port, conn.tally_company_name)
+    client.extra_fetch = custom_fetch(conn)
+    return client
+
+
+def custom_fetch(conn: TallyConnector) -> list[str]:
+    """Custom (TDL) fields the company chose to sync: asked for by name along with the voucher."""
+    from app.connectors.tally.codec import fetch_name
+    return sorted({n for f in conn.custom_fields or [] if (n := fetch_name(f.get("tag") or ""))})
 
 
 def backoff_delay(attempts: int) -> timedelta:

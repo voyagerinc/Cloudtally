@@ -208,6 +208,7 @@
       <option value="day-book" data-report="day-book">Day Book</option>
       <option value="stock-summary" data-report="stock-summary">Stock Summary</option>
       <option value="outstanding" data-report="receivables">Receivables (ageing)</option>
+      <option value="receivables-eway" data-report="receivables-eway">Receivables (ageing by e-way bill date)</option>
       <option value="outstanding-payable" data-report="payables">Payables (ageing)</option>
       <option value="register-Sales" data-report="sales-register">Sales Register</option>
       <option value="register-Purchase" data-report="purchase-register">Purchase Register</option>
@@ -216,6 +217,9 @@
       <option value="hsn-summary" data-report="hsn-summary">GST: HSN summary</option>
       <option value="einvoice" data-report="einvoice">GST: E-invoice status</option>
       <option value="eway-bill" data-report="eway-bill">GST: E-way bill status</option>
+      <option value="cash-flow" data-report="cash-flow">Cash Flow</option>
+      <option value="funds-flow" data-report="funds-flow">Funds Flow</option>
+      <option value="custom-fields" data-report="custom-fields">Custom fields from Tally (chassis / motor no. etc.)</option>
       <option value="sales-analysis" data-report="sales-analysis">Sales analysis</option>
       <option value="purchase-analysis" data-report="purchase-analysis">Purchase analysis</option>
       <option value="sales-rm-cost" data-report="sales-rm-cost">Sales with raw-material cost</option>
@@ -397,6 +401,7 @@
       <label class="check"><input type="radio" name="c-mode" value="bidirectional" id="c-mode-both"> <span><b>Bidirectional</b> – both ways.
         Vouchers entered or changed in the software are also written into Tally.</span></label>
       <p class="small muted" id="c-waiting"></p>
+      <p class="small error" id="c-two-way-note" hidden>Your licence allows one way only (Tally → software). Contact Voyager to approve two-way sync.</p>
     </fieldset>
     <fieldset><legend>Emergency freeze</legend>
       <label class="check"><input type="checkbox" id="c-fout"> Freeze outbound</label>
@@ -406,6 +411,16 @@
     <div class="row"><button>Save connector</button><button type="button" id="c-test" class="secondary">Test connection</button>
       <button type="button" id="c-import" class="secondary">Import masters from Tally</button><span id="c-msg"></span></div>
   </form>
+  <fieldset id="cf-box"><legend>Custom fields from Tally (TDL customisation)</legend>
+    <p class="small muted">If this Tally has a customisation that adds fields such as chassis no., motor no. or dealer code,
+      find them here. Every field Tally sends with a voucher is kept; tick the ones to ask Tally for by name and to show first
+      in the <b>Custom fields from Tally</b> report. Nothing is written to Tally.</p>
+    <div class="row wrap"><label>Vouchers of (empty: the latest days)<input type="date" id="cf-day"></label>
+      <button type="button" id="cf-find" class="secondary">Find custom fields</button>
+      <button type="button" id="cf-save" hidden>Save chosen fields</button><span id="cf-msg" class="small"></span></div>
+    <div id="cf-list"></div>
+    <div class="row wrap"><span id="cf-read-slot"></span></div>
+  </fieldset>
   <pre id="c-result" class="small" hidden></pre>
 </section>
 
@@ -610,7 +625,11 @@
       <label>Lowest version<input name="min_version" placeholder="any"></label>
       <label>Highest version<input name="max_version" placeholder="any"></label>
     </div>
-    <fieldset><legend>Modules</legend><div id="licf-modules" class="row wrap"></div></fieldset>
+    <fieldset><legend>Modules</legend><div id="licf-modules" class="row wrap"></div>
+      <label>Tally sync<select id="licf-sync">
+        <option value="none">Not included</option>
+        <option value="one_way">One way – from Tally to software</option>
+        <option value="two_way">Two way – both directions (approved customers)</option></select></label></fieldset>
     <fieldset><legend>Reports this customer can use</legend>
       <div class="row wrap"><label class="check"><input type="checkbox" id="licf-allrep" checked> All reports (also new ones)</label>
         <button type="button" class="small" id="licf-rep-none">Untick all</button>

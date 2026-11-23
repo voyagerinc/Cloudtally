@@ -94,12 +94,29 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 @app.get("/", include_in_schema=False)
 def index():
-    """The page, always fresh, with its script and styles tagged by version: after an update the browser
-    loads the new ones by itself instead of an old copy it kept."""
+    """The page, always fresh, with its script and styles tagged by their content: whenever they change (an
+    update, or a change between releases) the browser loads the new ones instead of an old copy it kept."""
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    html = html.replace('/static/app.js"', f'/static/app.js?v={__version__}"').replace(
-        '/static/app.css"', f'/static/app.css?v={__version__}"')
+    html = html.replace('/static/app.js"', f'/static/app.js?v={_tag("app.js")}"').replace(
+        '/static/app.css"', f'/static/app.css?v={_tag("app.css")}"')
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+
+
+def _tag(name: str) -> str:
+    """Version plus a short fingerprint of the file's content."""
+    import hashlib
+    path = STATIC / name
+    try:
+        stat = path.stat()
+        key = (name, stat.st_mtime_ns, stat.st_size)
+        if _tags.get(name, (None,))[0] != key:
+            _tags[name] = (key, hashlib.sha1(path.read_bytes()).hexdigest()[:10])
+        return f"{__version__}-{_tags[name][1]}"
+    except OSError:
+        return __version__
+
+
+_tags: dict[str, tuple] = {}
 
 
 @app.get("/fixed-assets", include_in_schema=False)

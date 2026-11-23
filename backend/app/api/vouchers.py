@@ -152,6 +152,18 @@ def voucher_grid(doc: dict, groups: dict) -> list[list]:
         for e in doc["entries"]:
             a = Decimal(e["amount"])
             grid.append([e["ledger"], num(a) if a > 0 else None, num(-a) if a < 0 else None])
+    cf = doc.get("custom_fields") or {}
+    if cf.get("items"):       # Tally customisation: chassis / motor / battery no. etc. of each item line or batch
+        cols = list(dict.fromkeys(k for r in cf["items"] for k in r["fields"]))
+        grid.append([])
+        grid.append(band("Custom fields (from Tally)", 3 + len(cols)))
+        grid.append([(h, "head") for h in ["Item", "Batch", "Quantity", *cols]])
+        for r in cf["items"]:
+            grid.append([r["item"], r.get("batch"), r.get("quantity"), *[r["fields"].get(c) for c in cols]])
+    if cf.get("voucher"):
+        grid.append([])
+        for k, v in cf["voucher"].items():
+            grid.append([k, v])
     return grid
 
 

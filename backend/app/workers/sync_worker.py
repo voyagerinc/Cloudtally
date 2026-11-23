@@ -102,7 +102,15 @@ def run_company(session_factory: sessionmaker, company_id: uuid.UUID, force: boo
             company = db.get(Company, company_id)
             client = common.client_for(conn)
             try:
+                started = utcnow()
                 stats["inbound"] = inbound.poll(db, company, conn, client, force=force, progress=progress)
+                if conn.custom_fields:     # custom (TDL) fields the normal fetch does not bring: from the Day Book
+                    from app.services.sync import custom_fields
+                    try:
+                        stats["custom_fields"] = custom_fields.after_sync(db, company_id, started)
+                    except TallyError as exc:
+                        db.rollback()
+                        log.warning("custom fields not read for %s: %s", conn.tally_company_name, exc.message)
             except TallyError as exc:
                 db.rollback()
                 stats["inbound"] = {"error": exc.code, "message": exc.message}

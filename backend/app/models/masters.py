@@ -51,6 +51,9 @@ class Ledger(IdMixin, TimestampMixin, Base):
     group_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ledger_groups.id"), index=True)
     # Signed: debit positive, credit negative.
     opening_balance: Mapped[Decimal] = mapped_column(Money, default=ZERO)
+    # Opening bill-wise details from Tally: [{"name", "date", "amount" (debit positive), "due_date"}].
+    # None: not read yet. The part of opening_balance not in these bills is "on account".
+    opening_bills: Mapped[list | None] = mapped_column(JSON)
     is_billwise: Mapped[bool] = mapped_column(Boolean, default=False)
     credit_days: Mapped[int | None] = mapped_column(Integer)
     gstin: Mapped[str | None] = mapped_column(String(20))

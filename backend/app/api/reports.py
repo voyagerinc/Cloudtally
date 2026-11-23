@@ -13,8 +13,8 @@ from app import audit, reports
 from app.reports import analysis, xlsx
 from app.api.deps import DB, CurrentUser, actor_of, authorize
 from app.connectors.tally import TallyError
-from app.core.security import Perm
-from app.models import FinancialYear
+from app.core.security import Perm, has_perm
+from app.models import FinancialYear, TallyConnector
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -25,7 +25,7 @@ CSV_ROWS = {
     "sales-analysis": "rows", "purchase-analysis": "rows", "sales-rm-cost": "rows", "fifo-costing": "items",
     "sales-fifo-cost": "rows", "sales-group-wise": "rows", "stock-journal": "rows", "material-transfer-wip": "rows",
     "material-transfer-wip-main": "rows", "wo-manufacturing": "rows",
-    "gstr1": "rows", "gstr2": "rows", "hsn-summary": "rows", "einvoice": "rows", "eway-bill": "rows",
+    "gstr1": "rows", "gstr2": "rows", "hsn-summary": "rows", "einvoice": "rows", "eway-bill": "rows", "custom-fields": "rows", "cash-flow": "rows", "funds-flow": "rows",
 }
 
 
@@ -94,6 +94,26 @@ def balance_sheet(company_id: uuid.UUID, db: DB, user: CurrentUser, as_of: date 
     return reports.balance_sheet(db, company_id, t)
 
 
+@router.get("/cash-flow")
+def cash_flow(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+              to_date: date | None = None, format: Fmt = "json"):
+    """Money in and out of the cash and bank accounts, by the group of the other side, and month by month."""
+    from app.reports import flows
+    authorize(db, user, company_id, Perm.report("cash-flow"))
+    f, t = _default_period(db, company_id, from_date, to_date)
+    return _respond(db, user, company_id, "cash-flow", flows.cash_flow(db, company_id, f, t), format)
+
+
+@router.get("/funds-flow")
+def funds_flow(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+               to_date: date | None = None, format: Fmt = "json"):
+    """Sources and applications of funds, and the change in working capital."""
+    from app.reports import flows
+    authorize(db, user, company_id, Perm.report("funds-flow"))
+    f, t = _default_period(db, company_id, from_date, to_date)
+    return _respond(db, user, company_id, "funds-flow", flows.funds_flow(db, company_id, f, t), format)
+
+
 @router.get("/day-book")
 def day_book(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None, to_date: date | None = None,
              voucher_type: str | None = None, posted_only: bool = False, format: Fmt = "json"):
@@ -145,11 +165,16 @@ def stock_item(company_id: uuid.UUID, item_id: uuid.UUID, db: DB, user: CurrentU
 
 @router.get("/outstanding")
 def outstanding(company_id: uuid.UUID, db: DB, user: CurrentUser, as_of: date | None = None,
-                kind: Literal["receivable", "payable"] = "receivable", ageing: str = "30,60,90",
-                age_by: Literal["bill", "due"] = "bill", fifo: bool = True, format: Fmt = "json"):
+                kind: Literal["receivable", "payable"] = "receivable", ageing: str = "30,60,90,120,150,180,365",
+                age_by: Literal["bill", "due"] = "bill", fifo: bool = True,
+                basis: Literal["voucher", "eway"] = "voucher", format: Fmt = "json"):
     """ageing: the periods' upper limits in days, e.g. "15,30,60,90,180" (the user chooses them on the report).
     fifo: set On Account payments / receipts / journals off against the oldest bills."""
-    authorize(db, user, company_id, Perm.report("receivables" if kind == "receivable" else "payables"))
+    own = Perm.report("receivables" if kind == "receivable" else "payables")
+    # Ageing by e-way bill date: an option of the receivables / payables report, and a report of its own.
+    if basis == "eway" and kind == "receivable" and not has_perm(db, user, company_id, own):
+        own = Perm.report("receivables-eway")
+    authorize(db, user, company_id, own)
     try:
         limits = sorted({int(x) for x in ageing.replace(" ", "").split(",") if x})
     except ValueError:
@@ -158,7 +183,8 @@ def outstanding(company_id: uuid.UUID, db: DB, user: CurrentUser, as_of: date | 
         raise HTTPException(422, "Give 1 to 12 ageing periods between 1 and 3650 days, e.g. 30,60,90")
     _, t = _default_period(db, company_id, None, as_of)
     return _respond(db, user, company_id, "outstanding",
-                    reports.outstanding(db, company_id, t, kind, ageing=limits, age_by=age_by, fifo=fifo), format)
+                    reports.outstanding(db, company_id, t, kind, ageing=limits, age_by=age_by, fifo=fifo,
+                                        basis=basis), format)
 
 
 # ------------------------------------------------------------------ GST
@@ -208,6 +234,44 @@ def eway_bill(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date 
     authorize(db, user, company_id, Perm.report("eway-bill"))
     f, t = _default_period(db, company_id, from_date, to_date)
     return _respond(db, user, company_id, "eway-bill", gst.eway_bill(db, company_id, f, t), format)
+
+
+@router.get("/custom-fields")
+def custom_fields_report(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                         to_date: date | None = None, voucher_type: str | None = None, format: Fmt = "json"):
+    """Fields a Tally customisation keeps (e.g. chassis no., motor no.), per item line / batch or voucher."""
+    from app.services.sync import custom_fields
+    authorize(db, user, company_id, Perm.report("custom-fields"))
+    f, t = _default_period(db, company_id, from_date, to_date)
+    return _respond(db, user, company_id, "custom-fields",
+                    custom_fields.register(db, company_id, f, t, voucher_type), format)
+
+
+@router.post("/custom-fields/refresh-from-tally")
+def custom_fields_refresh(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                          to_date: date | None = None, from_books_beginning: bool = True):
+    """Read the custom fields of the vouchers again from Tally's Day Book (read only), in the background.
+    By default from the books' beginning (the company's books-from date) to today."""
+    from app.core.db import SessionLocal
+    from app.services.sync import custom_fields
+    company = authorize(db, user, company_id, Perm.SYNC_READ)
+    f, t = _default_period(db, company_id, from_date, to_date)
+    if from_books_beginning:
+        f, t = company.books_from, max(t, date.today())
+    if db.get(TallyConnector, company_id) is None:
+        raise HTTPException(422, "This company is not connected to Tally")
+    job = custom_fields.start_refresh(SessionLocal, company_id, f, t)
+    audit.record(db, actor_of(user), "custom_fields.refresh_from_tally", "company", company_id, company_id=company_id,
+                 after={"from": str(f), "to": str(t)})
+    db.commit()
+    return job
+
+
+@router.get("/custom-fields/refresh-from-tally")
+def custom_fields_refresh_status(company_id: uuid.UUID, db: DB, user: CurrentUser):
+    from app.services.sync import custom_fields
+    authorize(db, user, company_id, Perm.SYNC_READ)
+    return custom_fields.job(company_id) or {"running": False, "days": None}
 
 
 @router.post("/gst/refresh-from-tally")

@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from app import audit
 from app.api.deps import DB, CurrentUser, actor_of, authorize
 from app.connectors.tally import TallyError
+from app.core.config import settings
 from app.core.db import SessionLocal
 from app.core.security import Perm
 from app.licensing import enforce as licence
@@ -108,7 +109,14 @@ def _conn_out(conn: TallyConnector, db=None) -> dict:
     out["sync_mode"] = "bidirectional" if conn.outbound_enabled else "one_way"
     if db is not None:
         out["waiting_for_tally"] = _waiting(db, conn.company_id)
+        out["two_way_allowed"] = _two_way_allowed(db, conn.company_id)
     return out
+
+
+def _two_way_allowed(db, company_id) -> bool:
+    """Two-way (bidirectional) sync is in the licence only for customers Voyager approved."""
+    from app.licensing.enforce import entitlement_for
+    return entitlement_for(db, company_id).allows_module("tally_two_way")
 
 
 def _connector(db, company_id) -> TallyConnector:
@@ -116,6 +124,44 @@ def _connector(db, company_id) -> TallyConnector:
     if conn is None:
         raise HTTPException(404, "No Tally connector configured for this company")
     return conn
+
+
+class CustomFieldIn(BaseModel):
+    tag: str
+    label: str | None = None
+    level: Literal["voucher", "ledger", "item", "batch"] = "voucher"
+
+
+class CustomFieldsIn(BaseModel):
+    fields: list[CustomFieldIn]
+
+
+@router.post("/sync/connectors/{company_id}/custom-fields/discover")
+def discover_custom_fields(company_id: uuid.UUID, db: DB, user: CurrentUser, day: date | None = None):
+    """Find the custom (TDL) fields this Tally keeps: reads Tally's Day Book for a day (read only)."""
+    from app.services.sync import custom_fields
+    authorize(db, user, company_id, Perm.SYNC_READ)
+    try:
+        return custom_fields.discover(db, company_id, day)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    except TallyError as exc:
+        raise HTTPException(502, f"Tally: {exc.message}")
+
+
+@router.put("/sync/connectors/{company_id}/custom-fields")
+def save_custom_fields(company_id: uuid.UUID, body: CustomFieldsIn, db: DB, user: CurrentUser):
+    """The custom fields to bring with every voucher from now on."""
+    from app.services.sync import custom_fields
+    authorize(db, user, company_id, Perm.SYNC_MANAGE)
+    try:
+        saved = custom_fields.save(db, company_id, [f.model_dump() for f in body.fields])
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    audit.record(db, actor_of(user), "custom_fields.save", "company", company_id, company_id=company_id,
+                 after={"fields": saved})
+    db.commit()
+    return {"fields": saved}
 
 
 @router.get("/sync/connectors/{company_id}")
@@ -136,6 +182,9 @@ def put_connector(company_id: uuid.UUID, body: ConnectorIn, db: DB, user: Curren
     values = body.model_dump(exclude={"sync_mode", "queued_changes"})
     if body.sync_mode:
         values["inbound_enabled"], values["outbound_enabled"] = True, body.sync_mode == "bidirectional"
+    if values["outbound_enabled"] and not _two_way_allowed(db, company_id):
+        raise HTTPException(403, "Your licence allows one-way sync only (Tally to software). "
+                                 "Contact Voyager to approve two-way sync.")
     discarded = 0
     if values["outbound_enabled"] and not (before or {}).get("outbound_enabled"):
         # Turning on Tally writes: changes made in the software meanwhile would all go to Tally at once.
@@ -207,9 +256,24 @@ def check_connector(company_id: uuid.UUID, db: DB, user: CurrentUser):
     return result
 
 
+MAX_PASSES = 200          # Sync now keeps going until every changed voucher is in (500 per pass)
+
+
 def _run_in_background(company_id: uuid.UUID, who: str) -> None:
+    """Sync now: one pass, then more passes while Tally still has vouchers waiting (a large company's first
+    sync has thousands), so nobody has to click Sync now again and again. A pause between passes leaves
+    Tally free for the people working in it."""
+    import time
     try:
-        run_company(SessionLocal, company_id, force=True, trigger=f"Sync now by {who}")
+        for n in range(1, MAX_PASSES + 1):
+            trigger = f"Sync now by {who}" + (f" (part {n})" if n > 1 else "")
+            stats = run_company(SessionLocal, company_id, force=(n == 1), trigger=trigger)
+            with SessionLocal() as db:
+                conn = db.get(TallyConnector, company_id)
+                more = bool(conn and conn.voucher_backlog and conn.health_status == "ok")
+            if not more or "error" in (stats.get("inbound") or {}):
+                break
+            time.sleep(settings.sync_voucher_batch_pause)
     except Exception:   # already recorded on the progress row; nothing to return to
         log.exception("sync run failed for %s", company_id)
 

@@ -459,7 +459,13 @@ async function historyHtml(id) {
 // Stock lines as Tally shows them: quantities without a sign. The stored sign (inward +, outward −) only
 // matters when one voucher moves stock both ways, as stock and manufacturing journals do; then an
 // In / Out column says which lines were produced and which consumed.
-function inventoryTable(lines, groups = {}) {
+function inventoryTable(lines, groups = {}, custom = {}) {
+  // Custom (TDL) fields of each item line / batch from Tally, e.g. chassis, motor, battery no.: a column each.
+  const cfRows = custom.items || [];
+  const cfCols = [...new Set(cfRows.flatMap((r) => Object.keys(r.fields || {})))];
+  const sameItem = (i) => lines.filter((x) => x.item === i.item).length;
+  const cfOf = (i) => cfRows.filter((r) => r.item === i.item && (sameItem(i) === 1 || !r.batch || r.batch === i.batch));
+  const cfCell = (i, c) => cfOf(i).map((r) => esc(r.fields[c] || "")).join("<br>");
   const dir = (i) => (Number(i.quantity) > 0 || (Number(i.quantity) === 0 && i.direction === "in") ? "In" : "Out");
   const mixed = new Set(lines.map(dir)).size > 1;
   const qtyNum = (n) => n.toLocaleString("en-IN", { maximumFractionDigits: 4 });
@@ -470,12 +476,13 @@ function inventoryTable(lines, groups = {}) {
     const amount = rows.reduce((a, i) => a + paise(i.amount), 0);
     return `<h3>${esc(title)} <span class="muted small">${rows.length} item${rows.length === 1 ? "" : "s"}</span></h3>
       <table><thead><tr><th>Item</th><th>Item group</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th>
-      <th>Godown</th><th>Batch</th></tr></thead><tbody>${rows.map((i) =>
+      <th>Godown</th><th>Batch</th>${cfCols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${rows.map((i) =>
       `<tr><td>${esc(i.item)}</td><td>${esc(groups[i.item] || "")}</td>
         <td class="num">${Number(i.quantity) === 0 ? "value only" : esc(qtyText(i))}</td><td class="num">${money(i.rate)}</td>
-        <td class="num">${money(i.amount)}</td><td>${esc(i.godown || "")}</td><td>${esc(i.batch || "")}</td></tr>`).join("")}
+        <td class="num">${money(i.amount)}</td><td>${esc(i.godown || "")}</td><td>${cfOf(i).length > 1 ? cfOf(i).map((r) => esc(r.batch || "")).join("<br>") : esc(i.batch || "")}</td>
+        ${cfCols.map((c) => `<td>${cfCell(i, c)}</td>`).join("")}</tr>`).join("")}
       <tr class="total"><td><b>Total</b></td><td></td><td class="num"><b>${units.size === 1 ? esc(`${qtyNum(qty)} ${[...units][0]}`.trim()) : ""}</b></td>
-        <td></td><td class="num"><b>${rupees(amount)}</b></td><td></td><td></td></tr></tbody></table>`;
+        <td></td><td class="num"><b>${rupees(amount)}</b></td><td></td><td></td>${cfCols.map(() => "<td></td>").join("")}</tr></tbody></table>`;
   };
   // stock and manufacturing journals move stock both ways: what came in and what went out, as separate tables
   if (mixed) return part("In (produced / received)", lines.filter((i) => dir(i) === "In"))
@@ -498,8 +505,9 @@ async function openVoucher(id) {
     ${d.entries.map((e) => `<tr><td>${esc(e.ledger)}</td><td class="num">${+e.amount > 0 ? money(e.amount) : ""}</td><td class="num">${+e.amount < 0 ? money(-e.amount) : ""}</td>
       <td>${e.bills.map((b) => esc(`${b.type} ${b.name || ""}`)).join(", ")}</td><td>${e.bank.map((b) => esc(`${b.transaction_type || ""} ${b.instrument_no || ""}`)).join(", ")}</td></tr>`).join("")}
     </tbody></table>
-    ${d.inventory.length ? inventoryTable(d.inventory, v.item_groups || {}) : ""}
+    ${d.inventory.length ? inventoryTable(d.inventory, v.item_groups || {}, d.custom_fields || {}) : ""}
     ${statutoryHtml(d.statutory || {})}
+    ${customFieldsHtml({ ...(d.custom_fields || {}), itemsInTable: d.inventory.length > 0 })}
     <p class="small muted">${v.tally ? `Tally: MasterID ${esc(v.tally.master_id)} · AlterID ${esc(v.tally.alter_id)} · GUID ${esc(v.tally.guid)} · last sync ${when(v.tally.last_synced_at)}
       ${v.tally.last_error ? `<br><span class="error">${esc(v.tally.error_code)}: ${esc(v.tally.last_error)}</span>` : ""}` : "Not yet in Tally"}</p>
     <div class="row">${!["cancelled", "deleted"].includes(v.status) ? `<button data-edit>Edit</button>` : ""}
@@ -525,6 +533,16 @@ async function openVoucher(id) {
     const box = $("#vhist"); box.hidden = false; box.innerHTML = await historyHtml(id);
   };
   el.scrollIntoView({ behavior: "smooth" });
+}
+
+// Fields a Tally customisation keeps on the voucher, its lines and batches (e.g. chassis / motor no.).
+function customFieldsHtml(cf) {
+  const pairs = (f) => Object.entries(f || {}).map(([k, v]) => `<span class="muted">${esc(k)}</span> ${esc(v)}`).join(" · ");
+  const rows = [];
+  if (cf.voucher && Object.keys(cf.voucher).length) rows.push(`<div>${pairs(cf.voucher)}</div>`);
+  for (const l of cf.ledgers || []) rows.push(`<div><b>${esc(l.ledger)}:</b> ${pairs(l.fields)}</div>`);
+  for (const i of (cf.items || []).filter(() => !cf.itemsInTable)) rows.push(`<div><b>${esc(i.item)}${i.batch ? ` · batch ${esc(i.batch)}` : ""}${i.quantity ? ` · ${esc(i.quantity)}` : ""}:</b> ${pairs(i.fields)}</div>`);
+  return rows.length ? `<div class="small"><b>Custom fields (from Tally)</b>${rows.join("")}</div>` : "";
 }
 
 // E-invoice and e-way bill details of a voucher, as read from Tally.
@@ -953,9 +971,14 @@ function reportUrl(fmt) {
   const f = $("#r-from").value, t = $("#r-to").value;
   let path = name;
   if (name === "outstanding-payable") { path = "outstanding"; p.set("kind", "payable"); }
+  if (name === "receivables-eway") { path = "outstanding"; p.set("basis", "eway"); }
   if (name.startsWith("register-")) { path = "register"; p.set("base_type", name.split("-")[1]); }
   if (["balance-sheet", "outstanding"].includes(path)) { if (t) p.set("as_of", t); }
-  if (path === "outstanding") { p.set("ageing", ageingSetting().periods); p.set("age_by", ageingSetting().by); p.set("fifo", ageingSetting().fifo); }
+  if (path === "outstanding") {
+    const by = ageingSetting().by;
+    p.set("ageing", ageingSetting().periods); p.set("age_by", by === "eway" ? "bill" : by); p.set("fifo", ageingSetting().fifo);
+    if (by === "eway") p.set("basis", "eway");
+  }
   if (path === "hsn-summary") p.set("side", gstChoice.hsnSide);
   else { if (f) p.set("from_date", f); if (t) p.set("to_date", t); }
   if (name === "stock-journal" || name.startsWith("material-transfer-wip") || name === "wo-manufacturing") {
@@ -1665,6 +1688,7 @@ renderers.reports = async () => {
     "trial-balance": trialBalanceView, "profit-loss": profitLossView, "balance-sheet": balanceSheetView,
     "day-book": dayBookView, "stock-summary": stockSummaryView, outstanding: (el) => outstandingView(el, "receivable"),
     "outstanding-payable": (el) => outstandingView(el, "payable"),
+    "receivables-eway": (el) => outstandingView(el, "receivable", "eway"),
     "sales-analysis": (el) => analysisView(el, "sales-analysis"),
     "purchase-analysis": (el) => analysisView(el, "purchase-analysis"),
     "sales-rm-cost": (el) => analysisView(el, "sales-rm-cost"),
@@ -1676,7 +1700,7 @@ renderers.reports = async () => {
     "mis-deferred": misDeferredView,
     "fifo-costing": fifoView,
     gstr1: (el) => gstrView(el, "gstr1"), gstr2: (el) => gstrView(el, "gstr2"), "hsn-summary": hsnView,
-    einvoice: einvoiceView, "eway-bill": ewayView,
+    einvoice: einvoiceView, "eway-bill": ewayView, "custom-fields": customFieldsView, "cash-flow": cashFlowView, "funds-flow": fundsFlowView,
   };
   await drillTo(label, roots[name] || ((el) => registerView(el, name.split("-")[1])));
 };
@@ -1783,36 +1807,41 @@ async function stockItemView(el, itemId) {
 function ageingSetting() {
   let v = null;
   try { v = JSON.parse(localStorage.getItem("erp_ageing") || "null"); } catch (_) { v = null; }
-  return { periods: (v && v.periods) || "30,60,90", by: (v && v.by) || "bill", fifo: !(v && v.fifo === false) };
+  // The old default (30,60,90) moves to the longer one; periods a user typed themselves are kept.
+  const periods = v && v.periods && v.periods !== "30,60,90" ? v.periods : "30,60,90,120,150,180,365";
+  return { periods, by: (v && v.by) || "bill", fifo: !(v && v.fifo === false) };
 }
 const drcr = (p) => (!p ? "" : `${rupees(Math.abs(p))} ${p > 0 ? "Dr" : "Cr"}`);
-async function outstandingView(el, kind) {
+async function outstandingView(el, kind, basis = "voucher") {
   const set = ageingSetting();
   const p = new URLSearchParams(rParams({ kind }, { asOf: true }));
-  p.set("ageing", set.periods); p.set("age_by", set.by); p.set("fifo", set.fifo);
+  if (set.by === "eway") basis = "eway";
+  p.set("ageing", set.periods); p.set("age_by", set.by === "eway" ? "bill" : set.by); p.set("fifo", set.fifo); p.set("basis", basis);
   const r = await api(`/reports/outstanding?${p}`);
   const sign = kind === "receivable" ? 1 : -1;            // "pending" is positive for what is normally due
   const books = (v) => paise(v) * sign;                    // back to the books' side: Dr positive, Cr negative
   const parties = new Map();
   for (const b of r.bills) {
-    if (!parties.has(b.party)) parties.set(b.party, { label: b.party, dr: 0, cr: 0, by: {}, children: [
+    if (!parties.has(b.party)) parties.set(b.party, { label: b.party, state: b.state, address: b.address, dr: 0, cr: 0, by: {}, children: [
       { label: "Ledger statement ›", cls: "muted", open: () => openLedgerStatement(b.ledger_id, b.party) }] });
     const pt = parties.get(b.party);
-    pt.dr += paise(b.dr); pt.cr += paise(b.cr);
+    pt.dr += paise(b.dr); pt.cr += paise(b.cr); pt.opening = (pt.opening || 0) + paise(b.opening_amount);
     pt.by[b.bucket] = (pt.by[b.bucket] || 0) + books(b.pending);
     pt.fifo = (pt.fifo || 0) + paise(b.fifo_adjusted);
     pt.children.push({ label: b.bill || "(on account)", dr: paise(b.dr), cr: paise(b.cr), by: { [b.bucket]: books(b.pending) }, b,
+      opening: paise(b.opening_amount),
       fifo: paise(b.fifo_adjusted),
-      open: () => drillVoucher(b.voucher_id, `Bill ${b.bill}`) });
+      open: () => (b.voucher_id ? drillVoucher(b.voucher_id, `Bill ${b.bill}`) : openLedgerStatement(b.ledger_id, b.party)) });
   }
   const net = books(r.total);
   el.innerHTML = `<form id="age-form" class="row wrap filters">
-      <label>Ageing periods (days) <input id="age-periods" value="${esc(set.periods)}" size="18" title="Upper limit of each period, e.g. 15,30,60,90,180"></label>
+      <label>Ageing periods (days) <input id="age-periods" value="${esc(set.periods)}" size="28" title="Upper limit of each period, e.g. 15,30,60,90,180"></label>
       <label>Age by <select id="age-by"><option value="bill" ${set.by === "bill" ? "selected" : ""}>Bill date</option>
-        <option value="due" ${set.by === "due" ? "selected" : ""}>Due date (days overdue)</option></select></label>
+        <option value="due" ${set.by === "due" ? "selected" : ""}>Due date (days overdue)</option>
+        <option value="eway" ${set.by === "eway" ? "selected" : ""}>E-way bill date (voucher date when none)</option></select></label>
       <label title="Payments, receipts and journals not adjusted against a bill reference are set off against the oldest bills first"><input type="checkbox" id="age-fifo" ${set.fifo ? "checked" : ""}> Adjust On Account by FIFO</label>
       <button>Apply</button>
-      <span class="small muted">e.g. 30,60,90 gives 0-30, 31-60, 61-90 and Above 90 · 15,30,45,60 · 30,90,180,365</span></form>
+      <span class="small muted">e.g. 30,60,90,120,150,180,365 gives 0-30 … 181-365 and Above 365 · 15,30,45,60</span></form>
     <div class="cards">${r.periods.map((k) => `<div class="card"><div class="k">${esc(k)} days</div><div class="v">${drcr(books(r.ageing[k]))}</div></div>`).join("")}
       <div class="card"><div class="k">Total (Dr ${money(r.total_dr)} · Cr ${money(r.total_cr)})</div><div class="v">${drcr(net)}</div></div></div><div id="t"></div>`;
   $("#age-form").onsubmit = (e) => {
@@ -1821,12 +1850,17 @@ async function outstandingView(el, kind) {
     if (!periods.length) return alert("Enter the ageing periods in days, e.g. 30,60,90");
     const v = { periods: [...new Set(periods)].sort((a, b) => a - b).join(","), by: $("#age-by").value, fifo: $("#age-fifo").checked };
     try { localStorage.setItem("erp_ageing", JSON.stringify(v)); } catch (_) { /* private window */ }
-    outstandingView(el, kind).catch((err) => alert(err.message));
+    outstandingView(el, kind, basis).catch((err) => alert(err.message));
   };
   const amt = (v) => (v ? rupees(v) : "");
   treeTable($("#t"), [
+    { label: "State", get: (n) => esc(n.state || "") },
+    { label: "Address", get: (n) => (n.address ? `<span class="small">${esc(n.address)}</span>` : "") },
     { label: "Date", get: (n) => (n.b ? esc(n.b.date) : "") },
+    ...(basis === "eway" ? [{ label: "E-way bill", get: (n) => (n.b ? esc(n.b.eway_bill_no || "") : "") },
+      { label: "Aged from", get: (n) => (n.b ? (n.b.eway_bill_no ? esc(n.b.eway_bill_date) : `<span class="muted">${esc(n.b.date)} (no e-way bill)</span>`) : "") }] : []),
     { label: "Due", get: (n) => (n.b ? esc(n.b.due_date) : "") },
+    { label: "Opening amount", num: true, get: (n) => (n.opening ? drcr(n.opening) : "") },
     { label: "Dr", num: true, get: (n) => (n.dr == null ? "" : amt(n.dr)) },
     { label: "Cr", num: true, get: (n) => (n.cr == null ? "" : amt(n.cr)) },
     ...(r.fifo ? [{ label: "Adj. by FIFO", num: true, get: (n) => (n.fifo ? drcr(-n.fifo) : "") }] : []),
@@ -1959,6 +1993,137 @@ async function ewayView(el) {
   ], rows, (x) => drillVoucher(x.id, `${x.voucher_type} ${x.number}`));
 }
 
+// Reads every voucher's custom fields from Tally's Day Book, from the books' beginning to today, in the
+// background, one day at a time; shows a progress bar until it is done.
+function customFieldsReadButton(done) {
+  const box = document.createElement("span");
+  box.innerHTML = `<button type="button" class="secondary small">Read custom fields from Tally (from the books' beginning)</button>
+    <span class="cf-bar" hidden><progress max="100" value="0" style="width:180px"></progress> <span class="small"></span></span>`;
+  const b = box.querySelector("button"), bar = box.querySelector(".cf-bar"), text = bar.querySelector("span"), pg = bar.querySelector("progress");
+  b.title = "Reads the custom fields (e.g. chassis no., motor no.) of every voucher from the books' beginning to today from "
+    + "Tally's Day Book, one day at a time. Nothing is written to Tally; you can keep working meanwhile.";
+  const show = (j) => {
+    bar.hidden = false;
+    const pct = j.days ? Math.round((100 * j.days_done) / j.days) : 0;
+    pg.value = pct;
+    text.textContent = j.days == null ? "Starting…" : `${j.days_done} of ${j.days} day(s) · ${j.read} voucher(s) read · ${j.updated} updated`
+      + (j.skipped_count ? ` · ${j.skipped_count} day(s) Tally did not answer in time` : "");
+  };
+  const poll = async () => {
+    let j = null;
+    try { j = await api(`/reports/custom-fields/refresh-from-tally?company_id=${state.company}`); } catch (_) { j = null; }
+    if (!j) return;
+    if (j.running) { show(j); b.disabled = true; setTimeout(poll, 2000); return; }
+    b.disabled = false;
+    if (j.days == null) return;
+    show(j);
+    if (j.error) text.innerHTML = `<span class="error">${esc(j.error)}</span>`;
+    else { text.textContent += j.skipped_count ? " · click again to read those days" : " · done"; if (done) done(); }
+  };
+  b.onclick = async () => {
+    b.disabled = true;
+    try { show(await api(`/reports/custom-fields/refresh-from-tally?company_id=${state.company}`, { method: "POST" })); setTimeout(poll, 1500); }
+    catch (err) { alert(err.message); b.disabled = false; }
+  };
+  poll();
+  return box;
+}
+
+// Cash Flow (Tally style): money in and out of the cash and bank accounts by the other side's group, and by month.
+async function cashFlowView(el) {
+  const r = await api(`/reports/cash-flow?${rParams()}`);
+  const card = (k, v) => `<div class="card"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`;
+  el.innerHTML = `<p class="muted small">${esc(r.from)} to ${esc(r.to)} · cash and bank accounts: ${esc(r.cash_ledgers.join(", ") || "none")} ·
+      transfers between them (contra) are not counted · click a group for its ledgers</p>
+    <div class="cards">${card("Opening cash & bank", drcr(paise(r.opening)))}${card("Inflow", money(r.total_inflow))}
+      ${card("Outflow", money(r.total_outflow))}${card("Net flow", drcr(paise(r.net_flow)))}${card("Closing cash & bank", drcr(paise(r.closing)))}</div>
+    ${Number(r.difference) ? `<p class="error small">Opening + inflow - outflow differs from the closing balance by ${money(r.difference)}.</p>` : ""}
+    <div class="row wrap" style="align-items:flex-start;gap:24px"><div style="flex:1;min-width:300px"><h3>Inflow</h3><div id="cf-in"></div></div><div style="flex:1;min-width:300px"><h3>Outflow</h3><div id="cf-out"></div></div></div>
+    <h3>Month by month</h3><table id="cf-m"></table>`;
+  const tree = (box, side) => treeTable(box, [{ label: "Amount", num: true, get: (n) => money(n.amount) }],
+    side.map((g) => ({ label: g.group, amount: g.amount, children: g.ledgers.map((l) => ({ label: l.ledger, amount: l.amount })) })),
+    { title: "Group / ledger" });
+  tree($("#cf-in"), r.inflow); tree($("#cf-out"), r.outflow);
+  const tot = r.months.reduce((a, x) => ({ i: a.i + paise(x.inflow), o: a.o + paise(x.outflow) }), { i: 0, o: 0 });
+  table($("#cf-m"), [{ label: "Month", get: (x) => x.label || new Date(`${x.month}-01T00:00:00`).toLocaleDateString("en-IN", { month: "short", year: "numeric" }) }, { label: "Inflow", num: true, get: (x) => money(x.inflow) },
+    { label: "Outflow", num: true, get: (x) => money(x.outflow) }, { label: "Net flow", num: true, get: (x) => drcr(paise(x.net)) }],
+    [...r.months, { label: "Total", inflow: (tot.i / 100).toFixed(2), outflow: (tot.o / 100).toFixed(2), net: ((tot.i - tot.o) / 100).toFixed(2) }]);
+}
+
+// Funds Flow (Tally style): sources and applications of funds, and the change in working capital.
+async function fundsFlowView(el) {
+  const r = await api(`/reports/funds-flow?${rParams()}`);
+  el.innerHTML = `<p class="muted small">${esc(r.from)} to ${esc(r.to)} · sources: net profit, and less in long-term assets or more in
+      capital and loans · applications: the reverse · their difference is the change in working capital</p>
+    <div class="row wrap" style="align-items:flex-start;gap:24px"><div style="flex:1;min-width:300px"><h3>Sources of funds</h3><table id="ff-s"></table></div><div style="flex:1;min-width:300px"><h3>Application of funds</h3><table id="ff-a"></table></div></div>
+    <h3>Working capital</h3>
+    <p class="small">Increase in working capital (sources less applications): <b>${drcr(paise(r.working_capital_change))}</b>
+      ${Number(r.difference) ? `<span class="error"> · differs from the working capital change by ${money(r.difference)}</span>` : ""}</p>
+    <table id="ff-w"></table>`;
+  const side = (box, rows, total) => table(box, [{ label: "Particulars", key: "particulars" }, { label: "Amount", num: true, get: (x) => money(x.amount) }],
+    [...rows, { particulars: "Total", amount: total }]);
+  side($("#ff-s"), r.sources, r.total_sources); side($("#ff-a"), r.applications, r.total_applications);
+  table($("#ff-w"), [{ label: "Group", key: "group" }, { label: "Opening", num: true, get: (x) => drcr(paise(x.opening)) },
+    { label: "Closing", num: true, get: (x) => drcr(paise(x.closing)) }, { label: "Increase / (decrease)", num: true, get: (x) => money(x.change) }],
+    [...r.working_capital, { group: "Working capital", opening: r.working_capital_opening, closing: r.working_capital_closing,
+      change: (paise(r.working_capital_closing) - paise(r.working_capital_opening)) / 100 }]);
+}
+
+// Custom (TDL) fields from Tally: one row per item line / batch, a column per field.
+async function customFieldsView(el) {
+  const r = await api(`/reports/custom-fields?${rParams()}`);
+  el.innerHTML = `<p class="muted small">${esc(r.from)} to ${esc(r.to)} · fields a Tally customisation keeps (e.g. chassis no., motor no.),
+      for each item line or batch · click a row to open the voucher</p>
+    <div class="row wrap"><input id="cf-q" placeholder="Search, e.g. a chassis no." size="28"><span id="cf-tools"></span></div>
+    ${r.rows.length ? "" : `<p class="small muted">No custom fields in this period. Vouchers synced before this release get them with
+      <b>Read custom fields from Tally</b>; to choose which fields this Tally has, use Settings → Tally connection → <b>Find custom fields</b>.</p>`}
+    <table id="t"></table>`;
+  if (can("sync.read")) $("#cf-tools").append(customFieldsReadButton(() => customFieldsView(el)));
+  const cols = [{ label: "Date", key: "date" }, { label: "Voucher", get: (x) => `${x.voucher_type} ${x.voucher_number}` },
+    { label: "Party", key: "party", wrap: true }, { label: "Item", key: "item", wrap: true }, { label: "Batch", key: "batch" },
+    { label: "Qty", num: true, key: "quantity" }, ...r.fields.map((f) => ({ label: f, get: (x) => x[f] || "" }))];
+  const draw = () => {
+    const q = $("#cf-q").value.trim().toLowerCase();
+    const rows = !q ? r.rows : r.rows.filter((x) => Object.values(x).some((v) => String(v ?? "").toLowerCase().includes(q)));
+    table($("#t"), cols, rows, (x) => drillVoucher(x.voucher_id, `${x.voucher_type} ${x.voucher_number}`));
+  };
+  $("#cf-q").oninput = draw; draw();
+}
+
+// Settings: find the custom fields this Tally keeps, and choose the ones to bring with every voucher.
+let cfFound = [];
+const NO_NAME = "No name: this field's TDL is not loaded in Tally, so it cannot be asked for by name; it is still kept when Tally sends it";
+$("#cf-find").onclick = async () => {
+  const b = $("#cf-find"); b.disabled = true; $("#cf-msg").textContent = "Reading Tally's Day Book…";
+  try {
+    const day = $("#cf-day").value;
+    const r = await api(`/sync/connectors/${state.company}/custom-fields/discover${day ? `?day=${day}` : ""}`, { method: "POST" });
+    cfFound = r.fields;
+    $("#cf-msg").textContent = `${r.vouchers_read} voucher(s) of ${r.days.join(", ")} read · ${r.fields.length} custom field(s) found`;
+    $("#cf-save").hidden = !r.fields.length || !(can("sync.manage") || isAdmin());
+    const yes = (f) => (f.comes_with_sync == null ? "" : f.comes_with_sync ? `<span class="okmsg">Yes</span>` : `<span class="error">No</span>`);
+    $("#cf-list").innerHTML = r.fields.length ? `<table><thead><tr><th>Use</th><th>Field</th><th>Kept on</th><th>Example</th>
+        <th>Vouchers</th><th>Voucher types</th><th>Comes with sync</th></tr></thead><tbody>${r.fields.map((f, i) => `<tr>
+        <td><input type="checkbox" data-cf="${i}" ${f.chosen || (!r.saved.length && f.fetch_name) ? "checked" : ""} ${f.fetch_name ? "" : `title="${esc(NO_NAME)}"`}></td>
+        <td><input data-cf-label="${i}" value="${esc(f.label)}" size="18"> <span class="small muted">${esc(f.tag)}</span></td>
+        <td>${esc(f.level_label)}</td><td>${esc(f.sample)}</td><td class="num">${f.vouchers}</td>
+        <td class="small">${esc(f.voucher_types.join(", "))}</td><td>${yes(f)}</td></tr>`).join("")}</tbody></table>`
+      : `<p class="small muted">${esc(r.note || "")}</p>`;
+  } catch (err) { $("#cf-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; }
+  b.disabled = false;
+};
+$("#cf-save").onclick = async () => {
+  const fields = cfFound.map((f, i) => ({ f, i })).filter(({ i }) => $(`[data-cf="${i}"]`).checked)
+    .map(({ f, i }) => ({ tag: f.tag, level: f.level, label: $(`[data-cf-label="${i}"]`).value.trim() || f.label,
+      voucher_types: f.voucher_types, comes_with_sync: f.comes_with_sync }));
+  try {
+    const r = await api(`/sync/connectors/${state.company}/custom-fields`, { method: "PUT", body: { fields } });
+    $("#cf-msg").innerHTML = `<span class="okmsg">Saved ${r.fields.length} field(s). New and changed vouchers bring them from the next sync;
+      for vouchers synced earlier click <b>Read custom fields from Tally</b> below.</span>`;
+    $("#cf-read-slot").innerHTML = ""; $("#cf-read-slot").append(customFieldsReadButton());
+  } catch (err) { $("#cf-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; }
+};
+
 // Vouchers grouped by month (registers) or by day (day book), each opening the voucher
 function vouchersByPeriod(vouchers, keyOf, labelOf) {
   const groups = new Map();
@@ -2026,8 +2191,9 @@ async function voucherView(el, id) {
     ${d.party_ledger ? `<p>Party: <b>${esc(d.party_ledger)}</b>${d.reference_no ? ` · Ref ${esc(d.reference_no)}` : ""}</p>` : ""}
     <p>${esc(d.narration || "")}</p>
     ${d.entries.length ? `<table id="v-e"></table>` : `<p class="muted">No ledger entries (stock-only voucher)</p>`}
-    ${d.inventory.length ? inventoryTable(d.inventory, v.item_groups || {}) : ""}
+    ${d.inventory.length ? inventoryTable(d.inventory, v.item_groups || {}, d.custom_fields || {}) : ""}
     ${statutoryHtml(d.statutory || {})}
+    ${customFieldsHtml({ ...(d.custom_fields || {}), itemsInTable: d.inventory.length > 0 })}
     <div id="v-hist"><p class="muted">Loading history…</p></div>`;
   historyHtml(id).then((html) => { if ($("#v-hist")) $("#v-hist").innerHTML = html; }).catch(() => {});
   if ($("#v-xlsx")) $("#v-xlsx").onclick = () => download(`/vouchers/${id}/xlsx`, `${d.voucher_type} ${d.voucher_number}.xlsx`.replace(/[\\/:*?"<>|]/g, "-"));
@@ -2399,9 +2565,16 @@ renderers.settings = async () => {
   const both = c.sync_mode === "bidirectional";
   $("#c-mode-both").checked = $("#c-mode-both").defaultChecked = both;
   $("#c-mode-one").checked = $("#c-mode-one").defaultChecked = !both;
+  const allowed = c.two_way_allowed !== false;          // the licence decides; an older server: allowed
+  $("#c-mode-both").disabled = !allowed && !both;
+  $("#c-two-way-note").hidden = allowed;
   $("#c-waiting").textContent = c.waiting_for_tally
     ? `${c.waiting_for_tally} change(s) made in the software are waiting to be written into Tally.` : "";
   $("#c-ftypes").value = (c.frozen_voucher_types || []).join(", ");
+  const saved = c.custom_fields || [];
+  $("#cf-msg").textContent = saved.length ? `Chosen: ${saved.map((f) => f.label).join(", ")}` : "";
+  $("#cf-read-slot").innerHTML = "";
+  if (saved.length) $("#cf-read-slot").append(customFieldsReadButton());
 };
 $("#cform").onsubmit = async (e) => {
   e.preventDefault();
@@ -2822,6 +2995,10 @@ const size = (n) => (n > 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : `${Math.
 const MODULE_LABELS = { accounting: "Vouchers and ledgers", inventory: "Inventory", reports: "Reports", tally_sync: "Tally sync", export: "Export to CSV",
   fixed_assets: "Fixed assets & depreciation", tally_two_way: "Two-way Tally sync (software to Tally) - approved customers only" };
 const APPROVAL_MODULES = ["tally_two_way"];   // a new licence starts without these
+// Tally sync is one choice on the licence form: not included, one way (Tally -> software) or two way.
+const SYNC_MODULES = ["tally_sync", "tally_two_way"];
+const syncChoice = (mods) => (!mods.has("tally_sync") ? "none" : mods.has("tally_two_way") ? "two_way" : "one_way");
+const SYNC_LABELS = { none: "Not included", one_way: "One way – from Tally to software", two_way: "Two way – both directions" };
 
 function licenceBox(l, admin) {
   const days = l.days_left == null ? "never expires" : l.days_left < 0 ? `expired ${-l.days_left} day(s) ago` : `${l.days_left} day(s) left`;
@@ -2854,7 +3031,8 @@ function licenceBox(l, admin) {
       <div><span class="muted">Versions</span><br>${esc(l.min_version || "any")} – ${esc(l.max_version || "any")}</div>
       <div><span class="muted">Offline grace</span><br>${l.offline_grace_days} days</div>
     </div>
-    <p class="small"><span class="muted">Modules:</span> ${l.modules.map((m) => esc(m.label)).join(", ") || "none"}</p>
+    <p class="small"><span class="muted">Modules:</span> ${l.modules.filter((m) => !SYNC_MODULES.includes(m.code)).map((m) => esc(m.label)).join(", ") || "none"}</p>
+    <p class="small"><span class="muted">Tally sync:</span> <b>${esc(SYNC_LABELS[syncChoice(new Set(l.modules.map((m) => m.code)))])}</b></p>
     <p class="small"><span class="muted">Reports:</span> ${l.reports == null ? "All reports" : `${l.reports.length} selected: ${l.reports.map((r) => esc(r.label)).join(", ") || "none"}`}</p>
     ${inst}${actions}</div>`;
 }
@@ -3068,8 +3246,9 @@ function openLicenceForm(l, c) {
   f.reset(); $("#licf-msg").textContent = "";
   $("#licf-title").textContent = l ? `Change licence ${l.key_hint}` : `New licence for ${c.legal_name}`;
   const mods = new Set(l ? l.modules.map((m) => m.code) : Object.keys(MODULE_LABELS).filter((k) => !APPROVAL_MODULES.includes(k)));
-  $("#licf-modules").innerHTML = Object.entries(MODULE_LABELS).map(([k, v]) =>
+  $("#licf-modules").innerHTML = Object.entries(MODULE_LABELS).filter(([k]) => !SYNC_MODULES.includes(k)).map(([k, v]) =>
     `<label class="check"><input type="checkbox" data-mod="${k}" ${mods.has(k) ? "checked" : ""}> ${esc(v)}</label>`).join("");
+  $("#licf-sync").value = syncChoice(mods);
   licenceReportsForm(l);
   if (l) for (const k of ["plan", "starts_at", "expires_at", "max_users", "max_installations", "max_companies", "offline_grace_days", "heartbeat_hours", "min_version", "max_version", "notes"])
     el(k).value = l[k] ?? "";
@@ -3084,7 +3263,8 @@ $("#licf").onsubmit = async (e) => {
   const body = { plan: el("plan"), starts_at: el("starts_at") || null, max_users: num("max_users"), max_installations: num("max_installations"),
     max_companies: num("max_companies"), offline_grace_days: num("offline_grace_days"), heartbeat_hours: num("heartbeat_hours"),
     min_version: el("min_version") || null, max_version: el("max_version") || null, notes: el("notes") || null,
-    modules: [...document.querySelectorAll("#licf-modules [data-mod]:checked")].map((x) => x.dataset.mod),
+    modules: [...document.querySelectorAll("#licf-modules [data-mod]:checked")].map((x) => x.dataset.mod)
+      .concat({ none: [], one_way: ["tally_sync"], two_way: ["tally_sync", "tally_two_way"] }[$("#licf-sync").value]),
     reports: $("#licf-allrep").checked ? null : [...document.querySelectorAll("#licf-reports [data-rep]:checked")].map((x) => x.dataset.rep) };
   if (body.reports && !body.reports.length && !confirm("No report is ticked: this customer will not see any report. Save anyway?")) return;
   if (el("expires_at") || licEditing.lic) body.expires_at = el("expires_at") || null;

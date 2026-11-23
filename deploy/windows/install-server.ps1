@@ -63,12 +63,57 @@ function Find-Python {
   }
   return $null
 }
+function Install-Python {
+  # 1. winget, when this Windows has it (Windows Server 2019 and older usually do not).
+  if (Get-Command winget.exe -ErrorAction SilentlyContinue) {
+    Write-Host "==> Installing Python 3.12 with winget"
+    if (Winget-Try "Python.Python.3.12" @("--scope", "machine")) { return }
+    Write-Host "    winget could not install it; trying the direct download" -ForegroundColor Yellow
+  } else {
+    Write-Host "    winget is not on this Windows; downloading Python directly from python.org" -ForegroundColor Yellow
+  }
+  # 2. The python.org installer, silent, for all users. Python 3.11+ needs Windows 8.1 / Server 2012 R2 or newer.
+  $os = [Environment]::OSVersion.Version
+  if ($os.Major -lt 6 -or ($os.Major -eq 6 -and $os.Minor -lt 3)) {
+    throw ("This Windows ($os) is too old for Tally Cloud: it needs Windows Server 2012 R2 / Windows 8.1 or newer " +
+           "(Server 2016, 2019 or 2022 recommended).")
+  }
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  $reasons = @()
+  foreach ($v in @("3.12.8", "3.12.7", "3.11.9")) {
+    $url = "https://www.python.org/ftp/python/$v/python-$v-amd64.exe"
+    $exe = Join-Path $InstallDir "updates\python-$v-amd64.exe"
+    $target = "C:\Program Files\Python" + ($v.Split(".")[0..1] -join "")
+    for ($try = 1; $try -le 2; $try++) {
+      try {
+        Write-Host "==> Downloading Python $v (about 25 MB, attempt $try)"
+        $ProgressPreference = "SilentlyContinue"
+        Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing -TimeoutSec 900
+        Write-Host "==> Installing Python $v into $target"
+        $p = Start-Process -FilePath $exe -Wait -PassThru -ArgumentList @(
+          "/quiet", "InstallAllUsers=1", "PrependPath=1", "Include_test=0", "Include_launcher=1", "TargetDir=`"$target`"")
+        Remove-Item $exe -Force -ErrorAction SilentlyContinue
+        if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) { return }       # 3010: done, a restart is advised
+        $reasons += "Python $v installer ended with code $($p.ExitCode)"
+        break
+      } catch {
+        $reasons += "Python ${v}: $($_.Exception.Message)"
+        Write-Host "    $($_.Exception.Message)" -ForegroundColor Yellow
+        if ($try -lt 2) { Write-Host "    trying again in 15 seconds" -ForegroundColor Yellow; Start-Sleep -Seconds 15 }
+      }
+    }
+  }
+  throw ("Python could not be installed:`n  " + ($reasons -join "`n  ") + "`n" +
+         "Check that this computer can open https://www.python.org (proxy / firewall). On Windows Server 2012 R2 " +
+         "install Windows updates first (KB2919355 and the Universal C Runtime KB2999226). Or install Python 3.12 " +
+         "(64-bit, 'Install for all users') by hand from https://www.python.org/downloads/windows/, then run run.bat again.")
+}
+
 $python = Find-Python
 if (-not $python) {
-  Write-Host "==> Installing Python 3.12"
-  Winget-Install "Python.Python.3.12" @("--scope", "machine")
+  Install-Python
   $python = Find-Python
-  if (-not $python) { throw "Python 3.12 was installed but not found in C:\Program Files\Python312." }
+  if (-not $python) { throw "Python was installed but not found in C:\Program Files\Python312 or Python311. Run run.bat again." }
 }
 Write-Host "    Python: $python"
 

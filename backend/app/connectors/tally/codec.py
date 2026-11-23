@@ -41,6 +41,17 @@ def export_collection(collection_type: str, fetch: list[str], company: str | Non
     )
 
 
+def export_day_book(company: str, day) -> str:
+    """Tally's own Day Book for one day: full vouchers as Tally exports them, custom (TDL) fields included."""
+    d = X.tally_date(day)
+    return (
+        "<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Data</TYPE>"
+        "<ID>Day Book</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>"
+        f"<SVCURRENTCOMPANY>{X.esc(company)}</SVCURRENTCOMPANY><SVFROMDATE>{d}</SVFROMDATE><SVTODATE>{d}</SVTODATE>"
+        "</STATICVARIABLES></DESC></BODY></ENVELOPE>"
+    )
+
+
 def import_envelope(report: str, company: str, body: str) -> str:
     return (
         "<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Import</TALLYREQUEST>"
@@ -362,6 +373,93 @@ def statutory(el: etree._Element) -> dict:
     return {k: v.strip() for k, v in pairs if v and v.strip() and v.strip() != "Not Applicable"}
 
 
+# ---------------------------------------------------------------- custom (TDL) fields
+
+def _field_name(e: etree._Element) -> str:
+    """A UDF's name: its description (`ChassisNo`), else its tag (CHASSISNO, or UDF:_UDF_123 without the TDL)."""
+    desc = (e.get("DESC") or "").strip().strip("`").strip()
+    return desc or (e.tag[:-5] if e.tag.endswith(".LIST") else e.tag)
+
+
+def fetch_name(tag: str) -> str | None:
+    """The name to ask Tally for in a collection's FETCH (None for UDF:_UDF_ numbers, which cannot be asked for)."""
+    base = tag[:-5] if tag.endswith(".LIST") else tag
+    return base if base and base.replace("_", "").isalnum() and not base.startswith("UDF:") else None
+
+
+def custom_fields(el: etree._Element | None) -> dict:
+    """User-defined fields that a Tally customisation (TDL) keeps on this object, e.g. Chassis No, Motor No.
+
+    Tally exports them as <NAME.LIST DESC="`Name`" TYPE="String" INDEX="1001"><NAME>value</NAME></NAME.LIST>,
+    or as <UDF:_UDF_123.LIST ...> when the TDL is not loaded. Only this object's own fields (not its lines').
+    Returns {name: value}; several values of one field are joined with ", "."""
+    out: dict[str, str] = {}
+    if el is None:
+        return out
+    for e in el:
+        if (one := udf_value(e)) is not None:
+            out[one[0]] = one[1]
+    return out
+
+
+def is_udf(e) -> bool:
+    return isinstance(e.tag, str) and (e.get("INDEX") is not None or e.tag.startswith("UDF:"))
+
+
+def udf_value(e) -> tuple[str, str] | None:
+    """(name, value) of one UDF element, or None when it is not a UDF or has no value."""
+    if not is_udf(e):
+        return None
+    kind = (e.get("TYPE") or "").lower()
+    values = [c.text for c in e if isinstance(c.tag, str) and c.text] if len(e) else [e.text]
+    clean = []
+    for v in values:
+        v = (v or "").strip()
+        if not v:
+            continue
+        if kind == "date" and (d := X.parse_date(v)):
+            v = str(d)
+        elif kind == "logical":
+            v = "Yes" if X.logical(v) else "No"
+        clean.append(v)
+    return (_field_name(e), ", ".join(dict.fromkeys(clean))) if clean else None
+
+
+def custom_fields_of(el: etree._Element) -> dict:
+    """All custom fields of a voucher: its own, each ledger line's, each item line's and each batch's."""
+    out: dict = {}
+    if own := custom_fields(el):
+        out["voucher"] = own
+    ledgers = []
+    for e in el.findall("ALLLEDGERENTRIES.LIST") + el.findall("LEDGERENTRIES.LIST"):
+        if (f := custom_fields(e)) and X.txt(e, "LEDGERNAME"):
+            ledgers.append({"ledger": X.clean_name(X.txt(e, "LEDGERNAME")), "fields": f})
+    if ledgers:
+        out["ledgers"] = ledgers
+    inv = [e for tag in ("ALLINVENTORYENTRIES.LIST", "INVENTORYENTRIESIN.LIST", "INVENTORYENTRIESOUT.LIST")
+           for e in el.findall(tag)]
+    inv += [i for e in el.findall("ALLLEDGERENTRIES.LIST") for i in e.findall("INVENTORYALLOCATIONS.LIST")]
+    items, seen = [], set()
+    for e in inv:
+        name = X.clean_name(X.txt(e, "STOCKITEMNAME"))
+        if not name:
+            continue
+        own = custom_fields(e)
+        batches = [(X.txt(b, "BATCHNAME"), X.txt(b, "BILLEDQTY") or X.txt(b, "ACTUALQTY"), custom_fields(b))
+                   for b in e.findall("BATCHALLOCATIONS.LIST")]
+        rows = [(b, qty, {**own, **f}) for b, qty, f in batches if f] or ([(None, None, own)] if own else [])
+        for batch, qty, f in rows:
+            key = (name, batch, tuple(sorted(f.items())))
+            if key in seen:                     # the same line in ALLINVENTORYENTRIES and INVENTORYENTRIESIN/OUT
+                continue
+            seen.add(key)
+            items.append({"item": name, "batch": batch, "quantity": (qty or X.txt(e, "BILLEDQTY") or "").strip() or None,
+                          "fields": f})
+    if items:
+        out["items"] = items
+    return out
+
+
 def parse_voucher(el: etree._Element) -> TallyVoucher:
     vdate = X.parse_date(X.txt(el, "DATE"))
     all_entries = [e for e in el.findall("ALLLEDGERENTRIES.LIST") if X.txt(e, "LEDGERNAME")]
@@ -410,6 +508,7 @@ def parse_voucher(el: etree._Element) -> TallyVoucher:
         "is_reverse_charge": X.logical(X.txt(el, "ISREVERSECHARGEAPPLICABLE")),
         "is_cancelled": X.logical(X.txt(el, "ISCANCELLED")),
         "statutory": statutory(el),
+        "custom_fields": custom_fields_of(el),
         "entries": [e for e in entries if Decimal(e["amount"]) != ZERO],
         "inventory": inventory,
     }
@@ -429,7 +528,7 @@ def parse_voucher(el: etree._Element) -> TallyVoucher:
 
 GROUP_FETCH = ["NAME", "PARENT", "GUID", "MASTERID", "ALTERID", "ISREVENUE", "ISDEEMEDPOSITIVE", "AFFECTSGROSSPROFIT"]
 LEDGER_FETCH = [
-    "NAME", "PARENT", "GUID", "MASTERID", "ALTERID", "OPENINGBALANCE", "CLOSINGBALANCE", "ISBILLWISEON",
+    "NAME", "PARENT", "GUID", "MASTERID", "ALTERID", "OPENINGBALANCE", "CLOSINGBALANCE", "ISBILLWISEON", "BILLALLOCATIONS",
     "BILLCREDITPERIOD", "PARTYGSTIN", "INCOMETAXNUMBER", "LEDSTATENAME", "GSTREGISTRATIONTYPE", "TAXTYPE",
     "GSTDUTYHEAD", "MAILINGNAME", "BANKDETAILS", "IFSCODE", "BRANCHNAME", "BANKACCHOLDERNAME",
     "ADDRESS", "LEDMAILINGDETAILS", "PINCODE", "COUNTRYNAME", "LEDGSTREGDETAILS",
@@ -582,6 +681,22 @@ def _lines(el: etree._Element | None) -> str | None:
     return "\n".join(line for line in lines if line) or None
 
 
+def opening_bills(el: etree._Element) -> list[dict]:
+    """A ledger's opening bill-wise details as Tally exports them (checked live, Nov 2026):
+    <BILLALLOCATIONS.LIST><NAME>..</NAME><BILLDATE>20250331</BILLDATE><BILLCREDITPERIOD>31-Mar-25</BILLCREDITPERIOD>
+    <OPENINGBALANCE>250000.00</OPENINGBALANCE></BILLALLOCATIONS.LIST>. Tally's sign: negative = debit."""
+    out = []
+    for b in el.findall("BILLALLOCATIONS.LIST"):
+        amount = -X.amount(X.txt(b, "OPENINGBALANCE"))
+        if not amount:
+            continue
+        day = X.parse_date(X.txt(b, "BILLDATE"))
+        due = X.parse_date(X.txt(b, "BILLCREDITPERIOD")) if X.txt(b, "BILLCREDITPERIOD") else None
+        out.append({"name": X.txt(b, "NAME") or "Opening", "date": str(day) if day else None,
+                    "amount": m(amount), "due_date": str(due) if due else None})
+    return out
+
+
 def ledger_details(el: etree._Element) -> dict:
     """Party details a ledger carries in Tally: address, GST, contacts, bank accounts and MSME.
 
@@ -629,6 +744,7 @@ def ledger_details(el: etree._Element) -> dict:
         "msme_udyam_no": pick(msme, "UDYAMREGNUMBER"),
         "msme_activity": pick(msme, "MSMEACTIVITYTYPE"),
         "msme_from": X.parse_date(pick(msme, "FROMDATE")),
+        "opening_bills": opening_bills(el),
     }
 
 

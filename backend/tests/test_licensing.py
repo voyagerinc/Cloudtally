@@ -726,8 +726,19 @@ def test_two_way_sync_only_for_approved_customers(db, admin, portal):
     assert api.get(f"{V1}/licence?company_id={books['id']}", headers=ha).json()["tally_one_way"] is True
     assert api.get(f"{V1}/companies/{books['id']}/vouchers", headers=ha).status_code == 200   # viewing works
     assert outbound.claim(db, 10, company_id) == []                         # nothing is sent to Tally
+    conn_url = f"{V1}/sync/connectors/{books['id']}"
+    assert api.get(conn_url, headers=ha).json()["two_way_allowed"] is False
+    r = api.put(conn_url, headers=ha, json={"tally_company_name": "Acme", "host": "127.0.0.1", "enabled": True,
+                                            "sync_mode": "bidirectional", "queued_changes": "send"})
+    assert r.status_code == 403 and "one-way sync only" in r.json()["detail"]
+    assert api.put(conn_url, headers=ha, json={"tally_company_name": "Acme", "host": "127.0.0.1", "enabled": True,
+                                               "sync_mode": "one_way"}).json()["sync_mode"] == "one_way"
     api.patch(f"{V1}/admin/licenses/{lic['id']}", headers=admin, json={"modules": mods + ["tally_two_way"]})
     enforce.forget_cached()
     assert new_ledger("Power").status_code == 201                             # approved: two-way
+    assert api.get(conn_url, headers=ha).json()["two_way_allowed"] is True
+    r = api.put(conn_url, headers=ha, json={"tally_company_name": "Acme", "host": "127.0.0.1", "enabled": True,
+                                            "sync_mode": "bidirectional", "queued_changes": "send"})
+    assert r.status_code == 200 and r.json()["sync_mode"] == "bidirectional", r.text
     assert api.get(f"{V1}/licence?company_id={books['id']}", headers=ha).json()["tally_one_way"] is False
     assert len(outbound.claim(db, 10, company_id)) == 1                      # "Power" goes to Tally now

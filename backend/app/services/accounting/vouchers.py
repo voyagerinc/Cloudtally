@@ -62,6 +62,7 @@ def to_doc(v: Voucher) -> dict:
         "is_reverse_charge": v.is_reverse_charge,
         "is_cancelled": v.status == S.CANCELLED,
         "statutory": v.statutory or {},
+        "custom_fields": v.custom_fields or {},
         "entries": [
             {
                 "ledger": e.ledger.name,
@@ -308,6 +309,8 @@ def _apply(v: Voucher, data: dict, r: _Resolver, entries, inventory) -> None:
     v.is_reverse_charge = bool(data.get("is_reverse_charge"))
     v.is_invoice = bool(inventory) or bool(data.get("is_invoice"))
     v.statutory = data.get("statutory") or {}
+    if "custom_fields" in data:            # kept when the software's own form does not send them
+        v.custom_fields = data.get("custom_fields") or {}
 
     v.entries.clear()
     v.inventory_lines.clear()

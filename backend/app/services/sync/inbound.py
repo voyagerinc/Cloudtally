@@ -63,6 +63,7 @@ def poll(db: Session, company: Company, conn: TallyConnector, client: TallyClien
     else:
         stats["masters"] = "unchanged"
         progress.step(1, "No master changed in Tally", state="done")
+    _read_opening_bills(db, company, client, stats, progress)
 
     if counters["alt_vch_id"] is not None and counters["alt_vch_id"] <= conn.voucher_watermark:
         stats["vouchers"] = "unchanged"
@@ -79,6 +80,30 @@ def poll(db: Session, company: Company, conn: TallyConnector, client: TallyClien
     conn.last_inbound_at = utcnow()
     db.commit()
     return stats
+
+
+def _read_opening_bills(db: Session, company: Company, client: TallyClient, stats: dict, progress) -> None:
+    """Once: the opening bill-wise details of ledgers synced before they were read (ageing needs them).
+    One light request (name and opening bills only); later changes come with the ledgers themselves."""
+    from app.models import Ledger
+    missing = db.scalar(select(Ledger.id).where(Ledger.company_id == company.id, Ledger.opening_bills.is_(None),
+                                                Ledger.opening_balance != 0).limit(1))
+    if missing is None:
+        return
+    progress.step(1, "Reading opening bill-wise balances from Tally (once)")
+    try:
+        els = list(client._collection("Ledger", "LEDGER", ["NAME", "BILLALLOCATIONS"]))
+    except TallyError as exc:
+        log.warning("opening bills not read for %s: %s", company.name, exc.message)
+        return
+    found = {X.clean_name(el.get("NAME") or X.txt(el, "NAME")): codec.opening_bills(el) for el in els}
+    n = 0
+    for led in db.scalars(select(Ledger).where(Ledger.company_id == company.id, Ledger.opening_bills.is_(None))):
+        led.opening_bills = found.get(led.name, [])
+        n += bool(led.opening_bills)
+    db.commit()
+    stats["opening_bills"] = n
+    progress.step(1, f"Opening bill-wise balances read for {n} ledger(s)", state="done")
 
 
 def _pull_vouchers(db: Session, company: Company, conn: TallyConnector, client: TallyClient,
@@ -226,6 +251,8 @@ def apply_item(db: Session, company: Company, conn: TallyConnector, item: SyncIn
                 mapping.last_synced_hash = incoming_hash
                 if doc.get("statutory") and doc["statutory"] != (v.statutory or {}):
                     v.statutory = doc["statutory"]   # e-invoice / e-way details: not accounting content
+                if "custom_fields" in doc and doc["custom_fields"] != (v.custom_fields or {}):
+                    v.custom_fields = doc["custom_fields"]   # custom (TDL) fields: not accounting content either
                 return _finish(item, "ignored", erp_id=v.id, error="no content change")
             local_unsynced = v.version > (mapping.erp_version_synced or 0) and v.content_hash != mapping.last_synced_hash
             if local_unsynced:

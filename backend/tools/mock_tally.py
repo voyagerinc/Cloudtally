@@ -180,6 +180,12 @@ class MockTally:
                 f"<DATA><COLLECTION>{inner}</COLLECTION></DATA></BODY></ENVELOPE>")
 
     def _export(self, root, company_name) -> str:
+        if (root.findtext(".//HEADER/ID") or "").strip() == "Day Book":     # Tally's report: one day's vouchers
+            company = self.companies.get(company_name or "")
+            day = (root.findtext(".//SVFROMDATE") or "").strip()
+            body = "".join(f"<TALLYMESSAGE>{etree.tostring(el, encoding='unicode')}</TALLYMESSAGE>"
+                           for el in (company.vouchers.values() if company else []) if el.findtext("DATE") == day)
+            return f"<ENVELOPE><BODY><IMPORTDATA><REQUESTDATA>{body}</REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>"
         ctype = (root.findtext(".//COLLECTION/TYPE") or "").strip()
         formula = root.findtext(".//SYSTEM") or ""
         if ctype == "Company":

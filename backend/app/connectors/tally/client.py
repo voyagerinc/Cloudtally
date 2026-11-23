@@ -49,6 +49,7 @@ class TallyClient:
         self.timeout = timeout or settings.tally_timeout
         self._http = httpx.Client(timeout=httpx.Timeout(self.timeout, connect=5.0), transport=transport)
         self.last: Exchange | None = None
+        self.extra_fetch: list[str] = []      # custom (TDL) fields asked for with every voucher
 
     def close(self) -> None:
         self._http.close()
@@ -163,6 +164,13 @@ class TallyClient:
             formula = '$Name = "' + name.replace('"', "") + '"'
         return [codec.parse_master(el) for el in self._collection(ctype, ctype.upper().replace(" ", ""), fetch, formula)]
 
+    def day_book(self, day) -> list:
+        """Tally's Day Book for one day, as Tally exports it (with every custom field): VOUCHER elements."""
+        text = self.post(codec.export_day_book(self.company, day))
+        root = X.parse(text)
+        self._check_company(root, text)
+        return list(root.iter("VOUCHER"))
+
     def stock_item_boms(self) -> dict[str, list[dict]]:
         """Every stock item that has a BOM, with its BOMs (one request; items without one are not sent)."""
         els = self._collection("StockItem", "STOCKITEM", ["NAME", "MULTICOMPONENTLIST"], "$$NumItems:MultiComponentList > 0")
@@ -182,7 +190,8 @@ class TallyClient:
             formula = f'$RemoteID = "{remote_id}"'
         if formula is None:
             raise ValueError("refusing to export every voucher with its lines in one request")
-        els = self._collection("Voucher", "VOUCHER", fetch or codec.VOUCHER_FETCH, formula)
+        fetch = fetch or codec.VOUCHER_FETCH + [t for t in self.extra_fetch if t not in codec.VOUCHER_FETCH]
+        els = self._collection("Voucher", "VOUCHER", fetch, formula)
         return [codec.parse_voucher(el) for el in els]
 
     # Measured on a 40k-voucher company (Nov 2026): Tally ignores SVFROMDATE/SVTODATE for Voucher

@@ -31,6 +31,8 @@ class TallyConnector(TimestampMixin, Base):
     freeze_outbound: Mapped[bool] = mapped_column(Boolean, default=False)
     freeze_inbound: Mapped[bool] = mapped_column(Boolean, default=False)
     frozen_voucher_types: Mapped[list] = mapped_column(JSON, default=list)
+    # Custom (TDL) fields to ask Tally for: [{"tag": "CHASSISNO", "label": "Chassis No", "level": "item"}]
+    custom_fields: Mapped[list | None] = mapped_column(JSON)
     # Change-detection watermarks: Tally AlterID is monotonically increasing per company.
     master_watermark: Mapped[int] = mapped_column(BigInteger, default=0)
     voucher_watermark: Mapped[int] = mapped_column(BigInteger, default=0)
