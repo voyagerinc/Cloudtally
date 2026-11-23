@@ -1024,3 +1024,10 @@ def test_einvoice_and_eway_details_are_read_again_from_tally(db, company, tc, mo
     assert r["updated"] >= 1 and r["skipped_count"] == 0
     assert v.statutory == {"irn": "f00d", "ack_no": "1124", "ack_date": "2026-04-26",
                            "eway_bill_no": "331000000077", "eway_bill_date": "2026-04-26"}
+
+
+def test_unseen_handles_more_vouchers_than_one_query_can_carry(db, company):
+    """A large company's first sync listed 70,000+ changed vouchers: the check must not hit Postgres' limit."""
+    from app.services.sync import inbound
+    changes = [(mid, 1) for mid in range(1, 70_001)]
+    assert inbound._unseen(db, company.id, changes) == changes

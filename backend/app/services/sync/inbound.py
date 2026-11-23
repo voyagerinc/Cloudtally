@@ -196,13 +196,21 @@ def _unseen(db: Session, company_id: uuid.UUID, changes: list[tuple[int, int]]) 
     """Drop (MasterID, AlterID) pairs already received or already written by us (the overlap re-reads them)."""
     if not changes:
         return []
-    mids = {m for m, _ in changes}
-    known = set(db.execute(select(SyncInbox.tally_master_id, SyncInbox.tally_alter_id).where(
-        SyncInbox.company_id == company_id, SyncInbox.entity_type == "voucher", SyncInbox.tally_master_id.in_(mids))))
-    known |= set(db.execute(select(TallyMapping.tally_master_id, TallyMapping.tally_alter_id).where(
-        TallyMapping.company_id == company_id, TallyMapping.entity_type == "voucher",
-        TallyMapping.tally_master_id.in_(mids))))
+    mids = sorted({m for m, _ in changes})
+    known: set = set()
+    # In chunks: a large company's first sync lists more vouchers than one query may carry (65,535 values).
+    for i in range(0, len(mids), CHUNK):
+        part = mids[i:i + CHUNK]
+        known |= set(db.execute(select(SyncInbox.tally_master_id, SyncInbox.tally_alter_id).where(
+            SyncInbox.company_id == company_id, SyncInbox.entity_type == "voucher",
+            SyncInbox.tally_master_id.in_(part))))
+        known |= set(db.execute(select(TallyMapping.tally_master_id, TallyMapping.tally_alter_id).where(
+            TallyMapping.company_id == company_id, TallyMapping.entity_type == "voucher",
+            TallyMapping.tally_master_id.in_(part))))
     return [c for c in changes if c not in known]
+
+
+CHUNK = 10000
 
 
 def receive(db: Session, company_id: uuid.UUID, tv: codec.TallyVoucher) -> SyncInbox | None:
