@@ -1,5 +1,6 @@
 """Operator CLI: python -m app.cli <command> --help"""
 import argparse
+from pathlib import Path
 import getpass
 import json
 import sys
@@ -194,6 +195,25 @@ def sync_once(_args) -> None:
     _print(run_once())
 
 
+def make_backup(args) -> None:
+    from app.services import backup
+    m = backup.write_backup(Path(args.file), lambda i, n, t: print(f"  {i + 1}/{n} {t}"))
+    print(f"Backup written to {args.file}: {sum(m['tables'].values())} rows.")
+
+
+def restore_backup(args) -> None:
+    from app.services import backup
+    if not args.yes and input("Every company, voucher and user here is replaced by the backup. Type RESTORE: ").strip() != "RESTORE":
+        print("Nothing was changed.")
+        return
+    try:
+        m = backup.restore_backup(Path(args.file), lambda i, n, t: print(f"  {i + 1}/{n} {t}"))
+    except backup.BackupError as exc:
+        raise SystemExit(f"Restore failed, nothing was changed: {exc}")
+    print(f"Restored the backup of {m.get('created_at')} (version {m.get('app_version')}). "
+          f"Restart Tally Cloud, then sign in with the users of the old server.")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="python -m app.cli")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -253,6 +273,13 @@ def main() -> None:
     rc.add_argument("--no-ledgers", action="store_true")
     rc.set_defaults(fn=run_reconcile)
 
+    bk = sub.add_parser("backup", help="write the whole database to a .zip (to move to another server)")
+    bk.add_argument("file")
+    bk.set_defaults(fn=make_backup)
+    rs = sub.add_parser("restore", help="replace ALL data with a backup .zip (stop Tally Cloud first)")
+    rs.add_argument("file")
+    rs.add_argument("--yes", action="store_true", help="do not ask")
+    rs.set_defaults(fn=restore_backup)
     sub.add_parser("sync-once", help="run one sync cycle for all enabled companies").set_defaults(fn=sync_once)
 
     args = p.parse_args()

@@ -11,6 +11,8 @@ from app.connectors.tally import xmlutil as X
 from app.connectors.tally.errors import ErrorCode, TallyError, classify_tally_message
 from app.core.config import settings
 
+RETRY_PAUSE = 10        # seconds before asking a busy Tally for a batch once more
+
 
 def _records(root, tag_name: str):
     """Collection records only – Tally's <CMPINFO> summary reuses the same tag names for counts."""
@@ -98,7 +100,8 @@ class TallyClient:
             # Plain ASCII with character references (Ø -> &#216;): Tally does not read UTF-8 bytes as such,
             # so a name like "STICKER (Ø57 mm)" sent as UTF-8 is "not found" (checked live, Nov 2026).
             resp = self._http.post(self.url, content=xml.encode("ascii", "xmlcharrefreplace"),
-                                   headers={"Content-Type": "text/xml;charset=utf-8"})
+                                   headers={"Content-Type": "text/xml;charset=utf-8"},
+                                   timeout=httpx.Timeout(self.timeout, connect=5.0))   # may grow for large companies
         except httpx.ConnectError as exc:
             raise TallyError(ErrorCode.CONNECTIVITY, f"Cannot reach Tally at {self.url}: {exc}", request_xml=xml)
         except httpx.TimeoutException as exc:
@@ -228,7 +231,16 @@ class TallyClient:
                 time.sleep(pause)   # let people working in Tally get a turn
             formula = f"$MasterID >= {part[0]} AND $MasterID <= {part[-1]}" + (f" AND {extra}" if extra else "")
             wanted = set(part)
-            yield [v for v in self.vouchers(formula=formula) if v.master_id in wanted]
+            try:
+                got = self.vouchers(formula=formula)
+            except TallyError as exc:
+                # Tally busy (someone running a heavy report, another request queued in front): ask once more
+                # after a pause instead of stopping the whole sync.
+                if exc.code != ErrorCode.CONNECTIVITY:
+                    raise
+                time.sleep(RETRY_PAUSE)
+                got = self.vouchers(formula=formula)
+            yield [v for v in got if v.master_id in wanted]
 
     # ------------------------------------------------------------ writes
 

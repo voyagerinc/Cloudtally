@@ -391,6 +391,16 @@
       <label>Tally company name<input id="c-name" required></label>
       <label>Identify vouchers by<select id="c-alter"><option value="masterid">MasterID</option><option value="guid">GUID</option><option value="remoteid">RemoteID</option></select></label>
       <label>Import Tally vouchers from<input id="c-from" type="date"></label>
+      <label title="Each request makes Tally go through all its vouchers once, so on a large company more vouchers per request is faster. Lower it if Tally runs short of memory.">Vouchers per Tally request
+        <select id="c-batch">
+          <option value="">Automatic (recommended)</option>
+          <option value="50">50 (small company or slow PC)</option>
+          <option value="100">100</option>
+          <option value="250">250</option>
+          <option value="500">500 (large company)</option>
+          <option value="1000">1000 (very large company, fast PC)</option>
+          <option value="2000">2000</option>
+        </select></label>
     </div>
     <div class="row wrap">
       <label class="check"><input type="checkbox" id="c-enabled"> Connector enabled</label>
@@ -422,6 +432,15 @@
     <div class="row wrap"><span id="cf-read-slot"></span></div>
   </fieldset>
   <pre id="c-result" class="small" hidden></pre>
+  <fieldset id="co-delete" class="panel" hidden>
+    <legend>Delete this company</legend>
+    <p class="small muted">Removes the company from this software: vouchers, masters, reports, the Tally link and sync
+      history, and users' access to it. Tally itself is not touched, so the company can be linked and read again
+      later. The audit trail keeps a record. This cannot be undone: download a backup on the System admin page first
+      if you may need the data.</p>
+    <div class="row wrap"><button type="button" id="co-delete-btn" class="danger">Delete company…</button>
+      <span id="co-delete-msg" class="small"></span></div>
+  </fieldset>
 </section>
 
 <section id="audit" class="tab" hidden>
@@ -467,6 +486,28 @@
   <div id="sv-pending"></div>
   <h3>Log of the last run</h3>
   <pre id="sv-log" class="small"></pre>
+  </div>
+  <h3>Backup &amp; restore</h3>
+  <div id="sv-backup" class="panel">
+    <p class="muted small">Move Tally Cloud, or some of its companies, to another server without reading everything
+      from Tally again. On the other server, install Tally Cloud, update it to this version or later and sign in as
+      super admin. Keep backup files safe: they contain your books.</p>
+    <div class="row wrap">
+      <label class="check"><input type="radio" name="bk-scope" value="all" checked> Whole server (every company, user and setting)</label>
+      <label class="check"><input type="radio" name="bk-scope" value="some"> Chosen companies</label>
+    </div>
+    <div id="bk-companies" class="row wrap" hidden></div>
+    <div class="row filters">
+      <button type="button" id="bk-download">Download backup</button>
+      <span id="bk-msg" class="small muted" aria-live="polite"></span>
+    </div>
+    <h4>Restore or import a backup</h4>
+    <form id="bk-restore" class="row filters">
+      <input type="file" name="file" id="bk-file" accept=".zip" required>
+      <button type="submit" class="secondary" id="bk-go" disabled>Restore backup</button>
+    </form>
+    <div id="bk-what" class="small"></div>
+    <div id="bk-status" class="small"></div>
   </div>
   <h3>Security</h3>
   <div id="sv-security" class="panel"></div>
@@ -649,6 +690,16 @@
     <p id="pw-msg" class="error" aria-live="polite"></p>
     <div class="row"><button>Change password</button> <button type="button" id="pw-cancel" class="secondary">Cancel</button></div>
   </form>
+</dialog>
+
+<dialog id="fail-dlg" class="wide">
+  <div class="row between"><h2>Inbound failures</h2><button type="button" class="secondary" id="fail-close">Close</button></div>
+  <p class="muted small">Vouchers that came from Tally but could not be saved, grouped by problem. Fix the cause, then
+    <b>Try again</b>. A voucher corrected in Tally is read again by the next sync by itself.</p>
+  <div class="row wrap"><button type="button" id="fail-masters">Read masters from Tally again and retry</button>
+    <button type="button" class="secondary" id="fail-retry-all">Try all again</button>
+    <span id="fail-msg" class="small" aria-live="polite"></span></div>
+  <div id="fail-body"></div>
 </dialog>
 
 <dialog id="tally-dlg">

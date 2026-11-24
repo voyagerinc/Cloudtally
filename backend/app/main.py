@@ -12,7 +12,7 @@ from sqlalchemy import text
 
 from app import __version__, audit
 from app.api import (
-    audit_log, companies, export, fixed_assets, licence, licensing, masters, mis, reports, sync, system, users, vouchers,
+    audit_log, backup, companies, export, fixed_assets, licence, licensing, masters, mis, reports, sync, system, users, vouchers,
 )
 from app.core.config import settings
 from app.core.db import engine
@@ -59,7 +59,7 @@ app = FastAPI(
 )
 
 API = "/api/v1"
-for module in (users, companies, masters, vouchers, reports, mis, export, fixed_assets, sync, audit_log, system, licence,
+for module in (users, companies, backup, masters, vouchers, reports, mis, export, fixed_assets, sync, audit_log, system, licence,
                licensing):
     app.include_router(module.router, prefix=API)
 

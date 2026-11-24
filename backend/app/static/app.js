@@ -265,11 +265,14 @@ renderers.dashboard = async () => {
     ["Tally connection", chip(c.health_status || "not configured"), esc(c.health_message || c.tally_company_name || "")],
     ["Pending", d.pending, d.oldest_pending_seconds != null ? `oldest ${Math.round(d.oldest_pending_seconds / 60)} min` : ""],
     ["Failed", d.failed, Object.entries(d.failed_by_error).map(([k, v]) => `${k}: ${v}`).join(", ")],
-    ["Open conflicts", d.open_conflicts, ""], ["Inbound failures", d.inbox_failed, ""],
+    ["Open conflicts", d.open_conflicts, ""],
+    ["Inbound failures", d.inbox_failed ? `<button type="button" class="linklike" id="open-failures">${Number(d.inbox_failed).toLocaleString("en-IN")}</button>` : 0,
+      d.inbox_failed ? "click to see why and fix" : ""],
     ["Vouchers in Tally", Number(d.vouchers.in_tally).toLocaleString("en-IN"),
-      d.vouchers.waiting_in_tally ? `${Number(d.vouchers.waiting_in_tally).toLocaleString("en-IN")} still to read` : "all read"],
+      (d.vouchers.waiting_in_tally ? `${Number(d.vouchers.waiting_in_tally).toLocaleString("en-IN")} still to read · click Sync now` : "all read")
+        + (d.vouchers.cancelled_in_tally ? ` · ${Number(d.vouchers.cancelled_in_tally).toLocaleString("en-IN")} cancelled in Tally, not imported` : "")],
     ["Synced vouchers", Number(d.vouchers.synced).toLocaleString("en-IN"),
-      d.vouchers.in_tally ? `${Math.floor((d.vouchers.synced / d.vouchers.in_tally) * 100)}% of Tally` +
+      d.vouchers.in_tally ? `${Math.floor((d.vouchers.synced / Math.max(1, d.vouchers.in_tally - (d.vouchers.cancelled_in_tally || 0))) * 100)}% of Tally` +
         (d.vouchers.not_stored ? ` · ${d.vouchers.not_stored} need attention` : "") : ""],
     ["Amended in Tally", Number(d.vouchers.amended_in_tally).toLocaleString("en-IN"), "vouchers whose amendment was synced"],
     ["Last import", when(c.last_inbound_at) || "never", c.freeze_inbound ? "inbound frozen" : ""],
@@ -277,6 +280,7 @@ renderers.dashboard = async () => {
   ];
   $("#health").innerHTML = cards.map(([k, v, s]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="small muted">${s}</div></div>`).join("");
   setBadge(d.open_conflicts);
+  $("#open-failures") && ($("#open-failures").onclick = openFailures);
   $("#auto-toggle") && ($("#auto-toggle").onclick = async () => {
     if (!a.enabled && !confirm("Automatic sync reads every company's changes from Tally on its own, and works through any backlog " +
       "one slot after another. While a large backlog is read, Tally is busy most of the time. Turn it on?")) return;
@@ -301,6 +305,68 @@ renderers.dashboard = async () => {
     const r = await api(`/sync/inbox/${b.dataset.reprocess}/reprocess`, { method: "POST" }); alert(`${r.outcome}${r.error ? ": " + r.error : ""}`); renderers.dashboard();
   }));
 };
+// Sync > Inbound failures: why vouchers from Tally were not saved, and what to do about it.
+let failData = null;
+async function openFailures() {
+  const dlg = $("#fail-dlg");
+  if (!dlg.open) dlg.showModal();
+  $("#fail-body").innerHTML = `<p class="muted">Loading…</p>`;
+  try { failData = await api(`/sync/inbox/failures?${cq()}`); }
+  catch (err) { $("#fail-body").innerHTML = `<p class="error">${esc(err.message)}</p>`; return; }
+  const manage = can("sync.manage");
+  ["#fail-masters", "#fail-retry-all"].forEach((id) => ($(id).hidden = !manage || !failData.total));
+  $("#fail-masters").hidden = !manage || !failData.by_code.missing_master;
+  if (!failData.total) { $("#fail-body").innerHTML = `<p>Nothing failed. Every voucher from Tally was saved.</p>`; return; }
+  const n = (x) => Number(x).toLocaleString("en-IN");
+  $("#fail-body").innerHTML = `<p><b>${n(failData.total)}</b> voucher(s) in ${n(failData.groups.length)} problem(s).</p>`
+    + failData.groups.map((g, gi) => `<details class="panel" data-g="${gi}">
+      <summary><b>${n(g.count)}</b> · ${esc(g.problem)} ${chip(g.error_code || "error")}</summary>
+      <p class="small"><b>What to do:</b> ${esc(g.fix)}</p>
+      ${manage ? `<div class="row wrap"><button type="button" class="secondary" data-retry-g="${gi}">Try these ${n(g.count)} again</button>
+        <button type="button" class="secondary danger" data-ignore-g="${gi}">Ignore these</button></div>` : ""}
+      <div class="tablewrap"><table class="small"><thead><tr><th>Type</th><th>No.</th><th>Date</th><th>Tries</th><th></th></tr></thead><tbody>
+      ${g.vouchers.slice(0, 200).map((v) => `<tr><td>${esc(v.voucher_type || "")}</td><td>${esc(v.voucher_number || "")}</td>
+        <td>${esc(v.date || "")}</td><td class="num">${v.attempts}</td>
+        <td>${manage ? `<button type="button" class="secondary small" data-retry="${v.id}">Try again</button>
+          <button type="button" class="secondary small" data-ignore="${v.id}">Ignore</button>` : ""}</td></tr>`).join("")}
+      </tbody></table></div>${g.vouchers.length > 200 ? `<p class="small muted">First 200 of ${n(g.vouchers.length)} shown.</p>` : ""}
+    </details>`).join("");
+  const ids = (gi) => failData.groups[gi].vouchers.map((v) => v.id);
+  $("#fail-body").querySelectorAll("[data-retry-g]").forEach((b) => (b.onclick = () => retryFailures(ids(b.dataset.retryG), b)));
+  $("#fail-body").querySelectorAll("[data-retry]").forEach((b) => (b.onclick = () => retryFailures([b.dataset.retry], b)));
+  $("#fail-body").querySelectorAll("[data-ignore-g]").forEach((b) => (b.onclick = () => ignoreFailures(ids(b.dataset.ignoreG))));
+  $("#fail-body").querySelectorAll("[data-ignore]").forEach((b) => (b.onclick = () => ignoreFailures([b.dataset.ignore])));
+}
+async function retryFailures(ids, btn) {
+  if (btn) btn.disabled = true;
+  $("#fail-msg").textContent = `Trying ${ids.length} voucher(s) again…`;
+  try {
+    const r = await api(`/sync/inbox/retry?${cq()}`, { method: "POST", body: { ids } });
+    const left = Object.values(r.still_failing).reduce((a, b) => a + b, 0);
+    $("#fail-msg").textContent = `${r.outcomes.applied || 0} saved` + (left ? `, ${left} still failing` : "") + ".";
+  } catch (err) { $("#fail-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; }
+  await openFailures(); renderers.dashboard();
+}
+async function ignoreFailures(ids) {
+  if (!confirm(`Leave ${ids.length} voucher(s) out of the software? They no longer count as failures. `
+    + "If one is changed in Tally later, the next sync reads it again.")) return;
+  try { const r = await api(`/sync/inbox/ignore?${cq()}`, { method: "POST", body: { ids } }); $("#fail-msg").textContent = `${r.ignored} ignored.`; }
+  catch (err) { $("#fail-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; }
+  await openFailures(); renderers.dashboard();
+}
+$("#fail-close").onclick = () => $("#fail-dlg").close();
+$("#fail-retry-all").onclick = (e) => retryFailures(failData.groups.flatMap((g) => g.vouchers.map((v) => v.id)), e.target);
+$("#fail-masters").onclick = async (e) => {
+  if (!confirm("Read every master (ledgers, stock items, groups…) from Tally again, then try the waiting vouchers again?\n\n"
+    + "Tally is busy for a few minutes on a large company; the Sync tab shows the progress.")) return;
+  e.target.disabled = true;
+  try {
+    await api(`/sync/inbox/read-masters?${cq()}`, { method: "POST" });
+    $("#fail-dlg").close(); watchProgress();
+  } catch (err) { $("#fail-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; }
+  finally { e.target.disabled = false; }
+};
+
 function setBadge(n) { const b = $("#conflict-badge"); b.hidden = !n; b.textContent = n; }
 
 async function loadJobs() {
@@ -356,18 +422,33 @@ function renderProgress(p) {
   const finished = steps.filter((st) => ["done", "skipped", "failed"].includes(st.state)).length;
   const current = steps.find((st) => st.state === "running");
   const part = current && current.total ? current.done / current.total : 0;
-  const overall = p.state === "running" ? Math.min(99, Math.round(((finished + part) / (steps.length || 1)) * 100)) : 100;
-  const started = new Date(p.started_at), ended = p.finished_at ? new Date(p.finished_at) : new Date();
+  // Overall: vouchers read out of vouchers to read over the whole sync (all its parts); before the voucher
+  // scan, or when there is nothing to read, the steps of this part.
+  const run = p.run && p.run.total ? p.run : null;
+  const fmtN = (n) => Number(n).toLocaleString("en-IN");
+  const dur = (s) => (s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`
+    : s >= 60 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${s} s`);
+  const byVouchers = run ? Math.round((100 * run.read) / run.total) : null;
+  const overall = p.state === "running"
+    ? Math.min(99, byVouchers ?? Math.round(((finished + part) / (steps.length || 1)) * 100))
+    : (p.state === "done" ? 100 : (byVouchers ?? 100));
+  const started = new Date((p.run && p.run.started_at) || p.started_at), ended = p.finished_at ? new Date(p.finished_at) : new Date();
   const secs = Math.max(0, Math.round((ended - started) / 1000));
-  const took = secs >= 60 ? `${Math.floor(secs / 60)} min ${secs % 60} s` : `${secs} s`;
-  const title = { running: "Syncing with Tally…", done: "Last sync finished", failed: "Last sync stopped" }[p.state] || p.state;
-  el.innerHTML = `<div class="head"><b>${title}</b><span class="muted small">${esc(p.trigger || "")} · started ${started.toLocaleTimeString()} · ${took}</span></div>
+  const eta = p.state === "running" && run && run.read > 0 && run.read < run.total
+    ? ` · about ${dur(Math.round((secs / run.read) * (run.total - run.read)))} left` : "";
+  const title = { running: `Syncing with Tally… ${overall}%`, done: "Last sync finished",
+    failed: `Last sync stopped at ${overall}%` }[p.state] || p.state;
+  const line = p.state === "running"
+    ? (run ? `${fmtN(run.read)} of ${fmtN(run.total)} vouchers read · ${overall}%${eta}${run.part > 1 ? ` · part ${run.part}` : ""}`
+      : `Step ${Math.min(finished + 1, steps.length)} of ${steps.length} · ${overall}%`)
+    : esc(p.summary || "");
+  el.innerHTML = `<div class="head"><b>${title}</b><span class="muted small">${esc(p.trigger || "")} · started ${started.toLocaleTimeString()} · ${dur(secs)}</span></div>
     <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${overall}" aria-label="Overall sync progress"><span style="width:${overall}%"></span></div>
-    <div class="small muted">${p.state === "running" ? `Step ${Math.min(finished + 1, steps.length)} of ${steps.length} · ${overall}%` : esc(p.summary || "")}</div>
+    <div class="small muted">${line}</div>
     <ol class="steps">${steps.map((st) => {
       const pctDone = st.total ? Math.round((st.done / st.total) * 100) : null;
       return `<li class="${st.state}"><span class="icon">${STEP_ICON[st.state] || ""}</span><div><b>${esc(st.name)}</b>
-        <div class="small">${esc(st.detail || "")}${st.total ? ` — ${Number(st.done).toLocaleString("en-IN")} / ${Number(st.total).toLocaleString("en-IN")}` : ""}</div>
+        <div class="small">${esc(st.detail || "")}${st.total ? ` — ${Number(st.done).toLocaleString("en-IN")} / ${Number(st.total).toLocaleString("en-IN")} · <b>${pctDone}%</b>` : ""}</div>
         ${pctDone !== null && st.state !== "skipped" ? `<div class="bar small" role="progressbar" aria-valuenow="${pctDone}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(st.name)}"><span style="width:${pctDone}%"></span></div>` : ""}</div></li>`;
     }).join("")}</ol>`;
   $("#run-sync").disabled = p.state === "running" || $("#run-sync").dataset.checked !== "yes";
@@ -1215,7 +1296,7 @@ async function groupWiseView(el) {
   const share = (n) => {
     if (!total || n.kind === "total") return "";
     const pc = (Number(n.value) / total) * 100;
-    return `<span class="bar" style="width:${Math.max(1, Math.min(60, Math.abs(pc) * 0.6))}px"></span>${pc.toFixed(1)}%`;
+    return `<span class="minibar" style="width:${Math.max(1, Math.min(60, Math.abs(pc) * 0.6))}px"></span>${pc.toFixed(1)}%`;
   };
   el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · ${esc(counted || "no voucher types")}`
     + `${r.include_returns ? " · returns deducted" : ""} · click a group to expand it, an item for its invoices</p>`
@@ -2553,10 +2634,31 @@ $("#ld-edit").onclick = async () => {
 };
 
 // ------------------------------------------------------------------ connector settings
-const CF = { host: "#c-host", port: "#c-port", tally_company_name: "#c-name", alter_by: "#c-alter", inbound_from_date: "#c-from" };
+const CF = { host: "#c-host", port: "#c-port", tally_company_name: "#c-name", alter_by: "#c-alter", inbound_from_date: "#c-from",
+  voucher_batch_size: "#c-batch" };
 const CB = { enabled: "#c-enabled", freeze_outbound: "#c-fout", freeze_inbound: "#c-fin" };
 const cMode = () => (document.querySelector('input[name="c-mode"]:checked') || {}).value || "one_way";
+// Settings > Delete this company: company admin or system admin; the name must be typed to confirm.
+$("#co-delete-btn").onclick = async () => {
+  const name = $("#company").selectedOptions[0]?.textContent || "";
+  const typed = prompt(`Delete the company "${name}" and everything in it from this software?\n\n`
+    + "Vouchers, masters, reports, the Tally link and sync history are removed. Tally is not touched. "
+    + "This cannot be undone.\n\nType the company name to confirm.");
+  if (typed === null) return;
+  const btn = $("#co-delete-btn"); btn.disabled = true; $("#co-delete-msg").textContent = "Deleting…";
+  try {
+    await api(`/companies/${state.company}?confirm=${encodeURIComponent(typed)}`, { method: "DELETE" });
+    $("#co-delete-msg").textContent = "";
+    state.company = null; store("erp_company", "");
+    state.user = await api("/me").catch(() => state.user);
+    await loadCompanies();
+    alert(`"${name}" was deleted.`);
+  } catch (err) { $("#co-delete-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; }
+  finally { btn.disabled = false; }
+};
+
 renderers.settings = async () => {
+  $("#co-delete").hidden = !(state.company && (state.user?.is_superadmin || can("company.manage")));
   let c = null;
   try { c = await api(`/sync/connectors/${state.company}`); } catch (_) { $("#c-msg").textContent = "Not configured yet"; }
   if (!c) return;
@@ -2925,8 +3027,114 @@ async function securityView() {
   };
 }
 
+// System admin > Backup & restore: move to another server without reading everything from Tally again.
+let backupTimer = null;
+function backupJob(j) {
+  const el = $("#bk-status");
+  if (!j || j.state === "never") { el.innerHTML = ""; return; }
+  const pct = j.total ? Math.round((100 * j.done) / j.total) : 0;
+  el.innerHTML = j.state === "running"
+    ? `<div class="upd-box"><b>Restoring… ${pct}%</b> <span class="muted">${esc(j.step || "")}</span>
+       <div class="bar"><span style="width:${pct}%"></span></div>
+       <span class="muted">Do not close the server. This page refreshes by itself.</span></div>`
+    : `<p class="${j.state === "ok" ? "" : "error"}">${esc(j.message || j.state)}</p>`;
+}
+async function pollRestore() {
+  clearTimeout(backupTimer);
+  let j;
+  try { j = await api("/admin/backup/restore"); }
+  catch (err) {
+    // the restore replaced the users, so this sign-in is gone: sign in again with the old server's users
+    if (/sign in/i.test(err.message)) return;
+    backupTimer = setTimeout(pollRestore, 3000); return;
+  }
+  backupJob(j);
+  if (j.state === "running") backupTimer = setTimeout(pollRestore, 2000);
+  else if (j.state === "ok" && j.companies) { if (!backupShown || backupShown !== j.finished_at) { backupShown = j.finished_at; loadCompanies().catch(() => {}); } }
+  else if (j.state === "ok") setTimeout(() => { alert(j.message); signOut(); }, 300);
+}
+let backupShown = null, backupFile = null;
+// What to back up: the whole server, or ticked companies
+async function backupCompanies() {
+  const some = document.querySelector('input[name="bk-scope"]:checked').value === "some";
+  const el = $("#bk-companies"); el.hidden = !some;
+  if (!some || el.dataset.loaded) return;
+  const list = await api("/companies");
+  el.innerHTML = list.map((c) => `<label class="check"><input type="checkbox" value="${c.id}"> ${esc(c.name)}</label>`).join("")
+    || `<span class="muted">No companies.</span>`;
+  el.dataset.loaded = "1";
+}
+document.querySelectorAll('input[name="bk-scope"]').forEach((r) => (r.onchange = () => backupCompanies().catch((err) => alert(err.message))));
+// Picking a file shows what it holds before anything is changed
+$("#bk-file").onchange = async (e) => {
+  const f = e.target.files[0]; backupFile = null; $("#bk-go").disabled = true; $("#bk-what").innerHTML = "";
+  if (!f) return;
+  $("#bk-what").innerHTML = `<p class="muted">Reading ${esc(f.name)}…</p>`;
+  const form = new FormData(); form.append("file", f);
+  try {
+    const m = await api("/admin/backup/inspect", { method: "POST", form });
+    backupFile = m;
+    const made = `made ${esc((m.created_at || "").slice(0, 16).replace("T", " "))} by version ${esc(m.app_version || "?")}`;
+    if (m.scope === "companies") {
+      $("#bk-go").textContent = "Import companies";
+      $("#bk-what").innerHTML = `<p>Backup of <b>${m.companies.map((c) => esc(c.name)).join(", ")}</b>, ${made}.
+        They are added to this server; the companies already here stay as they are. Users with access come along
+        (a user already here by that name keeps their own password).</p>`
+        + (m.existing.length ? `<p class="error">Already on this server: <b>${m.existing.map(esc).join(", ")}</b>.</p>
+           <label class="check"><input type="checkbox" id="bk-replace"> Replace them with the backup's copy (their data here is deleted)</label>` : "");
+    } else {
+      $("#bk-go").textContent = "Restore backup";
+      $("#bk-what").innerHTML = `<p>Backup of the <b>whole server</b>, ${made}.</p>
+        <p class="error">Restore replaces ALL data on this server (companies, vouchers, users) with the backup's.
+        Everyone is signed out; sign in again with the users and passwords of the old server.
+        Switch the old server off afterwards, so that only one of them syncs with Tally.</p>`;
+    }
+    $("#bk-go").disabled = false;
+  } catch (err) { $("#bk-what").innerHTML = `<p class="error">${esc(err.message)}</p>`; }
+};
+$("#bk-download").onclick = async (e) => {
+  const btn = e.target; btn.disabled = true; $("#bk-msg").textContent = "Making the backup… a large company takes a few minutes.";
+  try {
+    let q = "";
+    if (document.querySelector('input[name="bk-scope"]:checked').value === "some") {
+      const ids = [...document.querySelectorAll("#bk-companies input:checked")].map((i) => i.value);
+      if (!ids.length) throw new Error("Tick the companies to back up.");
+      q = "?" + ids.map((id) => `company=${id}`).join("&");
+    }
+    const res = await fetch(API + "/admin/backup/download" + q, { headers: authHeaders() });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+    const name = (res.headers.get("Content-Disposition") || "").match(/filename="?([^";]+)/)?.[1] || "tallycloud-backup.zip";
+    const blob = await res.blob();
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click();
+    $("#bk-msg").textContent = `Downloaded ${name} (${(blob.size / 1048576).toFixed(1)} MB).`;
+  } catch (err) { $("#bk-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; }
+  finally { btn.disabled = false; }
+};
+$("#bk-restore").onsubmit = async (e) => {
+  e.preventDefault();
+  const some = backupFile?.scope === "companies";
+  const replace = some && !!$("#bk-replace")?.checked;
+  if (some && backupFile.existing.length && !replace) {
+    return alert(`${backupFile.existing.join(", ")} is already on this server. Tick "Replace them", or delete it first.`);
+  }
+  const typed = some
+    ? prompt(`Import ${backupFile.companies.map((c) => c.name).join(", ")} to this server?`
+      + (replace ? `\n\nThe copy here of ${backupFile.existing.join(", ")} is deleted and replaced.` : "")
+      + "\n\nType IMPORT to go on.")
+    : prompt("Restore replaces ALL data on this server (every company, voucher and user) with the backup's. "
+      + "This cannot be undone.\n\nType RESTORE to go on.");
+  if (typed === null) return;
+  const form = new FormData(e.target); form.append("confirm", typed); form.append("replace", replace ? "true" : "false");
+  const btn = e.target.querySelector("button"); btn.disabled = true;
+  $("#bk-status").innerHTML = `<p class="muted">Uploading the backup…</p>`;
+  try { await api("/admin/backup/restore", { method: "POST", form }); e.target.reset(); $("#bk-what").innerHTML = ""; $("#bk-go").disabled = true; pollRestore(); }
+  catch (err) { $("#bk-status").innerHTML = `<p class="error">${esc(err.message)}</p>`; }
+  finally { btn.disabled = false; }
+};
+
 renderers.server = async () => {
   securityView().catch((err) => ($("#sv-security").innerHTML = `<p class="error">${esc(err.message)}</p>`));
+  pollRestore();
   const client = state.user?.license_mode === "client";
   $("#sv-client").hidden = !client; $("#sv-github").hidden = client;
   if (client) return clientUpdateView();

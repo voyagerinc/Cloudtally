@@ -127,7 +127,7 @@ table.fs tr.total td { font-weight: 600; border-top: 1px solid var(--line); }
 .mis-grid table td, .mis-grid table th { white-space: nowrap; }
 .split-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .split-row label { width: 120px; }
-.bar { display: inline-block; height: 6px; border-radius: 3px; background: var(--accent); opacity: .55; vertical-align: middle; margin-right: 6px; }
+.minibar { display: inline-block; height: 6px; border-radius: 3px; background: var(--accent); opacity: .55; vertical-align: middle; margin-right: 6px; }
 
 .stack { display: grid; gap: 10px; }
 .row.nowrap { flex-wrap: nowrap; } .row.nowrap input { flex: 1; }
@@ -164,3 +164,6 @@ tr.muted td { color: var(--muted); }
 .upd-bar.busy > div { width: 35% !important; animation: upd-slide 1.2s ease-in-out infinite alternate; }
 @keyframes upd-slide { from { margin-left: 0; } to { margin-left: 65%; } }
 .upd-step { grid-column: 2 / 4; }
+button.linklike { background: none; border: 0; padding: 0; min-height: 0; color: var(--accent); text-decoration: underline; cursor: pointer; font: inherit; }
+.tablewrap { overflow: auto; max-height: 360px; }
+#fail-body details { margin: 8px 0; } #fail-body summary { cursor: pointer; }

@@ -84,9 +84,11 @@ def check_health(db, conn: TallyConnector) -> bool:
 
 
 def run_company(session_factory: sessionmaker, company_id: uuid.UUID, force: bool = False,
-                trigger: str = "background sync") -> dict:
+                trigger: str = "background sync", run: dict | None = None, more_follows=None) -> dict:
+    """run: shared by the passes of one Sync now (overall progress). more_follows(company_id) -> True when
+    another pass comes right after this one, so the Sync tab keeps showing one running sync."""
     stats: dict = {}
-    progress = Progress(company_id, trigger)
+    progress = Progress(company_id, trigger, run)
     try:
         with session_factory() as db:
             conn = db.get(TallyConnector, company_id)
@@ -122,7 +124,9 @@ def run_company(session_factory: sessionmaker, company_id: uuid.UUID, force: boo
     except Exception as exc:
         progress.finish(f"Stopped: {type(exc).__name__}: {exc}", failed=True)
         raise
-    progress.finish(_summary(stats), failed="error" in (stats.get("inbound") or {}))
+    failed = "error" in (stats.get("inbound") or {})
+    progress.finish(_summary(stats), failed=failed,
+                    continues=bool(not failed and more_follows and more_follows(company_id)))
     return stats
 
 

@@ -733,7 +733,8 @@ def test_every_tally_amendment_is_synced_with_its_history(db, company, tc):
     amends = api.get(f"/api/v1/sync/amendments?company_id={company.id}").json()
     assert [(a["version"], a["changes"]) for a in amends] == [(3, ["narration"]), (2, ["entries[HDFC Bank]", "entries[Rent]"])]
     counts = api.get(f"/api/v1/sync/dashboard?company_id={company.id}").json()["vouchers"]
-    assert counts == {"in_tally": 1, "synced": 1, "not_stored": 0, "waiting_in_tally": 0, "amended_in_tally": 1}
+    assert counts == {"in_tally": 1, "synced": 1, "not_stored": 0, "cancelled_in_tally": 0, "waiting_in_tally": 0,
+                      "amended_in_tally": 1}
 
 
 def test_backlog_scan_shrinks_and_auto_sync_keeps_going(db, company, tc, mock, monkeypatch):
@@ -1031,3 +1032,199 @@ def test_unseen_handles_more_vouchers_than_one_query_can_carry(db, company):
     from app.services.sync import inbound
     changes = [(mid, 1) for mid in range(1, 70_001)]
     assert inbound._unseen(db, company.id, changes) == changes
+
+
+def test_tally_stopping_part_way_leaves_the_rest_to_read(db, company, tc, mock, monkeypatch):
+    """A pass that stops on a Tally timeout must not look finished ("all read"): the vouchers left are
+    counted, and the next sync reads them."""
+    from app.connectors.tally import client as tally_client
+    from app.connectors.tally.errors import ErrorCode, TallyError
+    sync()
+    monkeypatch.setattr(settings, "sync_voucher_batch_size", 2)
+    monkeypatch.setattr(tally_client, "RETRY_PAUSE", 0)
+    for i in range(5):
+        mock.enter_voucher(tc, receipt_xml("20260501", f"T-{i}"))
+
+    real, calls = tally_client.TallyClient.vouchers, {"n": 0}
+
+    def flaky(self, *a, **kw):
+        if kw.get("formula", "").startswith("$MasterID"):
+            calls["n"] += 1
+            if calls["n"] >= 2:                 # the second batch never answers, not even when asked again
+                raise TallyError(ErrorCode.CONNECTIVITY, "Tally timed out after 60.0s")
+        return real(self, *a, **kw)
+    monkeypatch.setattr(tally_client.TallyClient, "vouchers", flaky)
+    stats = sync()[str(company.id)]["inbound"]
+    assert "error" in stats
+    db.expire_all()
+    conn = db.get(TallyConnector, company.id)
+    assert conn.voucher_backlog == 3                         # 2 of 5 saved before Tally stopped
+
+    monkeypatch.setattr(tally_client.TallyClient, "vouchers", real)
+    sync()
+    db.expire_all()
+    assert db.get(TallyConnector, company.id).voucher_backlog == 0
+    assert db.scalar(select(func.count()).select_from(SyncInbox).where(SyncInbox.company_id == company.id,
+                                                                       SyncInbox.voucher_number.like("T-%"))) == 5
+
+
+def test_busy_tally_is_asked_once_more_for_a_batch(db, company, tc, mock, monkeypatch):
+    from app.connectors.tally import client as tally_client
+    from app.connectors.tally.errors import ErrorCode, TallyError
+    sync()
+    monkeypatch.setattr(tally_client, "RETRY_PAUSE", 0)
+    mock.enter_voucher(tc, receipt_xml("20260501", "R-1"))
+    real, calls = tally_client.TallyClient.vouchers, {"n": 0}
+
+    def once_busy(self, *a, **kw):
+        if kw.get("formula", "").startswith("$MasterID"):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TallyError(ErrorCode.CONNECTIVITY, "Tally timed out after 60.0s")
+        return real(self, *a, **kw)
+    monkeypatch.setattr(tally_client.TallyClient, "vouchers", once_busy)
+    stats = sync()[str(company.id)]["inbound"]
+    assert "error" not in stats and stats["received"] == 1 and calls["n"] == 2
+
+
+def test_sync_now_shows_one_progress_over_all_its_parts(db, company, tc, mock, monkeypatch):
+    """Sync now reads a large backlog in parts; the Sync tab shows vouchers read out of all to read."""
+    from app.api.sync import _run_in_background
+    sync()
+    monkeypatch.setattr(settings, "sync_voucher_batch_size", 2)
+    monkeypatch.setattr(settings, "sync_voucher_max_batches", 1)
+    for i in range(5):
+        mock.enter_voucher(tc, receipt_xml("20260501", f"P-{i}"))
+    _run_in_background(company.id, "asha")
+    db.expire_all()
+    p = db.get(SyncProgress, company.id).data
+    assert p["state"] == "done" and p["run"]["read"] == 5 and p["run"]["total"] == 5 and p["run"]["part"] == 3
+
+
+def test_large_company_asks_tally_for_more_vouchers_per_request(monkeypatch):
+    """Tally walks every voucher per request: on a slow (large) company fewer, larger requests are faster."""
+    from app.services.sync import inbound
+    monkeypatch.setattr(settings, "sync_voucher_batch_size", 50)
+    assert inbound.batch_size_for(2.0) == 50
+    assert inbound.batch_size_for(30.0) == inbound.LARGE_BATCH == 500
+
+
+def test_tally_rebuilt_with_lower_counters_is_read_again(db, company, tc, mock):
+    """A company split or restored in Tally starts its change counters lower than what was read before.
+    The software must not think nothing changed: new masters come in, and the vouchers that waited for
+    them are saved."""
+    sync()
+    conn = db.get(TallyConnector, company.id)
+    conn.master_watermark = tc.alt_mst_id() + 10_000        # read from the company before it was rebuilt
+    db.commit()
+    tc.add_ledger("New Customer", "Sundry Debtors")
+    mock.enter_voucher(tc, receipt_xml("20260501", "RB-1").replace("Capital", "New Customer"))
+    sync()
+    db.expire_all()
+    assert db.scalar(select(Ledger).where(Ledger.company_id == company.id, Ledger.name == "New Customer"))
+    assert db.get(TallyConnector, company.id).master_watermark <= tc.alt_mst_id()
+    assert db.scalar(select(SyncInbox.status).where(SyncInbox.company_id == company.id,
+                                                    SyncInbox.voucher_number == "RB-1")) == "applied"
+
+
+def test_vouchers_waiting_for_a_master_are_saved_when_it_arrives(db, company, tc, mock, monkeypatch):
+    sync()
+    # the voucher arrives before its ledger (a master read that came too late, a master the sync skipped)
+    from app.services.sync import masters_in
+    real_pull = masters_in.MasterImporter.pull
+    monkeypatch.setattr(masters_in.MasterImporter, "pull", lambda self, *a, **kw: None)
+    tc.add_ledger("Late Ledger", "Sundry Debtors")
+    mock.enter_voucher(tc, receipt_xml("20260501", "LT-1").replace("Capital", "Late Ledger"))
+    sync()
+    item = db.scalar(select(SyncInbox).where(SyncInbox.company_id == company.id, SyncInbox.voucher_number == "LT-1"))
+    assert item.status == "failed" and item.error_code == "missing_master"
+
+    monkeypatch.setattr(masters_in.MasterImporter, "pull", real_pull)
+    conn = db.get(TallyConnector, company.id)
+    conn.master_watermark = 0
+    db.commit()
+    stats = sync()[str(company.id)]["inbound"]
+    assert stats.get("retried", {}).get("applied") == 1
+    db.expire_all()
+    assert db.get(SyncInbox, item.id).status == "applied"
+
+
+def test_inbound_failures_are_listed_with_their_fix_and_can_be_retried_or_ignored(db, company, tc, mock, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.models import User
+    from app.core.security import hash_key
+    from app.services.sync import masters_in
+    db.add(User(username="boss", api_key_hash=hash_key("k-boss"), is_superadmin=True))
+    db.commit()
+    api, h, q = TestClient(app), {"X-API-Key": "k-boss"}, f"company_id={company.id}"
+    sync()
+    real_pull = masters_in.MasterImporter.pull
+    monkeypatch.setattr(masters_in.MasterImporter, "pull", lambda self, *a, **kw: None)   # the ledger is not read
+    tc.add_ledger("Late Ledger", "Sundry Debtors")
+    for n in ("F-1", "F-2"):
+        mock.enter_voucher(tc, receipt_xml("20260501", n).replace("Capital", "Late Ledger"))
+    sync()
+
+    f = api.get(f"/api/v1/sync/inbox/failures?{q}", headers=h).json()
+    assert f["total"] == 2 and f["by_code"] == {"missing_master": 2}
+    g = f["groups"][0]
+    assert "Late Ledger" in g["problem"] and "Read masters from Tally again" in g["fix"]
+    assert {v["voucher_number"] for v in g["vouchers"]} == {"F-1", "F-2"}
+    assert api.get(f"/api/v1/sync/dashboard?{q}", headers=h).json()["inbox_failed"] == 2
+
+    # still missing: retry keeps it failing; ignore takes one off the list
+    one, other = (v["id"] for v in sorted(g["vouchers"], key=lambda v: v["voucher_number"]))
+    r = api.post(f"/api/v1/sync/inbox/retry?{q}", json={"ids": [one]}, headers=h).json()
+    assert r["outcomes"] == {"failed": 1}
+    assert api.post(f"/api/v1/sync/inbox/ignore?{q}", json={"ids": [other]}, headers=h).json() == {"ignored": 1}
+    assert api.get(f"/api/v1/sync/inbox/failures?{q}", headers=h).json()["total"] == 1
+
+    # the fix: read masters again; the waiting voucher is saved
+    monkeypatch.setattr(masters_in.MasterImporter, "pull", real_pull)
+    assert api.post(f"/api/v1/sync/inbox/read-masters?{q}", headers=h).status_code == 202
+    assert api.get(f"/api/v1/sync/inbox/failures?{q}", headers=h).json()["total"] == 0
+    db.expire_all()
+    assert db.scalar(select(SyncInbox.status).where(SyncInbox.company_id == company.id,
+                                                    SyncInbox.voucher_number == "F-1")) == "applied"
+
+
+def test_vouchers_per_request_can_be_set_on_the_connector(db, company, tc, mock):
+    sync()
+    conn = db.get(TallyConnector, company.id)
+    conn.voucher_batch_size = 2
+    db.commit()
+    for i in range(5):
+        mock.enter_voucher(tc, receipt_xml("20260501", f"S-{i}"))
+    mock.requests.clear()
+    sync()
+    assert voucher_requests(mock, full=True) == 3          # 5 vouchers, 2 per request
+
+
+def test_voucher_waiting_for_a_master_renamed_in_tally_is_read_again(db, company, tc, mock, monkeypatch):
+    """Renaming a ledger in Tally changes the vouchers using it but not their AlterID: the copy kept here has
+    the old name for good. Read masters from Tally again reads such vouchers afresh and saves them."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.models import User
+    from app.core.security import hash_key
+    from app.services.sync import masters_in
+    db.add(User(username="boss", api_key_hash=hash_key("k-boss"), is_superadmin=True))
+    db.commit()
+    sync()
+    real_pull = masters_in.MasterImporter.pull
+    monkeypatch.setattr(masters_in.MasterImporter, "pull", lambda self, *a, **kw: None)
+    tc.add_ledger("Old Name", "Sundry Debtors")
+    mid = mock.enter_voucher(tc, receipt_xml("20260501", "RN-1").replace("Capital", "Old Name"))
+    sync()                                       # fails: 'Old Name' was not read
+    # in Tally: the ledger is renamed; the voucher shows the new name, its AlterID stays
+    tc.ledgers["New Name"] = dict(tc.ledgers.pop("Old Name"), name="New Name")
+    for led in tc.vouchers[mid].iter("LEDGERNAME"):
+        if led.text == "Old Name":
+            led.text = "New Name"
+    monkeypatch.setattr(masters_in.MasterImporter, "pull", real_pull)
+    r = TestClient(app).post(f"/api/v1/sync/inbox/read-masters?company_id={company.id}", headers={"X-API-Key": "k-boss"})
+    assert r.status_code == 202
+    db.expire_all()
+    assert db.scalar(select(SyncInbox.status).where(SyncInbox.company_id == company.id,
+                                                    SyncInbox.voucher_number == "RN-1")) == "applied"

@@ -53,6 +53,29 @@ def update_company(company_id: uuid.UUID, body: CompanyIn, db: DB, user: Current
     return company
 
 
+@router.delete("/companies/{company_id}")
+def delete_company(company_id: uuid.UUID, db: DB, user: CurrentUser, confirm: str = ""):
+    """Deletes the company and everything in it from this software (Tally is not touched).
+    confirm: the company's name, typed by the user."""
+    from app.models import SyncProgress
+    from app.services.accounting.delete_company import delete_company as wipe
+    from app.services.sync import progress
+    company = authorize(db, user, company_id, Perm.COMPANY_MANAGE)
+    if confirm.strip().casefold() != company.name.strip().casefold():
+        raise HTTPException(422, f"Type the company name ({company.name}) to confirm.")
+    row = db.get(SyncProgress, company_id)
+    if row and progress.is_running(row.data):
+        raise HTTPException(409, "A sync is running for this company. Wait until it has finished, then delete.")
+    name = company.name
+    db.expunge(company)
+    rows = wipe(db, company_id)
+    audit.record(db, actor_of(user), "company.delete", "company", company_id, company_id=company_id,
+                 before={"name": name}, after={"rows_deleted": rows})
+    db.commit()
+    licence.forget_cached()
+    return {"deleted": name, "rows": rows}
+
+
 @router.get("/companies/{company_id}/financial-years", response_model=list[FinancialYearOut])
 def list_years(company_id: uuid.UUID, db: DB, user: CurrentUser):
     return authorize(db, user, company_id, Perm.MASTERS_READ).financial_years

@@ -1,4 +1,5 @@
 """Tally -> ERP: incremental polling by AlterID, durable inbox, idempotent apply (PRD §6.4)."""
+import time
 import logging
 import uuid
 from datetime import date
@@ -27,6 +28,18 @@ from app.services.sync.progress import NoProgress
 log = logging.getLogger("sync.inbound")
 S = VoucherStatus
 
+MAX_BATCH_TIMEOUT = 600     # seconds: Tally on a very large company, busy with people working in it
+SCAN_TIMEOUT = 300          # seconds for the change scan (Tally goes through every voucher once)
+SLOW_SCAN_SECONDS = 8       # a change scan this slow means a large company: Tally walks every voucher per request
+LARGE_BATCH = 500           # vouchers per request then (measured live, Nov 2026: 500 took 46 s, 50 took ~35 s)
+
+
+def batch_size_for(scan_secs: float) -> int:
+    """Vouchers per Tally request. Tally walks every voucher of the company for each request, whatever it
+    asks for, so on a large company the walk, not the vouchers, is the cost: ask for more per request."""
+    size = settings.sync_voucher_batch_size
+    return max(size, LARGE_BATCH) if scan_secs >= SLOW_SCAN_SECONDS else size
+
 
 def voucher_from(company: Company, conn: TallyConnector) -> date:
     """Tally vouchers dated before this are ignored (the inbound start date, else books-from)."""
@@ -50,9 +63,22 @@ def poll(db: Session, company: Company, conn: TallyConnector, client: TallyClien
         return stats
     progress.step(1, "Checking Tally's change counters")
     counters = client.company_counters()
+    # Tally's counters only grow. Lower than what was read means Tally's data was rebuilt (company split,
+    # restored from a backup, rewritten): what was read is no guide to what changed, so read from the start.
+    # Masters and vouchers already here are matched and skipped, nothing is duplicated.
+    if counters["alt_mst_id"] is not None and counters["alt_mst_id"] < conn.master_watermark:
+        log.warning("%s: Tally's master counter %s is below %s; reading every master again",
+                    company.name, counters["alt_mst_id"], conn.master_watermark)
+        conn.master_watermark = 0
+    if counters["alt_vch_id"] is not None and counters["alt_vch_id"] < conn.voucher_watermark:
+        log.warning("%s: Tally's voucher counter %s is below %s; scanning every voucher again",
+                    company.name, counters["alt_vch_id"], conn.voucher_watermark)
+        conn.voucher_watermark = 0
 
     if counters["alt_mst_id"] is None or counters["alt_mst_id"] > conn.master_watermark:
         importer = MasterImporter(db, company, conn)
+        if not conn.master_watermark:      # every master: a big request on a large company
+            client.timeout = max(client.timeout, SCAN_TIMEOUT)
         importer.pull(client, since_alter_id=max(0, conn.master_watermark - settings.sync_inbound_overlap) or None,
                       on_type=lambda i, n, label: progress.step(1, f"Reading {label}", done=i, total=n))
         stats["masters"] = importer.counts
@@ -60,6 +86,8 @@ def poll(db: Session, company: Company, conn: TallyConnector, client: TallyClien
         db.commit()
         changed = sum(c["created"] + c["updated"] for c in importer.counts.values())
         progress.step(1, f"{changed} master(s) created or updated", state="done")
+        if any(c["created"] + c["updated"] for c in importer.counts.values()):
+            stats["retried"] = retry_waiting_for_masters(db, company, conn, progress, client)
     else:
         stats["masters"] = "unchanged"
         progress.step(1, "No master changed in Tally", state="done")
@@ -80,6 +108,71 @@ def poll(db: Session, company: Company, conn: TallyConnector, client: TallyClien
     conn.last_inbound_at = utcnow()
     db.commit()
     return stats
+
+
+def retry_waiting_for_masters(db: Session, company: Company, conn: TallyConnector, progress=None,
+                              client: TallyClient | None = None) -> dict:
+    """Vouchers that failed because a ledger or stock item was not here yet: try them again now that new
+    masters came in. Only the newest copy of each voucher, and only when nothing newer is already applied."""
+    from app.models import TallyMapping
+    failed = db.scalars(select(SyncInbox).where(
+        SyncInbox.company_id == company.id, SyncInbox.entity_type == "voucher", SyncInbox.status == "failed",
+        SyncInbox.error_code == "missing_master").order_by(SyncInbox.tally_master_id, SyncInbox.tally_alter_id.desc())).all()
+    newest = {}
+    for item in failed:
+        newest.setdefault(item.tally_master_id, item)
+    if not newest:
+        return {}
+    have = dict(db.execute(select(TallyMapping.tally_master_id, TallyMapping.tally_alter_id).where(
+        TallyMapping.company_id == company.id, TallyMapping.entity_type == "voucher",
+        TallyMapping.tally_master_id.in_(list(newest)))).all())
+    todo = [i for m, i in newest.items() if m not in have or (have[m] or 0) < (i.tally_alter_id or 0)]
+    outcomes: dict = {}
+    for n, item in enumerate(todo, 1):
+        if progress and n % 100 == 1:
+            progress.step(1, "Trying again vouchers that waited for these masters", done=n - 1, total=len(todo))
+        outcome = apply_item(db, company, conn, item)
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        db.commit()
+    if progress:
+        progress.step(1, f"{outcomes.get('applied', 0)} of {len(todo)} waiting voucher(s) saved now that their "
+                         f"masters are here", state="done")
+    still = [i for i in todo if i.status == "failed" and i.error_code == "missing_master"]
+    if client is not None and still:
+        outcomes["read_again"] = read_again(db, company, conn, client, still, progress)
+    return outcomes
+
+
+def read_again(db: Session, company: Company, conn: TallyConnector, client: TallyClient, items: list,
+               progress=None) -> dict:
+    """Read these vouchers from Tally afresh and save them. For vouchers still waiting for a master that is
+    here under another name: a ledger or stock item renamed in Tally changes the vouchers that use it, but
+    not their AlterID, so the copy kept from before still has the old name."""
+    by_mid = {i.tally_master_id: i for i in items if i.tally_master_id}
+    size = conn.voucher_batch_size or (LARGE_BATCH if len(by_mid) > 200 else settings.sync_voucher_batch_size)
+    client.timeout = max(client.timeout, SCAN_TIMEOUT)
+    outcomes: dict = {}
+    done = 0
+    for batch in client.vouchers_in_batches(list(by_mid), batch_size=size):
+        done += len(batch)
+        if progress:
+            progress.step(1, "Reading vouchers that wait for a renamed master from Tally again",
+                          done=done, total=len(by_mid))
+        for tv in batch:
+            item = receive(db, company.id, tv) or by_mid.get(tv.master_id)
+            if item is None:
+                continue
+            if item.tally_alter_id == tv.alter_id:      # same version: take Tally's current text of it
+                item.raw_xml = tv.raw_xml
+                item.payload = dict(tv.doc, remote_id=tv.remote_id, is_deleted=tv.is_deleted)
+                item.payload_hash = content_hash(tv.doc)
+            outcome = apply_item(db, company, conn, item)
+            outcomes[outcome] = outcomes.get(outcome, 0) + 1
+            db.commit()
+    if progress:
+        progress.step(1, f"{outcomes.get('applied', 0)} of {len(by_mid)} voucher(s) read again from Tally and saved",
+                      state="done")
+    return outcomes
 
 
 def _read_opening_bills(db: Session, company: Company, client: TallyClient, stats: dict, progress) -> None:
@@ -113,23 +206,38 @@ def _pull_vouchers(db: Session, company: Company, conn: TallyConnector, client: 
     since = max(0, conn.voucher_watermark - settings.sync_inbound_overlap)
     start = voucher_from(company, conn)
     progress.step(2, "Asking Tally which vouchers changed (this takes about 15 s on a large company)")
+    scan_started = time.monotonic()
+    client.timeout = max(client.timeout, SCAN_TIMEOUT)     # a busy Tally on a large company needs minutes
     index = client.voucher_index(f"$AlterID > {since}")
+    # Tally walks every voucher for each request, so a batch takes at least as long as this scan, and longer
+    # while people work in Tally. Give it the time a company of this size needs instead of failing at 60 s.
+    scan_secs = time.monotonic() - scan_started
+    client.timeout = max(client.timeout, min(MAX_BATCH_TIMEOUT, 3 * scan_secs + 60))
+    size = conn.voucher_batch_size or batch_size_for(scan_secs)
     # Oldest changes first (by AlterID), so everything below the first change left over has been read
     # and the watermark can move up after every pass; each later scan of a backlog is then smaller.
     wanted = sorted(_unseen(db, company.id, [(r.master_id, r.alter_id) for r in index if not r.date or r.date >= start]),
                     key=lambda c: c[1])
-    limit = settings.sync_voucher_max_batches * settings.sync_voucher_batch_size
+    limit = settings.sync_voucher_max_batches * size
     wanted, rest = wanted[:limit], wanted[limit:]
     stats["scanned"], stats["to_fetch"], stats["remaining"] = len(index), len(wanted) + len(rest), len(rest)
     frozen = set(conn.frozen_voucher_types or [])
     high = rest[0][1] - 1 if rest else max([conn.voucher_watermark, counter or 0, *(r.alter_id for r in index)])
     held = None
     done, total = 0, len(wanted)
-    batches = -(-total // max(1, settings.sync_voucher_batch_size))
+    # What is still to read, kept up to date batch by batch: if Tally stops answering part-way, the Sync tab
+    # shows the vouchers left instead of "all read", and the next sync carries on with them.
+    conn.voucher_backlog = total + len(rest)
+    db.commit()
+    progress.vouchers_left(total + len(rest))
+    batches = -(-total // max(1, size))
     progress.step(2, f"{total} changed voucher(s) to fetch" + (f" ({stats['remaining']} more on later syncs)" if stats["remaining"] else ""),
                   done=0, total=total)
-    for n, batch in enumerate(client.vouchers_in_batches([m for m, _ in wanted], extra=f"$AlterID > {since}"), 1):
+    for n, batch in enumerate(client.vouchers_in_batches([m for m, _ in wanted], extra=f"$AlterID > {since}",
+                                                         batch_size=size), 1):
         done += len(batch)
+        progress.vouchers_read(len(batch))
+        conn.voucher_backlog = max(0, total - done) + len(rest)
         progress.step(2, f"Fetched batch {n} of {batches} from Tally; saving", done=done, total=total)
         for tv in sorted(batch, key=lambda t: t.alter_id):
             if tv.doc.get("voucher_type") in frozen:

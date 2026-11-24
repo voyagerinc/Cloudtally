@@ -40,6 +40,7 @@ class TallyConnector(TimestampMixin, Base):
     last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     voucher_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))   # last voucher change scan
     voucher_backlog: Mapped[int] = mapped_column(Integer, default=0)   # changed vouchers still to read from Tally
+    voucher_batch_size: Mapped[int | None] = mapped_column(Integer)   # vouchers per Tally request; None: automatic
     last_outbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     health_status: Mapped[str] = mapped_column(String(20), default="unknown")
     health_message: Mapped[str | None] = mapped_column(Text)

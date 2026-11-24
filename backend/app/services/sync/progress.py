@@ -17,13 +17,29 @@ STEPS = ("Check Tally", "Masters from Tally", "Vouchers from Tally", "ERP change
 STALE_AFTER = timedelta(minutes=5)
 
 
+def new_run() -> dict:
+    """Vouchers read out of vouchers to read over a whole Sync now, which may take several passes."""
+    return {"read": 0, "total": None, "started_at": utcnow().isoformat(), "part": 0}
+
+
 class Progress:
-    def __init__(self, company_id: uuid.UUID, trigger: str):
+    def __init__(self, company_id: uuid.UUID, trigger: str, run: dict | None = None):
         self.company_id = company_id
+        self.run = run if run is not None else new_run()
+        self.run["part"] = self.run.get("part", 0) + 1
         self.data = {"state": "running", "trigger": trigger, "started_at": utcnow().isoformat(), "finished_at": None,
-                     "summary": None, "steps": [{"name": n, "state": "pending", "detail": "", "done": None, "total": None}
-                                                for n in STEPS]}
+                     "summary": None, "run": self.run,
+                     "steps": [{"name": n, "state": "pending", "detail": "", "done": None, "total": None}
+                               for n in STEPS]}
         self._write()
+
+    def vouchers_left(self, left: int) -> None:
+        """After a scan: how many vouchers this sync still has to read (new changes can raise the total)."""
+        self.run["total"] = self.run["read"] + left
+        self._write()
+
+    def vouchers_read(self, n: int) -> None:
+        self.run["read"] += n
 
     def step(self, index: int, detail: str = "", done: int | None = None, total: int | None = None,
              state: str = "running") -> None:
@@ -34,7 +50,12 @@ class Progress:
         s.update(state=state, detail=detail, done=done, total=total)
         self._write()
 
-    def finish(self, summary: str, failed: bool = False) -> None:
+    def finish(self, summary: str, failed: bool = False, continues: bool = False) -> None:
+        if continues:                       # Sync now goes on with the next part: still running for the viewer
+            self.data["summary"] = summary
+            self.data["next_part"] = True
+            self._write()
+            return
         for s in self.data["steps"]:
             if s["state"] == "running":
                 s["state"] = "failed" if failed else "done"
@@ -56,6 +77,12 @@ class NoProgress:
     """Stand-in when nobody is watching (tests, CLI imports)."""
 
     def step(self, *args, **kwargs) -> None:
+        pass
+
+    def vouchers_left(self, *args, **kwargs) -> None:
+        pass
+
+    def vouchers_read(self, *args, **kwargs) -> None:
         pass
 
     def finish(self, *args, **kwargs) -> None:

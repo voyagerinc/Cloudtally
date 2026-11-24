@@ -9,7 +9,7 @@ from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from app import audit
@@ -48,6 +48,8 @@ class ConnectorIn(BaseModel):
     freeze_inbound: bool = False
     frozen_voucher_types: list[str] = []
     inbound_from_date: date | None = None
+    # vouchers per Tally request (one request makes Tally go through all its vouchers once); None: automatic
+    voucher_batch_size: int | None = Field(None, ge=10, le=2000)
     # "one_way": Tally -> software only. "bidirectional": both ways. When given, it sets inbound/outbound.
     sync_mode: Literal["one_way", "bidirectional"] | None = None
     # What to do with software changes queued while the sync was one-way, when it becomes bidirectional.
@@ -264,14 +266,21 @@ def _run_in_background(company_id: uuid.UUID, who: str) -> None:
     sync has thousands), so nobody has to click Sync now again and again. A pause between passes leaves
     Tally free for the people working in it."""
     import time
+    from app.services.sync import progress as sync_progress
+
+    def more_waiting(cid) -> bool:
+        with SessionLocal() as db:
+            conn = db.get(TallyConnector, cid)
+            return bool(conn and conn.voucher_backlog and conn.health_status == "ok")
+
+    run = sync_progress.new_run()
     try:
         for n in range(1, MAX_PASSES + 1):
             trigger = f"Sync now by {who}" + (f" (part {n})" if n > 1 else "")
-            stats = run_company(SessionLocal, company_id, force=(n == 1), trigger=trigger)
-            with SessionLocal() as db:
-                conn = db.get(TallyConnector, company_id)
-                more = bool(conn and conn.voucher_backlog and conn.health_status == "ok")
-            if not more or "error" in (stats.get("inbound") or {}):
+            last = n == MAX_PASSES
+            stats = run_company(SessionLocal, company_id, force=(n == 1), trigger=trigger, run=run,
+                                more_follows=None if last else more_waiting)
+            if last or "error" in (stats.get("inbound") or {}) or not more_waiting(company_id):
                 break
             time.sleep(settings.sync_voucher_batch_pause)
     except Exception:   # already recorded on the progress row; nothing to return to
@@ -327,8 +336,7 @@ def dashboard(company_id: uuid.UUID, db: DB, user: CurrentUser):
         "outbound_conflicts": outbox_count(OutboxStatus.CONFLICT),
         "open_conflicts": db.scalar(select(func.count()).select_from(SyncConflict).where(
             SyncConflict.company_id == company_id, SyncConflict.status == "open")),
-        "inbox_failed": db.scalar(select(func.count()).select_from(SyncInbox).where(
-            SyncInbox.company_id == company_id, SyncInbox.status == "failed")),
+        "inbox_failed": len(_current_failures(db, company_id)),
         "oldest_pending_at": oldest,
         "oldest_pending_seconds": int((utcnow() - oldest).total_seconds()) if oldest else None,
         "mapped_vouchers": (synced := db.scalar(select(func.count()).select_from(TallyMapping).where(
@@ -352,11 +360,18 @@ def _voucher_counts(db, company_id, conn, synced: int) -> dict:
         ~SyncInbox.tally_master_id.in_(select(TallyMapping.tally_master_id).where(
             TallyMapping.company_id == company_id, TallyMapping.entity_type == "voucher",
             TallyMapping.tally_master_id.is_not(None)))))
+    # cancelled in Tally before they were ever imported: not stored, but Tally counts them
+    cancelled = db.scalar(select(func.count(func.distinct(SyncInbox.tally_master_id))).where(
+        SyncInbox.company_id == company_id, SyncInbox.entity_type == "voucher", SyncInbox.status == "ignored",
+        SyncInbox.error.like("Cancelled in Tally%"),
+        ~SyncInbox.tally_master_id.in_(select(TallyMapping.tally_master_id).where(
+            TallyMapping.company_id == company_id, TallyMapping.entity_type == "voucher",
+            TallyMapping.tally_master_id.is_not(None)))))
     amended = db.scalar(select(func.count(func.distinct(VoucherVersion.voucher_id))).join(Voucher).where(
         Voucher.company_id == company_id, VoucherVersion.source_system == "tally", VoucherVersion.version > 1))
     backlog = conn.voucher_backlog if conn else 0
-    return {"in_tally": synced + unmapped + backlog, "synced": synced, "not_stored": unmapped,
-            "waiting_in_tally": backlog, "amended_in_tally": amended}
+    return {"in_tally": synced + unmapped + cancelled + backlog, "synced": synced, "not_stored": unmapped,
+            "cancelled_in_tally": cancelled, "waiting_in_tally": backlog, "amended_in_tally": amended}
 
 
 class AutoSyncIn(BaseModel):
@@ -505,6 +520,124 @@ def list_inbox(company_id: uuid.UUID, db: DB, user: CurrentUser, status: str | N
         stmt = stmt.where(SyncInbox.status == status)
     stmt = stmt.order_by(SyncInbox.received_at.desc()).limit(min(limit, 1000)).offset(offset)
     return [{c.name: getattr(i, c.name) for c in SyncInbox.__table__.columns if c.name != "raw_xml"} for i in db.scalars(stmt)]
+
+
+def _current_failures(db, company_id) -> list[SyncInbox]:
+    """Vouchers whose newest copy from Tally failed and that nothing newer has replaced (an older failed copy
+    of a voucher that later came in fine is history, not a failure)."""
+    failed = db.scalars(select(SyncInbox).where(
+        SyncInbox.company_id == company_id, SyncInbox.status == "failed")
+        .order_by(SyncInbox.tally_master_id, SyncInbox.tally_alter_id.desc())).all()
+    newest: dict = {}
+    for i in failed:
+        newest.setdefault((i.entity_type, i.tally_master_id or i.tally_guid), i)
+    if not newest:
+        return []
+    applied = dict(db.execute(select(TallyMapping.tally_master_id, TallyMapping.tally_alter_id).where(
+        TallyMapping.company_id == company_id, TallyMapping.entity_type == "voucher",
+        TallyMapping.tally_master_id.in_([i.tally_master_id for i in newest.values() if i.tally_master_id]))).all())
+    return [i for i in newest.values()
+            if not (i.entity_type == "voucher" and i.tally_master_id in applied
+                    and (applied[i.tally_master_id] or 0) >= (i.tally_alter_id or 0))]
+
+
+FIXES = {
+    "missing_master": "The voucher uses a ledger, stock item or other master that is not in the software yet. "
+                      "Click Read masters from Tally again: the software reads every master and tries these vouchers "
+                      "again. If the master was deleted or renamed in Tally, correct the voucher in Tally.",
+    "period_locked": "The voucher's date is before the books beginning, outside the financial years, or in a locked "
+                     "period. Change 'Import Tally vouchers from' on the Tally connector, or unlock the period, then Try again.",
+    "validation_failure": "Tally sent a voucher the software cannot accept as it is (for example debit and credit "
+                          "do not match). Correct it in Tally; the next sync reads it again. Or Ignore it.",
+    "duplicate_voucher": "A voucher with the same number is already here. Correct the number in Tally, or Ignore it.",
+}
+
+
+def _problem(i: SyncInbox) -> str:
+    return i.error or i.error_code or "failed"
+
+
+@router.get("/sync/inbox/failures")
+def inbox_failures(company_id: uuid.UUID, db: DB, user: CurrentUser):
+    """Inbound failures grouped by problem, each with what to do about it and its vouchers."""
+    authorize(db, user, company_id, Perm.SYNC_READ)
+    groups: dict = {}
+    for i in _current_failures(db, company_id):
+        g = groups.setdefault((i.error_code, _problem(i)), {
+            "error_code": i.error_code, "problem": _problem(i), "fix": FIXES.get(i.error_code or "", FIXES["validation_failure"]),
+            "count": 0, "vouchers": []})
+        g["count"] += 1
+        g["vouchers"].append({"id": i.id, "voucher_type": i.voucher_type, "voucher_number": i.voucher_number,
+                              "date": (i.payload or {}).get("date"), "tally_master_id": i.tally_master_id,
+                              "received_at": i.received_at, "attempts": i.attempts})
+    out = sorted(groups.values(), key=lambda g: -g["count"])
+    by_code: dict = {}
+    for g in out:
+        by_code[g["error_code"] or "error"] = by_code.get(g["error_code"] or "error", 0) + g["count"]
+    return {"total": sum(g["count"] for g in out), "by_code": by_code, "groups": out}
+
+
+class InboxIds(BaseModel):
+    ids: list[uuid.UUID]
+
+
+@router.post("/sync/inbox/retry")
+def retry_inbox(company_id: uuid.UUID, body: InboxIds, db: DB, user: CurrentUser):
+    """Try the given failed vouchers again (one group, or one voucher)."""
+    authorize(db, user, company_id, Perm.SYNC_MANAGE)
+    outcomes: dict = {}
+    still: dict = {}
+    for item in db.scalars(select(SyncInbox).where(SyncInbox.company_id == company_id, SyncInbox.id.in_(body.ids))):
+        outcome = inbound.reprocess(db, item)
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        if item.status == "failed":
+            still[_problem(item)] = still.get(_problem(item), 0) + 1
+    return {"outcomes": outcomes, "still_failing": still}
+
+
+@router.post("/sync/inbox/ignore")
+def ignore_inbox(company_id: uuid.UUID, body: InboxIds, db: DB, user: CurrentUser):
+    """Leave these vouchers out: they no longer count as failures (they come back if changed in Tally)."""
+    authorize(db, user, company_id, Perm.SYNC_MANAGE)
+    n = 0
+    for item in db.scalars(select(SyncInbox).where(SyncInbox.company_id == company_id, SyncInbox.id.in_(body.ids),
+                                                   SyncInbox.status == "failed")):
+        item.status, item.error = "ignored", f"Ignored by {user.username}: {item.error or ''}"[:2000]
+        n += 1
+    audit.record(db, actor_of(user), "sync.inbox.ignore", "company", company_id, company_id=company_id, after={"vouchers": n})
+    db.commit()
+    return {"ignored": n}
+
+
+@router.post("/sync/inbox/read-masters", status_code=202)
+def read_masters_again(company_id: uuid.UUID, db: DB, user: CurrentUser, background: BackgroundTasks):
+    """Fix for missing masters: read every master from Tally again, then retry the vouchers that waited."""
+    authorize(db, user, company_id, Perm.SYNC_MANAGE)
+    conn = _connector(db, company_id)
+    row = db.get(SyncProgress, company_id)
+    if row and progress.is_running(row.data):
+        raise HTTPException(409, "A sync is already running for this company. Wait until it has finished.")
+    conn.master_watermark = 0
+    audit.record(db, actor_of(user), "sync.read_masters", "company", company_id, company_id=company_id)
+    db.commit()
+    background.add_task(_masters_then_retry, company_id, user.username)
+    return {"status": "started", "progress": f"/api/v1/sync/progress?company_id={company_id}"}
+
+
+def _masters_then_retry(company_id: uuid.UUID, who: str) -> None:
+    _run_in_background(company_id, who)
+    # also when no master was new: what still waits is tried once more, and read again from Tally
+    # (a master renamed there leaves the old name in the copy kept here)
+    with SessionLocal() as db:
+        company, conn = db.get(Company, company_id), db.get(TallyConnector, company_id)
+        if company and conn:
+            client = common.client_for(conn)
+            try:
+                inbound.retry_waiting_for_masters(db, company, conn, client=client)
+            except Exception:
+                log.exception("reading waiting vouchers again failed for %s", company_id)
+            finally:
+                client.close()
 
 
 @router.post("/sync/inbox/{item_id}/reprocess")
