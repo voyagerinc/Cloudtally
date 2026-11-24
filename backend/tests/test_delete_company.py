@@ -60,3 +60,62 @@ def test_linked_tally_company_can_be_deleted(db, admin, company):
     assert r.status_code == 200, r.text
     db.expire_all()
     assert _rows_of(db, cid) == {}
+
+
+def test_company_admin_clears_data_and_it_is_read_again_from_tally(db, company, tc, mock):
+    """Delete data and read again from Tally: the company, its users and its connector stay; masters and
+    vouchers come back from Tally."""
+    from app.models import Ledger, TallyConnector, UserCompanyAccess
+    from tests.test_sync import receipt_xml, sync
+    cid, name = str(company.id), company.name
+    mock.enter_voucher(tc, receipt_xml("20260501", "RS-1"))
+    sync()
+    owner = make_user(db, "boss", company=company.id, role="owner")
+    clerk = make_user(db, "clerk", company=company.id, role="accountant")
+    before = _rows_of(db, cid)
+    assert before["vouchers"] >= 1 and before["ledgers"]
+
+    assert client.post(f"/api/v1/companies/{cid}/reset?confirm={name}", headers=clerk).status_code == 403
+    assert client.post(f"/api/v1/companies/{cid}/reset?confirm=nope", headers=owner).status_code == 422
+    r = client.post(f"/api/v1/companies/{cid}/reset?confirm={name}", headers=owner)
+    assert r.status_code == 202, r.text
+    assert r.json()["rows_deleted"]["vouchers"] == before["vouchers"]
+
+    db.expire_all()        # the background read has run: everything is back from Tally
+    after = _rows_of(db, cid)
+    assert after["vouchers"] == before["vouchers"] and after["ledgers"] == before["ledgers"]
+    assert db.get(TallyConnector, company.id).enabled
+    assert db.scalar(select(func.count()).select_from(UserCompanyAccess).where(UserCompanyAccess.company_id == company.id)) == 2
+    assert db.scalar(select(Ledger).where(Ledger.company_id == company.id, Ledger.name == "HDFC Bank"))
+
+
+def test_company_admin_restores_the_company_from_its_backup(db, admin, books):
+    import time
+    from app.services import backup
+    owner = make_user(db, "boss", company=books, role="owner")
+    assert voucher(books, owner).status_code == 201
+    r = client.get(f"/api/v1/companies/{books}/backup", headers=owner)
+    assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
+    files = {"file": ("b.zip", r.content)}
+
+    assert voucher(books, owner, date="2026-04-21").status_code == 201        # made after the backup
+    assert db.scalar(select(func.count()).select_from(Voucher).where(Voucher.company_id == uuid.UUID(books))) == 2
+
+    other = client.post("/api/v1/companies", json={"name": "Not This One", "books_from": "2026-04-01"}, headers=admin).json()["id"]
+    wrong = client.get(f"/api/v1/companies/{other}/backup", headers=admin).content
+    bad = client.post(f"/api/v1/companies/{books}/restore", headers=owner, files={"file": ("w.zip", wrong)},
+                      data={"confirm": "Spool Works"})
+    assert bad.status_code == 422 and "not of Spool Works" in bad.json()["detail"]
+
+    ok = client.post(f"/api/v1/companies/{books}/restore", headers=owner, files=files, data={"confirm": "Spool Works"})
+    assert ok.status_code == 202, ok.text
+    for _ in range(200):
+        if backup.JOB.get("state") != "running":
+            break
+        time.sleep(0.05)
+    job = client.get(f"/api/v1/companies/{books}/restore", headers=owner).json()
+    assert job["state"] == "ok", job
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(Voucher).where(Voucher.company_id == uuid.UUID(books))) == 1
+    assert client.get(f"/api/v1/companies/{books}", headers=owner).status_code == 200      # still the admin of it
+    assert client.get(f"/api/v1/companies/{other}", headers=admin).status_code == 200      # other company untouched

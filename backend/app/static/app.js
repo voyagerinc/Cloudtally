@@ -2638,6 +2638,68 @@ const CF = { host: "#c-host", port: "#c-port", tally_company_name: "#c-name", al
 const CB = { enabled: "#c-enabled", freeze_outbound: "#c-fout", freeze_inbound: "#c-fin" };
 const cMode = () => (document.querySelector('input[name="c-mode"]:checked') || {}).value || "one_way";
 // Settings > Delete this company: company admin or system admin; the name must be typed to confirm.
+// Settings > Company data: back up, clear and read again from Tally, restore from a backup (company admin).
+const coName = () => $("#company").selectedOptions[0]?.textContent || "";
+const coMsg = (html) => ($("#co-delete-msg").innerHTML = html);
+$("#co-backup").onclick = async (e) => {
+  e.target.disabled = true; coMsg(`<span class="muted">Making the backup… a large company takes a few minutes.</span>`);
+  try {
+    const res = await fetch(`${API}/companies/${state.company}/backup`, { headers: authHeaders() });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+    const name = (res.headers.get("Content-Disposition") || "").match(/filename="?([^";]+)/)?.[1] || "company-backup.zip";
+    const blob = await res.blob();
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click();
+    coMsg(`Downloaded ${esc(name)} (${(blob.size / 1048576).toFixed(1)} MB). Keep it safe: it contains your books.`);
+  } catch (err) { coMsg(`<span class="error">${esc(err.message)}</span>`); }
+  finally { e.target.disabled = false; }
+};
+$("#co-reset").onclick = async (e) => {
+  const name = coName();
+  const typed = prompt(`Delete the data of "${name}" and read everything again from Tally?\n\n`
+    + "Vouchers, masters, reports and sync history are deleted here, then read again from Tally (a large company "
+    + "takes a while; the Sync tab shows the progress). Tally is not changed.\n\nType the company name to confirm.");
+  if (typed === null) return;
+  e.target.disabled = true; coMsg(`<span class="muted">Deleting the data…</span>`);
+  try {
+    const r = await api(`/companies/${state.company}/reset?confirm=${encodeURIComponent(typed)}`, { method: "POST" });
+    coMsg(`Data deleted (${Object.values(r.rows_deleted).reduce((a, b) => a + b, 0).toLocaleString("en-IN")} rows). `
+      + "Reading everything again from Tally: see the Sync tab.");
+    setTimeout(() => show("dashboard"), 1200);
+  } catch (err) { coMsg(`<span class="error">${esc(err.message)}</span>`); }
+  finally { e.target.disabled = false; }
+};
+let coRestoreTimer = null;
+async function pollCompanyRestore(cid) {
+  clearTimeout(coRestoreTimer);
+  let j;
+  try { j = await api(`/companies/${cid}/restore`); } catch (_) { coRestoreTimer = setTimeout(() => pollCompanyRestore(cid), 3000); return; }
+  if (j.state === "running") {
+    const pct = j.total ? Math.round((100 * j.done) / j.total) : 0;
+    coMsg(`<div class="upd-box"><b>Restoring… ${pct}%</b> <span class="muted">${esc(j.step || "")}</span>
+      <div class="bar"><span style="width:${pct}%"></span></div></div>`);
+    coRestoreTimer = setTimeout(() => pollCompanyRestore(cid), 2000);
+  } else if (j.state === "ok") {
+    coMsg(`${esc(j.message || "Restored.")}`);
+    state.user = await api("/me").catch(() => state.user);
+    await loadCompanies(j.company_id).catch(() => {});
+  } else if (j.state === "failed") coMsg(`<span class="error">${esc(j.message)}</span>`);
+}
+$("#co-restore").onsubmit = async (e) => {
+  e.preventDefault();
+  const name = coName();
+  const typed = prompt(`Replace the data of "${name}" with the backup's?\n\n`
+    + "Everything of this company here is replaced by the backup's copy. Changes made since the backup are lost "
+    + "(the next sync reads what changed in Tally since).\n\nType the company name to confirm.");
+  if (typed === null) return;
+  const form = new FormData(e.target); form.append("confirm", typed);
+  const btn = e.target.querySelector("button"); btn.disabled = true;
+  coMsg(`<span class="muted">Uploading the backup…</span>`);
+  try {
+    const r = await api(`/companies/${state.company}/restore`, { method: "POST", form });
+    e.target.reset(); pollCompanyRestore(r.company_id);
+  } catch (err) { coMsg(`<span class="error">${esc(err.message)}</span>`); }
+  finally { btn.disabled = false; }
+};
 $("#co-delete-btn").onclick = async () => {
   const name = $("#company").selectedOptions[0]?.textContent || "";
   const typed = prompt(`Delete the company "${name}" and everything in it from this software?\n\n`

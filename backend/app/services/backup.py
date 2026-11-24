@@ -385,13 +385,14 @@ def busy() -> bool:
     return JOB.get("state") == "running"
 
 
-def start_restore(path: Path, who: str, on_done=None, companies: bool = False, replace: bool = False) -> None:
+def start_restore(path: Path, who: str, on_done=None, companies: bool = False, replace: bool = False,
+                  extra: dict | None = None) -> None:
     with _LOCK:
         if busy():
             raise BackupError("A restore is already running.")
         JOB.clear()
         JOB.update(state="running", by=who, started_at=datetime.now().astimezone().isoformat(),
-                   step="Starting", done=0, total=0)
+                   step="Starting", done=0, total=0, **(extra or {}))
 
     def tick(i, n, name):
         JOB.update(done=i, total=n, step=name)

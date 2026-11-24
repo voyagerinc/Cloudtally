@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 
 from app import audit
@@ -74,6 +74,130 @@ def delete_company(company_id: uuid.UUID, db: DB, user: CurrentUser, confirm: st
     db.commit()
     licence.forget_cached()
     return {"deleted": name, "rows": rows}
+
+
+# ------------------------------------------------------------------ Company data (Tally connector page)
+def _company_admin(db, user, company_id):
+    """The company admin (or a super admin): the one who may clear, back up and restore the company's data."""
+    company = authorize(db, user, company_id, Perm.COMPANY_MANAGE)
+    from app.models import SyncProgress
+    from app.services import backup
+    from app.services.sync import progress
+    row = db.get(SyncProgress, company_id)
+    if row and progress.is_running(row.data):
+        raise HTTPException(409, "A sync is running for this company. Wait until it has finished.")
+    if backup.busy():
+        raise HTTPException(409, "A restore is running on this server. Wait until it has finished.")
+    return company
+
+
+@router.post("/companies/{company_id}/reset", status_code=202)
+def reset_company(company_id: uuid.UUID, db: DB, user: CurrentUser, background: BackgroundTasks, confirm: str = ""):
+    """Deletes the company's data and reads everything again from Tally (masters, then vouchers)."""
+    from app.models import TallyConnector
+    from app.services.accounting.delete_company import reset_company_data
+    company = _company_admin(db, user, company_id)
+    if db.get(TallyConnector, company_id) is None:
+        raise HTTPException(409, "This company is not linked to Tally, so its data could not be read again.")
+    if confirm.strip().casefold() != company.name.strip().casefold():
+        raise HTTPException(422, f"Type the company name ({company.name}) to confirm.")
+    rows = reset_company_data(db, company_id)
+    audit.record(db, actor_of(user), "company.reset", "company", company_id, company_id=company_id,
+                 after={"rows_deleted": rows}, reason="data deleted to read it again from Tally")
+    db.commit()
+    background.add_task(_read_again_from_tally, company_id, user.username, actor_of(user))
+    return {"started": True, "rows_deleted": rows, "progress": f"/api/v1/sync/progress?company_id={company_id}"}
+
+
+def _read_again_from_tally(company_id: uuid.UUID, who: str, actor) -> None:
+    from app.api.sync import ImportIn, _run_import, _run_in_background
+    try:
+        _run_import(company_id, ImportIn(company_id=company_id), actor)      # masters, as when it was linked
+    finally:
+        _run_in_background(company_id, who)                                  # then every voucher (Sync now)
+
+
+@router.get("/companies/{company_id}/backup")
+def company_backup(company_id: uuid.UUID, db: DB, user: CurrentUser, background: BackgroundTasks):
+    """A backup of this company only (its books, users with access, audit trail), to restore it later."""
+    from datetime import datetime
+    from fastapi.responses import FileResponse
+    from app.api.backup import _tmp
+    from app.services import backup
+    company = authorize(db, user, company_id, Perm.COMPANY_MANAGE)
+    path = _tmp(".zip")
+    try:
+        manifest = backup.write_company_backup(path, [company_id])
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    audit.record(db, actor_of(user), "company.backup", "company", company_id, company_id=company_id,
+                 after={"rows": sum(manifest["tables"].values()), "size": path.stat().st_size})
+    db.commit()
+    background.add_task(path.unlink, missing_ok=True)
+    label = "".join(ch if ch.isalnum() or ch in " -_" else " " for ch in company.name).strip()[:60].replace(" ", "-")
+    return FileResponse(path, media_type="application/zip", filename=f"tallycloud-{label}-{datetime.now():%Y%m%d-%H%M}.zip")
+
+
+@router.post("/companies/{company_id}/restore", status_code=202)
+def company_restore(company_id: uuid.UUID, db: DB, user: CurrentUser, file: UploadFile = File(...),
+                    confirm: str = Form("")):
+    """Replaces this company's data with a backup of the same company (made here or on another server)."""
+    import shutil
+    from app.api.backup import _tmp
+    from app.core.db import SessionLocal, engine
+    from app.services import backup
+    company = _company_admin(db, user, company_id)
+    if confirm.strip().casefold() != company.name.strip().casefold():
+        raise HTTPException(422, f"Type the company name ({company.name}) to confirm.")
+    path = _tmp(".zip")
+    try:
+        with path.open("wb") as out:
+            shutil.copyfileobj(file.file, out, 1024 * 1024)
+        m = backup.read_manifest(path)
+        with engine.connect() as conn:
+            backup.check_compatible(m, conn)
+        if m.get("scope") != "companies":
+            raise backup.BackupError("This is a backup of a whole server. A super admin restores it on the System admin page.")
+        held = m["companies"]
+        if len(held) != 1 or not (held[0]["id"] == str(company_id)
+                                  or held[0]["name"].strip().casefold() == company.name.strip().casefold()):
+            raise backup.BackupError(f"This backup is of {', '.join(c['name'] for c in held)}, not of {company.name}.")
+    except backup.BackupError as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(422, str(exc))
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    who, me, admin = user.username, user.id, user.is_superadmin
+    new_id = uuid.UUID(held[0]["id"])
+
+    def done(job: dict) -> None:
+        with SessionLocal() as s:
+            if job.get("state") == "ok" and not admin and s.get(Company, new_id) is not None \
+                    and s.get(UserCompanyAccess, (me, new_id)) is None:
+                s.add(UserCompanyAccess(user_id=me, company_id=new_id, role="owner"))   # keeps the one who restored it in
+            audit.record(s, audit.Actor(who), "company.restore", "company", new_id, company_id=new_id,
+                         after={"state": job.get("state"), "backup_of": m.get("created_at"),
+                                "message": (job.get("message") or "")[:300]})
+            s.commit()
+
+    try:
+        backup.start_restore(path, who, done, companies=True, replace=True,
+                             extra={"for_company": [str(company_id), str(new_id)], "company_id": str(new_id)})
+    except backup.BackupError as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(409, str(exc))
+    return {"started": True, "company_id": new_id, "backup_of": m.get("created_at")}
+
+
+@router.get("/companies/{company_id}/restore")
+def company_restore_status(company_id: uuid.UUID, user: CurrentUser):
+    from app.services import backup
+    job = backup.JOB
+    if str(company_id) not in (job.get("for_company") or []):
+        return {"state": "never"}
+    return job
 
 
 @router.get("/companies/{company_id}/financial-years", response_model=list[FinancialYearOut])

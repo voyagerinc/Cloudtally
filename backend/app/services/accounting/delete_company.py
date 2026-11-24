@@ -59,3 +59,28 @@ def delete_company(db: Session, company_id: uuid.UUID) -> dict:
         if n:
             done[t.name] = n
     return done
+
+
+# Kept when a company's data is cleared to be read again from Tally: the company, who may use it, how it
+# connects to Tally, its financial years (and period locks) and its MIS settings.
+KEEP_ON_RESET = {"companies", "tally_connectors", "user_company_access", "financial_years", "mis_settings"}
+
+
+def reset_company_data(db: Session, company_id: uuid.UUID) -> dict:
+    """Clears the company's books (vouchers, masters, sync history) so that everything is read again from
+    Tally; the caller commits. Returns the rows deleted per table."""
+    from app.models import TallyConnector
+    filters = _filters(company_id)
+    done = {}
+    for t in reversed(Base.metadata.sorted_tables):
+        f = filters.get(t.name)
+        if f is None or t.name in KEEP_ON_RESET:
+            continue
+        n = db.execute(delete(t).where(f).execution_options(synchronize_session=False)).rowcount
+        if n:
+            done[t.name] = n
+    conn = db.get(TallyConnector, company_id)
+    if conn is not None:          # read everything from the start
+        conn.master_watermark = conn.voucher_watermark = conn.voucher_backlog = 0
+        conn.voucher_scan_at = conn.last_inbound_at = conn.last_outbound_at = None
+    return done

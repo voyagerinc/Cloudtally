@@ -433,13 +433,22 @@
   </fieldset>
   <pre id="c-result" class="small" hidden></pre>
   <fieldset id="co-delete" class="panel" hidden>
-    <legend>Delete this company</legend>
-    <p class="small muted">Removes the company from this software: vouchers, masters, reports, the Tally link and sync
-      history, and users' access to it. Tally itself is not touched, so the company can be linked and read again
-      later. The audit trail keeps a record. This cannot be undone: download a backup on the System admin page first
-      if you may need the data.</p>
-    <div class="row wrap"><button type="button" id="co-delete-btn" class="danger">Delete company…</button>
-      <span id="co-delete-msg" class="small"></span></div>
+    <legend>Company data</legend>
+    <p class="small muted">For the company admin. Tally itself is never changed here. Download a backup first if you may
+      need the data as it is now.</p>
+    <div class="stack">
+      <div class="row wrap"><button type="button" id="co-backup" class="secondary">Download backup of this company</button>
+        <span class="small muted">Its vouchers, masters, settings and users, to restore later or on another server.</span></div>
+      <div class="row wrap"><button type="button" id="co-reset" class="secondary danger">Delete data and read again from Tally…</button>
+        <span class="small muted">Clears vouchers, masters and sync history, then reads everything again from Tally.
+          The company, its users, Tally connector settings and financial years stay.</span></div>
+      <form id="co-restore" class="row wrap"><input type="file" name="file" accept=".zip" required>
+        <button type="submit" class="secondary danger">Restore this company from a backup…</button>
+        <span class="small muted">Replaces this company's data with the backup's (a backup of this same company).</span></form>
+      <div class="row wrap"><button type="button" id="co-delete-btn" class="danger">Delete company…</button>
+        <span class="small muted">Removes the company and everything in it from this software.</span></div>
+    </div>
+    <div id="co-delete-msg" class="small" aria-live="polite"></div>
   </fieldset>
 </section>
 
