@@ -845,7 +845,7 @@ def link_company(body: LinkIn, background: BackgroundTasks, db: DB, user: Curren
         raise HTTPException(409, f"'{body.tally_company_name}' is already linked to ERP company {existing.company_id}")
     books_from = date.fromisoformat(found["books_from"] or found["starting_from"])
     try:
-        company = masters.create_company(db, {"name": body.erp_company_name or body.tally_company_name,
+        company = masters.create_company(db, {"name": body.tally_company_name,      # same name as in Tally
                                               "books_from": books_from}, actor_of(user), with_defaults=False)
     except VoucherError as exc:
         raise HTTPException(409, exc.message)

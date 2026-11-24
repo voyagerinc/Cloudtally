@@ -24,6 +24,23 @@ log = logging.getLogger("sync.worker")
 _stop = False
 
 
+def name_like_tally(db, conn: TallyConnector) -> None:
+    """The company is called what it is called in Tally (a name typed when linking, or a company renamed in
+    Tally, follows Tally's). Left as it is only when another company here already has that name."""
+    from sqlalchemy import select
+    from app import audit
+    from app.models import Company
+    company = db.get(Company, conn.company_id)
+    name = (conn.tally_company_name or "").strip()
+    if company is None or not name or company.name == name:
+        return
+    if db.scalar(select(Company.id).where(Company.name == name, Company.id != company.id)):
+        return
+    audit.record(db, audit.SYSTEM, "company.rename", "company", company.id, company_id=company.id,
+                 before={"name": company.name}, after={"name": name}, reason="same name as in Tally")
+    company.name = name
+
+
 def check_tally(db, conn: TallyConnector) -> dict:
     """Contact Tally, list its open companies and match the linked one by name and GUID.
 
@@ -45,6 +62,7 @@ def check_tally(db, conn: TallyConnector) -> dict:
                 conn.tally_company_guid = by_name["guid"]
             result.update(matched=True, books_from=by_name["books_from"], guid=by_name["guid"])
             conn.health_status, conn.health_message = "ok", f"Connected to '{conn.tally_company_name}'"
+            name_like_tally(db, conn)
         elif by_name:
             conn.health_status = "company_mismatch"
             conn.health_message = (f"A company named '{conn.tally_company_name}' is open in Tally, but it is not the "

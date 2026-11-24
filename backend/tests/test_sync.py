@@ -1228,3 +1228,18 @@ def test_voucher_waiting_for_a_master_renamed_in_tally_is_read_again(db, company
     db.expire_all()
     assert db.scalar(select(SyncInbox.status).where(SyncInbox.company_id == company.id,
                                                     SyncInbox.voucher_number == "RN-1")) == "applied"
+
+
+def test_company_is_called_what_it_is_called_in_tally(db, company, tc, mock):
+    """A name typed when linking (or a company renamed in Tally) follows Tally's name at the next check."""
+    from app.models import AuditEvent, Company
+    from app.workers.sync_worker import check_tally
+    company.name = "Demo (shadow)"
+    db.commit()
+    conn = db.get(TallyConnector, company.id)
+    assert check_tally(db, conn)["matched"]
+    db.commit()
+    db.expire_all()
+    assert db.get(Company, company.id).name == "Demo Trading Co"
+    ev = db.scalar(select(AuditEvent).where(AuditEvent.action == "company.rename"))
+    assert ev.before == {"name": "Demo (shadow)"} and ev.after == {"name": "Demo Trading Co"}

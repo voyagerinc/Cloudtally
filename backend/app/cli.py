@@ -148,7 +148,7 @@ def link(args) -> None:
         if found is None:
             sys.exit(f"'{args.tally_company}' is not open in Tally")
         with SessionLocal() as db:
-            company = masters.create_company(db, {"name": args.name or args.tally_company,
+            company = masters.create_company(db, {"name": args.tally_company,      # same name as in Tally
                                                   "books_from": date.fromisoformat(found["books_from"] or found["starting_from"])},
                                              CLI, with_defaults=False)
             conn = TallyConnector(company_id=company.id, host=args.host, port=args.port,
@@ -254,7 +254,7 @@ def main() -> None:
 
     lk = sub.add_parser("link", help="create ERP company from a Tally company (shadow mode) and import masters")
     lk.add_argument("tally_company")
-    lk.add_argument("--name", help="ERP company name (default: same as Tally)")
+    lk.add_argument("--name", help="ignored: the company is called what it is called in Tally")
     lk.add_argument("--host", default="localhost")
     lk.add_argument("--port", type=int, default=9000)
     lk.set_defaults(fn=link)

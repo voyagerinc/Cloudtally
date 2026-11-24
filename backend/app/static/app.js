@@ -202,11 +202,10 @@ async function discoverTally() {
   ], r.companies);
   $("#td-table").querySelectorAll("[data-open]").forEach((b) => (b.onclick = async () => { $("#tally-dlg").close(); await loadCompanies(b.dataset.open); }));
   $("#td-table").querySelectorAll("[data-link]").forEach((b) => (b.onclick = async () => {
-    const name = prompt("Name for this company in the ERP", b.dataset.link);
-    if (!name) return;
+    // The company is called what it is called in Tally.
     b.disabled = true; $("#td-msg").textContent = "Linking…";
     try {
-      const res = await api("/import/tally/link", { method: "POST", body: { ...target, tally_company_name: b.dataset.link, erp_company_name: name } });
+      const res = await api("/import/tally/link", { method: "POST", body: { ...target, tally_company_name: b.dataset.link } });
       $("#tally-dlg").close();
       await loadCompanies(res.company_id);
       alert(`Linked. Masters are importing in the background; progress shows on the Sync tab.
@@ -3357,6 +3356,10 @@ async function openCustomer(id) {
     <p class="muted small">Tick the companies on this server that belong to ${esc(c.legal_name)}. They then follow its licence, and its company admins manage them.</p>
     <div class="row wrap">${companies.map((co) => `<label class="check"><input type="checkbox" data-hosted="${co.id}" ${hosted.has(co.id) ? "checked" : ""}> ${esc(co.name)}</label>`).join("") || `<span class="muted">No companies on this server.</span>`}</div>
     <button type="button" id="cd-hosted" class="secondary">Save hosted companies</button>
+    ${companies.filter((co) => hosted.has(co.id)).length ? `<table class="small">${companies.filter((co) => hosted.has(co.id)).map((co) =>
+      `<tr><td>${esc(co.name)}</td><td><button type="button" class="secondary small danger" data-del-co="${co.id}" data-name="${esc(co.name)}">Delete company…</button></td></tr>`).join("")}</table>
+      <p class="muted small">Delete removes the company's books from this server (vouchers, masters, Tally link, users' access).
+        Tally is not touched. Download a backup of it on the System admin page first if the data may be needed.</p>` : ""}
     <h3>History</h3><table id="cd-events" class="small"></table>`;
   if (!$("#cust-dlg").open) $("#cust-dlg").showModal();
   wireCustomer(c);
@@ -3428,6 +3431,21 @@ function wireCustomer(c) {
     const a = b.dataset.act;
     if (a === "block" && !confirm("Block this server? It becomes read-only at its next check-in and may not activate again.")) return;
     try { await api(`/admin/installations/${b.dataset.inst}/action`, { method: "POST", body: { action: a } }); await again(); } catch (err) { msg(err); }
+  }));
+  document.querySelectorAll("#cd-body [data-del-co]").forEach((b) => (b.onclick = async () => {
+    const name = b.dataset.name;
+    const typed = prompt(`Delete the company "${name}" of ${c.legal_name} and everything in it from this server?\n\n`
+      + "Vouchers, masters, reports, the Tally link and sync history are removed. Tally is not touched. "
+      + "This cannot be undone.\n\nType the company name to confirm.");
+    if (typed === null) return;
+    b.disabled = true;
+    try {
+      await api(`/companies/${b.dataset.delCo}?confirm=${encodeURIComponent(typed)}`, { method: "DELETE" });
+      if (state.company === b.dataset.delCo) { state.company = null; store("erp_company", ""); }
+      await loadCompanies().catch(() => {});
+      alert(`"${name}" was deleted.`);
+      await again();
+    } catch (err) { b.disabled = false; msg(err); }
   }));
   $("#cd-hosted").onclick = async () => {
     const ids = [...document.querySelectorAll("#cd-body [data-hosted]:checked")].map((x) => x.dataset.hosted);
