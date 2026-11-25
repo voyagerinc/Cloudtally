@@ -543,8 +543,9 @@ def _current_failures(db, company_id) -> list[SyncInbox]:
 
 FIXES = {
     "missing_master": "The voucher uses a ledger, stock item or other master that is not in the software yet. "
-                      "Click Read masters from Tally again: the software reads every master and tries these vouchers "
-                      "again. If the master was deleted or renamed in Tally, correct the voucher in Tally.",
+                      "Click Fix: the software asks Tally for this master and tries these vouchers again (if the master "
+                      "was renamed in Tally, the vouchers are read again with the new name). If Tally does not have it "
+                      "any more, choose the master to use instead, or correct the vouchers in Tally.",
     "period_locked": "The voucher's date is before the books beginning, outside the financial years, or in a locked "
                      "period. Change 'Import Tally vouchers from' on the Tally connector, or unlock the period, then Try again.",
     "validation_failure": "Tally sent a voucher the software cannot accept as it is (for example debit and credit "
@@ -571,6 +572,11 @@ def inbox_failures(company_id: uuid.UUID, db: DB, user: CurrentUser):
                               "date": (i.payload or {}).get("date"), "tally_master_id": i.tally_master_id,
                               "received_at": i.received_at, "attempts": i.attempts})
     out = sorted(groups.values(), key=lambda g: -g["count"])
+    from app.services.sync import fix_master
+    for g in out:
+        parsed = fix_master.parse_problem(g["problem"]) if g["error_code"] == "missing_master" else None
+        g["master"] = {"kind": parsed[0], "name": parsed[1],
+                       "suggestions": fix_master.suggestions(db, company_id, *parsed)} if parsed else None
     by_code: dict = {}
     for g in out:
         by_code[g["error_code"] or "error"] = by_code.get(g["error_code"] or "error", 0) + g["count"]
@@ -607,6 +613,51 @@ def ignore_inbox(company_id: uuid.UUID, body: InboxIds, db: DB, user: CurrentUse
     audit.record(db, actor_of(user), "sync.inbox.ignore", "company", company_id, company_id=company_id, after={"vouchers": n})
     db.commit()
     return {"ignored": n}
+
+
+@router.post("/sync/inbox/fix-master", status_code=202)
+def fix_master_from_tally(company_id: uuid.UUID, body: InboxIds, db: DB, user: CurrentUser, background: BackgroundTasks):
+    """One click for vouchers waiting for a master: ask Tally for that master, else read the vouchers again
+    from Tally (a renamed master), and try them again."""
+    from app.services.sync import fix_master
+    authorize(db, user, company_id, Perm.SYNC_MANAGE)
+    _connector(db, company_id)
+    row = db.get(SyncProgress, company_id)
+    if row and progress.is_running(row.data):
+        raise HTTPException(409, "A sync is running for this company. Wait until it has finished.")
+    first = db.scalar(select(SyncInbox).where(SyncInbox.company_id == company_id, SyncInbox.id.in_(body.ids),
+                                              SyncInbox.status == "failed").limit(1))
+    if first is None or fix_master.parse_problem(first.error) is None:
+        raise HTTPException(422, "These vouchers do not wait for a master.")
+    try:
+        fix_master.start(company_id, first.error)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
+    background.add_task(fix_master.fix_from_tally, SessionLocal, company_id, body.ids, user.username)
+    return {"started": True}
+
+
+@router.get("/sync/inbox/fix-master")
+def fix_master_status(company_id: uuid.UUID, db: DB, user: CurrentUser):
+    from app.services.sync import fix_master
+    authorize(db, user, company_id, Perm.SYNC_READ)
+    return fix_master.job(company_id)
+
+
+class UseMasterIn(BaseModel):
+    ids: list[uuid.UUID]
+    use: str = Field(min_length=1, max_length=300)
+
+
+@router.post("/sync/inbox/use-master")
+def use_master_instead(company_id: uuid.UUID, body: UseMasterIn, db: DB, user: CurrentUser):
+    """The master is not in Tally under that name any more: save the waiting vouchers with this one."""
+    from app.services.sync import fix_master
+    authorize(db, user, company_id, Perm.SYNC_MANAGE)
+    try:
+        return fix_master.use_instead(db, company_id, body.ids, body.use.strip(), actor_of(user))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
 
 
 @router.post("/sync/inbox/read-masters", status_code=202)

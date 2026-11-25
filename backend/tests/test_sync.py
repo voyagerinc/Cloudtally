@@ -1231,7 +1231,8 @@ def test_inbound_failures_are_listed_with_their_fix_and_can_be_retried_or_ignore
     f = api.get(f"/api/v1/sync/inbox/failures?{q}", headers=h).json()
     assert f["total"] == 2 and f["by_code"] == {"missing_master": 2}
     g = f["groups"][0]
-    assert "Late Ledger" in g["problem"] and "Read masters from Tally again" in g["fix"]
+    assert "Late Ledger" in g["problem"] and "Click Fix" in g["fix"]
+    assert g["master"]["kind"] == "Ledger" and g["master"]["name"] == "Late Ledger"
     assert {v["voucher_number"] for v in g["vouchers"]} == {"F-1", "F-2"}
     assert api.get(f"/api/v1/sync/dashboard?{q}", headers=h).json()["inbox_failed"] == 2
 
@@ -1305,3 +1306,91 @@ def test_company_is_called_what_it_is_called_in_tally(db, company, tc, mock):
     assert db.get(Company, company.id).name == "Demo Trading Co"
     ev = db.scalar(select(AuditEvent).where(AuditEvent.action == "company.rename"))
     assert ev.before == {"name": "Demo (shadow)"} and ev.after == {"name": "Demo Trading Co"}
+
+
+def _boss(db):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.models import User
+    from app.core.security import hash_key
+    if not db.scalar(select(User).where(User.username == "boss")):
+        db.add(User(username="boss", api_key_hash=hash_key("k-boss"), is_superadmin=True))
+        db.commit()
+    return TestClient(app), {"X-API-Key": "k-boss"}
+
+
+def _waiting_group(api, h, q):
+    f = api.get(f"/api/v1/sync/inbox/failures?{q}", headers=h).json()
+    return f["groups"][0] if f["groups"] else None
+
+
+def test_fix_reads_the_missing_master_from_tally_in_one_click(db, company, tc, mock, monkeypatch):
+    from app.services.sync import masters_in
+    api, h = _boss(db)
+    q = f"company_id={company.id}"
+    sync()
+    real_pull = masters_in.MasterImporter.pull
+    monkeypatch.setattr(masters_in.MasterImporter, "pull", lambda self, *a, **kw: None)
+    tc.add_ledger("Late Ledger", "Sundry Debtors")
+    for n in ("FX-1", "FX-2"):
+        mock.enter_voucher(tc, receipt_xml("20260501", n).replace("Capital", "Late Ledger"))
+    sync()
+    monkeypatch.setattr(masters_in.MasterImporter, "pull", real_pull)
+    g = _waiting_group(api, h, q)
+    assert g["count"] == 2
+    r = api.post(f"/api/v1/sync/inbox/fix-master?{q}", json={"ids": [v["id"] for v in g["vouchers"]]}, headers=h)
+    assert r.status_code == 202
+    j = api.get(f"/api/v1/sync/inbox/fix-master?{q}", headers=h).json()
+    assert j["state"] == "ok" and j["found_in_tally"] is True and j["saved"] == 2 and j["still"] == 0, j
+    assert api.get(f"/api/v1/sync/inbox/failures?{q}", headers=h).json()["total"] == 0
+    assert db.scalar(select(Ledger).where(Ledger.company_id == company.id, Ledger.name == "Late Ledger"))
+
+
+def test_fix_reads_the_vouchers_again_when_the_master_was_renamed_in_tally(db, company, tc, mock, monkeypatch):
+    from app.services.sync import masters_in
+    api, h = _boss(db)
+    q = f"company_id={company.id}"
+    sync()
+    monkeypatch.setattr(masters_in.MasterImporter, "pull", lambda self, *a, **kw: None)
+    tc.add_ledger("Old Name", "Sundry Debtors")
+    mid = mock.enter_voucher(tc, receipt_xml("20260501", "RF-1").replace("Capital", "Old Name"))
+    sync()
+    tc.ledgers["New Name"] = dict(tc.ledgers.pop("Old Name"), name="New Name")
+    for led in tc.vouchers[mid].iter("LEDGERNAME"):
+        if led.text == "Old Name":
+            led.text = "New Name"
+    db.add(Ledger(company_id=company.id, name="New Name", group_id=db.scalar(select(Ledger.group_id).where(
+        Ledger.company_id == company.id, Ledger.name == "Capital"))))     # the new name is here already
+    db.commit()
+    g = _waiting_group(api, h, q)
+    api.post(f"/api/v1/sync/inbox/fix-master?{q}", json={"ids": [v["id"] for v in g["vouchers"]]}, headers=h)
+    j = api.get(f"/api/v1/sync/inbox/fix-master?{q}", headers=h).json()
+    assert j["state"] == "ok" and j["found_in_tally"] is False and j["saved"] == 1, j
+    db.expire_all()
+    assert db.scalar(select(SyncInbox.status).where(SyncInbox.company_id == company.id, SyncInbox.voucher_number == "RF-1",
+                                                    SyncInbox.status == "applied")) == "applied"
+
+
+def test_a_master_gone_from_tally_can_be_replaced_by_a_similar_one_here(db, company, tc, mock, monkeypatch):
+    from app.models import AuditEvent
+    api, h = _boss(db)
+    q = f"company_id={company.id}"
+    sync()
+    tc.add_ledger("Capitol", "Capital Account")
+    mock.enter_voucher(tc, receipt_xml("20260501", "GN-1").replace("Capital", "Capitol"))
+    tc.ledgers.pop("Capitol")                  # merged away in Tally: not there under this name any more
+    from app.services.sync import masters_in
+    monkeypatch.setattr(masters_in.MasterImporter, "pull", lambda self, *a, **kw: None)
+    sync()
+    g = _waiting_group(api, h, q)
+    assert g["master"]["name"] == "Capitol" and "Capital" in g["master"]["suggestions"]
+    ids = [v["id"] for v in g["vouchers"]]
+    api.post(f"/api/v1/sync/inbox/fix-master?{q}", json={"ids": ids}, headers=h)
+    j = api.get(f"/api/v1/sync/inbox/fix-master?{q}", headers=h).json()
+    assert j["state"] == "ok" and j["still"] == 1 and "Capital" in j["suggestions"], j
+    bad = api.post(f"/api/v1/sync/inbox/use-master?{q}", json={"ids": ids, "use": "No Such Ledger"}, headers=h)
+    assert bad.status_code == 422
+    r = api.post(f"/api/v1/sync/inbox/use-master?{q}", json={"ids": ids, "use": "Capital"}, headers=h).json()
+    assert r["saved"] == 1 and r["still"] == 0
+    assert api.get(f"/api/v1/sync/inbox/failures?{q}", headers=h).json()["total"] == 0
+    assert db.scalar(select(AuditEvent).where(AuditEvent.action == "sync.inbox.use_master"))
