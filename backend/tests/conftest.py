@@ -7,6 +7,8 @@ os.environ.setdefault("ERP_SYNC_BACKOFF_BASE", "0")
 os.environ.setdefault("ERP_TALLY_TIMEOUT", "5")
 os.environ.setdefault("ERP_SYNC_VOUCHER_SCAN_SECONDS", "0")
 os.environ.setdefault("ERP_SYNC_VOUCHER_BATCH_PAUSE", "0")
+os.environ.setdefault("ERP_SYNC_TALLY_REST_RATIO", "0")
+os.environ.setdefault("ERP_SYNC_DELETED_CHECK_HOURS", "0")
 os.environ.setdefault("ERP_AUTO_SYNC", "false")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

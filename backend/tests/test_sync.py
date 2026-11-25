@@ -1106,7 +1106,69 @@ def test_large_company_asks_tally_for_more_vouchers_per_request(monkeypatch):
     from app.services.sync import inbound
     monkeypatch.setattr(settings, "sync_voucher_batch_size", 50)
     assert inbound.batch_size_for(2.0) == 50
-    assert inbound.batch_size_for(30.0) == inbound.LARGE_BATCH == 500
+    assert inbound.batch_size_for(30.0) == inbound.LARGE_BATCH == 200
+
+
+def _numbered(n):
+    """MasterIDs 1..n, and a client whose Tally answers each with a reply of 'size' bytes per voucher."""
+    import re
+    from types import SimpleNamespace
+    from app.connectors.tally import client as tally_client
+
+    class Fake(tally_client.TallyClient):
+        def __init__(self, per_voucher, fail_above=None):
+            self.last, self.calls, self.per, self.fail_above = None, [], per_voucher, fail_above
+
+        def vouchers(self, *, formula=None, **kw):
+            lo, hi = (int(x) for x in re.findall(r"\d+", formula)[:2])
+            self.calls.append(hi - lo + 1)
+            if self.fail_above and hi - lo + 1 > self.fail_above:
+                raise TallyError(ErrorCode.CONNECTIVITY, "Tally timed out after 60.0s")
+            got = [SimpleNamespace(master_id=mid) for mid in range(lo, hi + 1)]
+            self.last = tally_client.Exchange("", "x" * (self.per * len(got)), 1)
+            return got
+    from app.connectors.tally.errors import ErrorCode, TallyError
+    return list(range(1, n + 1)), Fake
+
+
+def test_heavy_vouchers_are_asked_fewer_at_a_time_so_tally_does_not_run_short_of_memory(monkeypatch):
+    from app.connectors.tally import client as tally_client
+    monkeypatch.setattr(tally_client, "RETRY_PAUSE", 0)
+    ids, Fake = _numbered(1000)
+    heavy = Fake(per_voucher=80_000)                      # 80 KB a voucher: 100 make an 8 MB reply
+    got = [v.master_id for b in heavy.vouchers_in_batches(ids, batch_size=200, max_size=500, max_bytes=8_000_000) for v in b]
+    assert got == ids and heavy.calls[0] == 200 and set(heavy.calls[1:]) == {100}
+    light = Fake(per_voucher=4_000)                       # small vouchers: grows up to the most allowed
+    list(light.vouchers_in_batches(ids, batch_size=200, max_size=500, max_bytes=8_000_000))
+    assert light.calls[:3] == [200, 500, 300]
+
+
+def test_a_request_tally_cannot_answer_is_asked_again_in_halves(monkeypatch):
+    from app.connectors.tally import client as tally_client
+    monkeypatch.setattr(tally_client, "RETRY_PAUSE", 0)
+    ids, Fake = _numbered(400)
+    c = Fake(per_voucher=1000, fail_above=100)
+    got = [v.master_id for b in c.vouchers_in_batches(ids, batch_size=400) for v in b]
+    assert got == ids and c.calls[:3] == [400, 200, 100] and max(c.calls[3:]) <= 100
+
+
+def test_deleted_vouchers_are_looked_for_at_most_every_few_hours(db, company, tc, mock, monkeypatch):
+    """The full list of vouchers costs Tally a lot on a large company: not on every Sync now."""
+    monkeypatch.setattr(settings, "sync_deleted_check_hours", 6)
+    now = lambda: sync_worker.run_company(SessionLocal, company.id, force=True)
+    sync()
+    now()
+    db.expire_all()
+    assert db.get(TallyConnector, company.id).deleted_check_at is not None
+    mock.requests.clear()
+    now()
+    assert voucher_requests(mock, full=False) == 0        # nothing changed and checked lately: no full list
+    conn = db.get(TallyConnector, company.id)
+    conn.deleted_check_at = None
+    db.commit()
+    mock.requests.clear()
+    now()
+    assert voucher_requests(mock, full=False) == 1        # due again: the full list once
 
 
 def test_tally_rebuilt_with_lower_counters_is_read_again(db, company, tc, mock):

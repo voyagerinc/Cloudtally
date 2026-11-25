@@ -31,7 +31,8 @@ S = VoucherStatus
 MAX_BATCH_TIMEOUT = 600     # seconds: Tally on a very large company, busy with people working in it
 SCAN_TIMEOUT = 300          # seconds for the change scan (Tally goes through every voucher once)
 SLOW_SCAN_SECONDS = 8       # a change scan this slow means a large company: Tally walks every voucher per request
-LARGE_BATCH = 500           # vouchers per request then (measured live, Nov 2026: 500 took 46 s, 50 took ~35 s)
+LARGE_BATCH = 200           # vouchers per request to start with then (measured live, Nov 2026: 500 took 46 s,
+LARGE_BATCH_MAX = 500       # 50 took ~35 s); more while Tally's replies stay small (settings.sync_tally_reply_bytes)
 
 
 def batch_size_for(scan_secs: float) -> int:
@@ -103,7 +104,9 @@ def poll(db: Session, company: Company, conn: TallyConnector, client: TallyClien
                       state="skipped")
     else:
         _pull_vouchers(db, company, conn, client, counters["alt_vch_id"], stats, progress)
-    if force:   # Sync now: also find vouchers deleted in Tally (a full list costs Tally a scan, so not every pass)
+    if force and _deleted_check_due(conn):
+        # Sync now: also find vouchers deleted in Tally. The full list makes Tally go through and list every
+        # voucher, so not while a backlog is read, and at most every few hours.
         _remove_deleted_in_tally(db, company, conn, client, stats, progress)
     conn.last_inbound_at = utcnow()
     db.commit()
@@ -149,11 +152,11 @@ def read_again(db: Session, company: Company, conn: TallyConnector, client: Tall
     here under another name: a ledger or stock item renamed in Tally changes the vouchers that use it, but
     not their AlterID, so the copy kept from before still has the old name."""
     by_mid = {i.tally_master_id: i for i in items if i.tally_master_id}
-    size = conn.voucher_batch_size or (LARGE_BATCH if len(by_mid) > 200 else settings.sync_voucher_batch_size)
+    plan = batch_plan(conn, SLOW_SCAN_SECONDS if len(by_mid) > 200 else 0)
     client.timeout = max(client.timeout, SCAN_TIMEOUT)
     outcomes: dict = {}
     done = 0
-    for batch in client.vouchers_in_batches(list(by_mid), batch_size=size):
+    for batch in client.vouchers_in_batches(list(by_mid), **plan):
         done += len(batch)
         if progress:
             progress.step(1, "Reading vouchers that wait for a renamed master from Tally again",
@@ -213,7 +216,8 @@ def _pull_vouchers(db: Session, company: Company, conn: TallyConnector, client: 
     # while people work in Tally. Give it the time a company of this size needs instead of failing at 60 s.
     scan_secs = time.monotonic() - scan_started
     client.timeout = max(client.timeout, min(MAX_BATCH_TIMEOUT, 3 * scan_secs + 60))
-    size = conn.voucher_batch_size or batch_size_for(scan_secs)
+    plan = batch_plan(conn, scan_secs)
+    size = plan["batch_size"]
     # Oldest changes first (by AlterID), so everything below the first change left over has been read
     # and the watermark can move up after every pass; each later scan of a backlog is then smaller.
     wanted = sorted(_unseen(db, company.id, [(r.master_id, r.alter_id) for r in index if not r.date or r.date >= start]),
@@ -230,15 +234,14 @@ def _pull_vouchers(db: Session, company: Company, conn: TallyConnector, client: 
     conn.voucher_backlog = total + len(rest)
     db.commit()
     progress.vouchers_left(total + len(rest))
-    batches = -(-total // max(1, size))
     progress.step(2, f"{total} changed voucher(s) to fetch" + (f" ({stats['remaining']} more on later syncs)" if stats["remaining"] else ""),
                   done=0, total=total)
     for n, batch in enumerate(client.vouchers_in_batches([m for m, _ in wanted], extra=f"$AlterID > {since}",
-                                                         batch_size=size), 1):
+                                                         **plan), 1):
         done += len(batch)
         progress.vouchers_read(len(batch))
         conn.voucher_backlog = max(0, total - done) + len(rest)
-        progress.step(2, f"Fetched batch {n} of {batches} from Tally; saving", done=done, total=total)
+        progress.step(2, f"Fetched batch {n} from Tally; saving", done=done, total=total)
         for tv in sorted(batch, key=lambda t: t.alter_id):
             if tv.doc.get("voucher_type") in frozen:
                 held = tv.alter_id if held is None else min(held, tv.alter_id)
@@ -257,6 +260,23 @@ def _pull_vouchers(db: Session, company: Company, conn: TallyConnector, client: 
                   done=total, total=total, state="done")
 
 
+def _deleted_check_due(conn: TallyConnector) -> bool:
+    if conn.voucher_backlog:
+        return False
+    at = conn.deleted_check_at
+    return at is None or (utcnow() - at).total_seconds() >= settings.sync_deleted_check_hours * 3600
+
+
+def batch_plan(conn: TallyConnector, scan_secs: float) -> dict:
+    """How vouchers are asked from Tally: a size chosen on the connector is kept (only halved when Tally
+    cannot answer it in time); on Automatic it follows the size of Tally's replies."""
+    if conn.voucher_batch_size:
+        return {"batch_size": conn.voucher_batch_size}
+    size = batch_size_for(scan_secs)
+    return {"batch_size": size, "max_size": LARGE_BATCH_MAX if size >= LARGE_BATCH else size,
+            "max_bytes": settings.sync_tally_reply_bytes}
+
+
 def _remove_deleted_in_tally(db: Session, company: Company, conn: TallyConnector, client: TallyClient,
                              stats: dict, progress) -> None:
     """Tally does not report deletions: a deleted voucher just stops being listed. Every synced voucher
@@ -272,6 +292,8 @@ def _remove_deleted_in_tally(db: Session, company: Company, conn: TallyConnector
         return
     progress.step(2, "Checking for vouchers deleted in Tally")
     alive = {r.master_id for r in client.voucher_index(None)}
+    conn.deleted_check_at = utcnow()
+    db.commit()
     gone = [(erp_id, mid) for erp_id, mid in mapped if mid not in alive]
     if not gone:
         return

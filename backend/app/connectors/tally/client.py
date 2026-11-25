@@ -12,6 +12,7 @@ from app.connectors.tally.errors import ErrorCode, TallyError, classify_tally_me
 from app.core.config import settings
 
 RETRY_PAUSE = 10        # seconds before asking a busy Tally for a batch once more
+MIN_SPLIT = 25          # a batch Tally could not answer in time is asked for in halves, down to this size
 
 
 def _records(root, tag_name: str):
@@ -220,26 +221,48 @@ class TallyClient:
                                  X.parse_date(X.txt(e, "DATE"))) for e in els]
 
     def vouchers_in_batches(self, master_ids, *, extra: str | None = None, batch_size: int | None = None,
-                            pause: float | None = None):
-        """Yield full vouchers for the given MasterIDs, one MasterID range per request."""
+                            pause: float | None = None, max_size: int | None = None, max_bytes: int | None = None):
+        """Yield full vouchers for the given MasterIDs, one MasterID range per request.
+
+        Kind to Tally, which builds each reply in memory and serves the people working in it meanwhile:
+        - with max_bytes, the batch is sized from the replies so far so that one stays about that big
+          (never above max_size); heavy inventory vouchers then come fewer per request;
+        - after each request Tally rests a share of the time it took (sync_tally_rest_ratio);
+        - a request Tally does not answer in time is asked for again in halves instead of whole."""
         ids = sorted(set(master_ids))
         size = max(1, batch_size or settings.sync_voucher_batch_size)
+        cap = max(size, max_size or size)
         pause = settings.sync_voucher_batch_pause if pause is None else pause
-        for i in range(0, len(ids), size):
+        i, rest, retried = 0, 0.0, False
+        while i < len(ids):
             part = ids[i:i + size]
-            if i and pause:
-                time.sleep(pause)   # let people working in Tally get a turn
+            if rest:
+                time.sleep(rest)    # let people working in Tally get a turn, and Tally free its memory
             formula = f"$MasterID >= {part[0]} AND $MasterID <= {part[-1]}" + (f" AND {extra}" if extra else "")
-            wanted = set(part)
+            started = time.monotonic()
             try:
                 got = self.vouchers(formula=formula)
             except TallyError as exc:
-                # Tally busy (someone running a heavy report, another request queued in front): ask once more
-                # after a pause instead of stopping the whole sync.
-                if exc.code != ErrorCode.CONNECTIVITY:
+                # Tally busy or short of memory (someone running a heavy report, a reply too large): ask for
+                # less at once after a pause, and once more at the smallest size, before stopping the sync.
+                if exc.code != ErrorCode.CONNECTIVITY or (retried and len(part) <= MIN_SPLIT):
                     raise
+                if len(part) > MIN_SPLIT:
+                    size = max(MIN_SPLIT, len(part) // 2)
+                    cap = size
+                else:
+                    retried = True
                 time.sleep(RETRY_PAUSE)
-                got = self.vouchers(formula=formula)
+                rest = 0.0
+                continue
+            took = time.monotonic() - started
+            retried = False
+            i += len(part)
+            if max_bytes and got and self.last is not None:
+                per_voucher = max(1, len(self.last.response_xml) // len(got))
+                size = max(1, min(cap, max_bytes // per_voucher))
+            rest = max(pause, settings.sync_tally_rest_ratio * took) if i < len(ids) else 0.0
+            wanted = set(part)
             yield [v for v in got if v.master_id in wanted]
 
     # ------------------------------------------------------------ writes

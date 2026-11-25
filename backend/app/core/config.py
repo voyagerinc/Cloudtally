@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     sync_voucher_scan_seconds: int = 120
     sync_voucher_batch_size: int = 50      # full vouchers per Tally request (about 2 MB; 200 made Tally time out)
     sync_voucher_batch_pause: float = 2.0  # seconds between those requests, so Tally stays usable
+    # Tally builds each reply in memory: on Automatic, vouchers per request are chosen so that a reply stays
+    # about this size (a heavy inventory voucher is ~40 KB of XML, so ~200 of them).
+    sync_tally_reply_bytes: int = 8_000_000
+    sync_tally_rest_ratio: float = 0.5     # after each request Tally rests this share of the time it took
+    sync_deleted_check_hours: float = 6.0  # the full voucher list (to find deletions) at most this often
     sync_voucher_max_batches: int = 10     # per sync pass; a larger backlog continues on the next passes
     auto_sync: bool = True                 # the API server syncs every company on its own while Tally is open
     sync_backlog_pause: float = 5.0        # seconds between passes while a backlog is being worked through

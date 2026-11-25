@@ -396,9 +396,9 @@
       <label>Tally company name<input id="c-name" required></label>
       <label>Identify vouchers by<select id="c-alter"><option value="masterid">MasterID</option><option value="guid">GUID</option><option value="remoteid">RemoteID</option></select></label>
       <label>Import Tally vouchers from<input id="c-from" type="date"></label>
-      <label title="Each request makes Tally go through all its vouchers once, so on a large company more vouchers per request is faster. Lower it if Tally runs short of memory.">Vouchers per Tally request
+      <label title="Automatic sizes each request so that Tally's reply stays small enough for its memory, rests Tally between requests, and asks for less when Tally is slow. A fixed number is faster on a large company but needs more memory in Tally.">Vouchers per Tally request
         <select id="c-batch">
-          <option value="">Automatic (recommended)</option>
+          <option value="">Automatic (recommended: keeps Tally responsive)</option>
           <option value="50">50 (small company or slow PC)</option>
           <option value="100">100</option>
           <option value="250">250</option>
