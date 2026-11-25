@@ -1,4 +1,5 @@
 """Management (MIS) reports by division, their settings, and deferred expense schedules."""
+import re
 import uuid
 from datetime import date, timedelta
 from decimal import Decimal
@@ -19,7 +20,8 @@ from app.reports import mis, xlsx
 
 router = APIRouter(tags=["mis"])
 
-REPORT_KEYS = ("mis-pl", "mis-finance-sheet", "mis-expense", "mis-exp-breakup", "mis-deferred")
+REPORT_KEYS = ("mis-pl", "mis-finance-sheet", "mis-finance-sheet-coolace", "mis-expense", "mis-exp-breakup",
+               "mis-deferred")
 CSV_ROWS.update({k: "rows" for k in REPORT_KEYS})
 
 
@@ -134,7 +136,9 @@ def _breakup_grid(data: dict) -> list[list]:
 def _sheet_grid(data: dict) -> list[list]:
     """The finance sheet as the workbook lays it out: blocks one under another, Month | Category | figures | %."""
     def num(v, bold=False):
-        return (Decimal(v) if v not in (None, "") else None, "boldnum" if bold else "num")
+        if isinstance(v, str) and v and not re.fullmatch(r"-?\d+(\.\d+)?", v):
+            return (v, "bold" if bold else None)          # a name (the transfer block's division and stock)
+        return (Decimal(str(v)) if v not in (None, "") else None, "boldnum" if bold else "num")
     grid = [[(f"Monthly Finance Sheet - {data['period']}", "bold")], []]
 
     def block(b, with_month=True):
@@ -148,6 +152,8 @@ def _sheet_grid(data: dict) -> list[list]:
         grid.append([])
     for i, b in enumerate(data["blocks"]):
         block(b)
+        if i == 0 and data.get("transfers") is not None:
+            block(_transfer_block(data), with_month=False)
         if i == 0 and data["purchase"]["columns"] != ["Total"]:
             block(data["purchase"], with_month=False)
     return grid
@@ -168,6 +174,63 @@ def mis_finance_sheet(company_id: uuid.UUID, db: DB, user: CurrentUser, from_dat
         return _respond(db, user, company_id, "mis-finance-sheet", data, format)
     return _xlsx(db, user, company_id, "mis-finance-sheet", _sheet_grid(data), [11, 20, 18, 18, 18, 18, 18, 10],
                  f"Monthly P&L {data['period']}", len(data["rows"]))
+
+
+KIND_NAMES = {"rm": "Raw material", "wip": "WIP", "fg": "Finished goods"}
+
+
+def _transfer_block(data: dict) -> dict:
+    """Material taken from one division's stock for another division's production, as a sheet block."""
+    rows = data.get("transfers") or []
+    return {"title": "Material used by another division", "columns": ["Taken From", "Stock", "Vouchers", "Value"],
+            "rows": [{"category": r["to"], "values": [r["from"], KIND_NAMES.get(r["kind"], r["kind"]), r["vouchers"], r["value"]]}
+                     for r in rows]
+            + [{"category": "Total", "total": True,
+                "values": ["", "", sum(r["vouchers"] for r in rows), str(sum((Decimal(r["value"]) for r in rows), Decimal(0)))]}]}
+
+
+@router.get("/reports/mis-finance-sheet-coolace")
+def mis_finance_sheet_coolace(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                              to_date: date | None = None, format: Fmt = "json"):
+    """The monthly finance sheet with material one division's production takes from another division charged
+    to the division that produced the item (a customised cooler built from a cooler and hydraulic parts: their
+    value is in Customised Cooler, and less in Cooler and Hydraulic)."""
+    key = "mis-finance-sheet-coolace"
+    authorize(db, user, company_id, Perm.report(key))
+    f, t = _period(from_date, to_date)
+    data = mis.finance_sheet(db, company_id, f, t, transfers=True)
+    data["rows"] = [{"block": b["title"], "month": r.get("month"), "category": r["category"],
+                     **dict(zip(b["columns"], r["values"])), **({"%": r.get("pct")} if b.get("pct") else {})}
+                    for b in data["blocks"] + [data["purchase"]] for r in b["rows"]]
+    data["rows"] += [{"block": "Material used by another division", "category": r["to"], "taken_from": r["from"],
+                      "stock": KIND_NAMES.get(r["kind"], r["kind"]), "vouchers": r["vouchers"], "value": r["value"]}
+                     for r in data["transfers"] or []]
+    if format != "xlsx":
+        return _respond(db, user, company_id, key, data, format)
+    return _xlsx(db, user, company_id, key, _sheet_grid(data), [11, 20] + [18] * 8 + [10],
+                 f"Monthly P&L {data['period']}", len(data["rows"]))
+
+
+@router.get("/reports/mis-transfers")
+def mis_transfers(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                  to_date: date | None = None, src: str | None = None, dst: str | None = None,
+                  kind: str | None = None, format: Fmt = "json"):
+    """The items behind a figure of the Coolace sheet: what a division's production took from another
+    division's stock, voucher by voucher (filter by the division it came from, went to, and the stock)."""
+    authorize(db, user, company_id, Perm.report("mis-finance-sheet-coolace"))
+    f, t = _period(from_date, to_date)
+    settings = mis.load_settings(db, company_id)
+    data = mis.inter_division(db, company_id, f, t, settings, detail=True)
+    lines = [ln for ln in data["lines"] if (not src or ln["from_key"] == src) and (not dst or ln["to_key"] == dst)
+             and (not kind or ln["kind"] == kind)]
+    rows = [{"date": ln["date"], "voucher_type": ln["voucher_type"], "voucher_number": ln["voucher_number"],
+             "taken_from": ln["from"], "used_by": ln["to"], "stock": KIND_NAMES.get(ln["kind"], ln["kind"]),
+             "item": ln["item"], "quantity": ln["quantity"], "unit": ln["unit"], "value": ln["value"],
+             "produced": ", ".join(ln["produced"])} for ln in lines]
+    out = {"from": str(f), "to": str(t), "divisions": settings["divisions"], "lines": lines, "rows": rows,
+           "total": str(sum((Decimal(ln["value"]) for ln in lines), Decimal(0))),
+           "vouchers": len({ln["voucher_id"] for ln in lines})}
+    return _respond(db, user, company_id, "mis-finance-sheet-coolace", out, format)
 
 
 @router.get("/reports/mis-expense")

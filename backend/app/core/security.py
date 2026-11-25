@@ -67,6 +67,7 @@ REPORTS: dict[str, str] = {
     "custom-fields": "Custom fields from Tally (e.g. chassis / motor no.)",
     "mis-pl": "MIS: P&L by division",
     "mis-finance-sheet": "MIS: Monthly finance sheet (P&L)",
+    "mis-finance-sheet-coolace": "Coolace: Monthly finance sheet (P&L)",
     "mis-expense": "MIS: Expenses by division",
     "mis-exp-breakup": "MIS: Expense breakup",
     "mis-deferred": "MIS: Deferred expenses",

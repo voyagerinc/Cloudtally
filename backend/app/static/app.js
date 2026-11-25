@@ -333,8 +333,11 @@ async function openFailures() {
     + failData.groups.map((g, gi) => `<details class="panel" data-g="${gi}">
       <summary><b>${n(g.count)}</b> · ${esc(g.problem)} ${chip(g.error_code || "error")}</summary>
       <p class="small"><b>What to do:</b> ${esc(g.fix)}</p>
-      ${manage ? `<div class="row wrap"><button type="button" class="secondary" data-retry-g="${gi}">Try these ${n(g.count)} again</button>
-        <button type="button" class="secondary danger" data-ignore-g="${gi}">Ignore these</button></div>` : ""}
+      ${manage ? `<div class="row wrap">${g.master ? `<button type="button" data-fix-g="${gi}" title="Asks Tally for this ${esc(g.master.kind.toLowerCase())}, reads these vouchers again if it was renamed, and saves them">Fix</button>` : ""}
+        <button type="button" class="secondary" data-retry-g="${gi}">Try these ${n(g.count)} again</button>
+        <button type="button" class="secondary danger" data-ignore-g="${gi}">Ignore these</button></div>
+        ${g.master && g.master.suggestions.length ? `<div class="row wrap small"><span class="muted">Not in Tally any more? Use instead:</span>
+          ${g.master.suggestions.map((s) => `<button type="button" class="secondary small" data-use-g="${gi}" data-use="${esc(s)}">${esc(s)}</button>`).join("")}</div>` : ""}` : ""}
       <div class="tablewrap"><table class="small"><thead><tr><th>Type</th><th>No.</th><th>Date</th><th>Tries</th><th></th></tr></thead><tbody>
       ${g.vouchers.slice(0, 200).map((v) => `<tr><td>${esc(v.voucher_type || "")}</td><td>${esc(v.voucher_number || "")}</td>
         <td>${esc(v.date || "")}</td><td class="num">${v.attempts}</td>
@@ -347,6 +350,37 @@ async function openFailures() {
   $("#fail-body").querySelectorAll("[data-retry]").forEach((b) => (b.onclick = () => retryFailures([b.dataset.retry], b)));
   $("#fail-body").querySelectorAll("[data-ignore-g]").forEach((b) => (b.onclick = () => ignoreFailures(ids(b.dataset.ignoreG))));
   $("#fail-body").querySelectorAll("[data-ignore]").forEach((b) => (b.onclick = () => ignoreFailures([b.dataset.ignore])));
+  $("#fail-body").querySelectorAll("[data-fix-g]").forEach((b) => (b.onclick = () => fixMaster(ids(b.dataset.fixG), b)));
+  $("#fail-body").querySelectorAll("[data-use-g]").forEach((b) => (b.onclick = () => useMaster(failData.groups[b.dataset.useG], b.dataset.use)));
+}
+// Fix: Tally is asked for the missing master (and the vouchers are read again if it was renamed there).
+let fixTimer = null;
+async function fixMaster(ids, btn) {
+  btn.disabled = true;
+  $("#fail-msg").textContent = "Asking Tally…";
+  try { await api(`/sync/inbox/fix-master?${cq()}`, { method: "POST", body: { ids } }); pollFix(); }
+  catch (err) { btn.disabled = false; $("#fail-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; }
+}
+async function pollFix() {
+  clearTimeout(fixTimer);
+  let j;
+  try { j = await api(`/sync/inbox/fix-master?${cq()}`); } catch (_) { fixTimer = setTimeout(pollFix, 3000); return; }
+  if (j.state === "running") { $("#fail-msg").textContent = `${j.step}…`; fixTimer = setTimeout(pollFix, 2000); return; }
+  if (j.state === "never") return;
+  await openFailures(); renderers.dashboard();
+  $("#fail-msg").innerHTML = j.state === "ok" ? esc(j.message) : `<span class="error">${esc(j.message)}</span>`;
+}
+async function useMaster(g, use) {
+  const kind = g.master.kind.toLowerCase();
+  if (!confirm(`Save these ${g.count} voucher(s) with the ${kind} "${use}" instead of "${g.master.name}"?\n\n`
+    + `Do this only when "${g.master.name}" is the same ${kind} under another name (renamed or merged in Tally). `
+    + "Tally is not changed; the audit trail records it.")) return;
+  $("#fail-msg").textContent = "Saving…";
+  try {
+    const r = await api(`/sync/inbox/use-master?${cq()}`, { method: "POST", body: { ids: g.vouchers.map((v) => v.id), use } });
+    await openFailures(); renderers.dashboard();
+    $("#fail-msg").textContent = `${r.saved} voucher(s) saved with "${use}"` + (r.still ? `, ${r.still} still waiting (another problem).` : ".");
+  } catch (err) { $("#fail-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; }
 }
 async function retryFailures(ids, btn) {
   if (btn) btn.disabled = true;
@@ -1391,8 +1425,9 @@ async function misEditStock(month, divs, key) {
 }
 
 // The P&L as the finance workbook lays it out: a block per stage, a row per division, a total and its %.
-async function misSheetView(el) {
-  const [r, st] = await Promise.all([api(`/reports/mis-finance-sheet?${misPeriod()}`), misSettings()]);
+async function misSheetView(el, report = "mis-finance-sheet") {
+  const [r, st] = await Promise.all([api(`/reports/${report}?${misPeriod()}`), misSettings()]);
+  const divName = (k) => (r.divisions.find((d) => d.key === k) || {}).name || k;
   const editable = st.can_edit && r.month;
   const pctText = (v) => (v == null ? "" : `${Number(v).toFixed(2)}%`);
   const block = (b, withMonth = true) => {
@@ -1401,22 +1436,89 @@ async function misSheetView(el) {
       + row.values.map((v, i) => {
         const key = b.editable && b.editable[i] && row.division ? `${b.editable[i]}:${row.division}` : "";
         const over = key && (b.overridden[i] || []).includes(row.division);
-        return `<td class="num ${key && editable ? "edit" : ""} ${over ? "over" : ""}" ${key ? `data-edit="${key}"` : ""}>${money(v)}${over ? " ✎" : ""}</td>`;
+        // a transfer figure opens the items behind it (the row's division, or all on the total row)
+        const d = b.drill && b.drill[i];
+        const drill = d && Number(v) ? JSON.stringify({ src: d.src === "row" ? row.division || "" : d.src,
+          dst: d.dst === "row" ? row.division || "" : d.dst || "", kind: d.kind || "", title: `${b.columns[i]} · ${row.category}` }) : "";
+        return `<td class="num ${key && editable ? "edit" : ""} ${over ? "over" : ""} ${drill ? "drill" : ""}" ${key ? `data-edit="${key}"` : ""}`
+          + `${drill ? ` data-drill='${esc(drill)}' title="Click for the vouchers and items"` : ""}>${money(v)}${over ? " ✎" : ""}</td>`;
       }).join("")
       + `${b.pct ? `<td class="num">${pctText(row.pct)}</td>` : ""}</tr>`).join("");
     return `<details class="fs-block" open><summary><h3>${esc(b.title)}</h3></summary><div class="mis-grid"><table class="mis fs"><thead>${head}</thead><tbody>${body}</tbody></table></div></details>`;
   };
-  const blocks = r.blocks.map((b, i) => block(b) + (i === 0 && r.purchase.columns.length > 1 ? block(r.purchase, false) : "")).join("");
+  // Coolace sheet: what each division's production took from another division's stock
+  const kinds = { rm: "Raw material", wip: "WIP", fg: "Finished goods" };
+  const moved = r.transfers == null ? "" : `<details class="fs-block" open><summary><h3>Material used by another division</h3></summary>
+    <p class="small muted">Items consumed in a stock journal (WO manufacturing, manufacturing journal, material transfer) for an item
+      of another division. Their value is in the division that produced the item (From Cooler, From Hydraulic …) and is taken off
+      the division whose stock they left (To Other Divisions), whether raw material, WIP or finished goods: so the From columns
+      add up to To Other Divisions. The company's totals do not change.</p>
+    ${r.transfers.length ? `<div class="mis-grid"><table class="mis fs"><thead><tr><th>Used by</th><th>Taken from</th><th>Stock</th><th class="num">Vouchers</th><th class="num">Value</th></tr></thead><tbody>
+      ${r.transfers.map((t) => `<tr class="click" data-drill='${esc(JSON.stringify({ src: t.from_key, dst: t.to_key, kind: t.kind, title: `${t.to} from ${t.from} (${kinds[t.kind] || t.kind})` }))}' title="Click for the vouchers and items">
+        <td>${esc(t.to)}</td><td>${esc(t.from)}</td><td>${esc(kinds[t.kind] || t.kind)}</td><td class="num">${t.vouchers}</td><td class="num">${money(t.value)}</td></tr>`).join("")}
+      <tr class="total click" data-drill='${esc(JSON.stringify({ src: "", dst: "", kind: "", title: "All material used by another division" }))}'><td>Total</td><td></td><td></td><td class="num">${r.transfers.reduce((a, t) => a + t.vouchers, 0)}</td><td class="num">${money(r.transfers.reduce((a, t) => a + Number(t.value), 0).toFixed(2))}</td></tr>
+      </tbody></table></div>` : `<p class="muted">No division used another division's material in this period.</p>`}</details>`;
+  const blocks = r.blocks.map((b, i) => block(b) + (i === 0 ? moved : "") + (i === 0 && r.purchase.columns.length > 1 ? block(r.purchase, false) : "")).join("");
   el.innerHTML = `<p class="fs-title">Monthly Finance Sheet - ${esc(r.period)}</p>${misNote(r)}`
     + `<div class="tree-tools"><button type="button" class="link" data-fs="1">Expand all</button><button type="button" class="link" data-fs="0">Collapse all</button></div>`
     + `<p class="small muted">% is of each division's net revenue. ${editable ? "Click an opening or closing stock value to enter it by hand for this month." : r.month ? "" : "Choose a single month (from the 1st) to enter stock values by hand."}</p>`
     + `<div class="fs-blocks">${blocks}</div>`;
   bindMisLinks(el);
+  el.querySelectorAll("[data-drill]").forEach((c) => (c.onclick = (e) => {
+    if (e.target.closest("td[data-edit]") && editable) return;
+    const q = JSON.parse(c.dataset.drill);
+    drillTo(q.title, (body) => misTransferView(body, q, divName));
+  }));
   el.querySelectorAll("[data-fs]").forEach((b) => (b.onclick = () => el.querySelectorAll("details.fs-block").forEach((d) => (d.open = b.dataset.fs === "1"))));
   if (!editable) return;
   el.querySelectorAll("td[data-edit]").forEach((td) => (td.onclick = async () => {
     try { if (await misEditStock(r.month, r.divisions, td.dataset.edit)) await drawNav(); } catch (err) { alert(err.message); }
   }));
+}
+
+// The items behind a transfer figure: by voucher (expand for the items), then by item; a voucher opens it.
+async function misTransferView(el, q, divName) {
+  const p = new URLSearchParams(misPeriod());
+  for (const k of ["src", "dst", "kind"]) if (q[k]) p.set(k, q[k]);
+  const r = await api(`/reports/mis-transfers?${p}`);
+  const kinds = { rm: "Raw material", wip: "WIP", fg: "Finished goods" };
+  const sum = (ls) => ls.reduce((a, x) => a + paise(x.value), 0);
+  const parts = [q.src && `taken from ${divName(q.src)}`, q.dst && `used by ${divName(q.dst)}`, q.kind && kinds[q.kind]].filter(Boolean);
+  if (!r.lines.length) { el.innerHTML = `<p class="muted">No vouchers.</p>`; return; }
+  const byVoucher = new Map(), byItem = new Map();
+  for (const ln of r.lines) {
+    if (!byVoucher.has(ln.voucher_id)) byVoucher.set(ln.voucher_id, []);
+    byVoucher.get(ln.voucher_id).push(ln);
+    const k = `${ln.item}\u0000${ln.from_key}\u0000${ln.to_key}`;
+    if (!byItem.has(k)) byItem.set(k, []);
+    byItem.get(k).push(ln);
+  }
+  el.innerHTML = `<p><b>${money((sum(r.lines) / 100).toFixed(2))}</b> in ${r.vouchers} voucher(s)${parts.length ? ` · ${esc(parts.join(" · "))}` : ""}
+      · ${esc(r.from)} to ${esc(r.to)}</p>
+    <nav class="subnav" id="mt-tabs"><button type="button" data-v="v" class="active">By voucher</button><button type="button" data-v="i">By item</button></nav>
+    <div id="mt-t" class="mis"></div>`;
+  const cols = [
+    { label: "Taken from", get: (n) => esc(n.from || "") }, { label: "Used by", get: (n) => esc(n.to || "") },
+    { label: "Stock", get: (n) => esc(n.kind ? kinds[n.kind] || n.kind : "") },
+    { label: "Qty", num: true, get: (n) => esc(n.qty || "") },
+    { label: "Value", num: true, get: (n) => rupees(sum(n.rows)) },
+  ];
+  const leaf = (ln, label) => ({ label, rows: [ln], from: ln.from, to: ln.to, kind: ln.kind,
+    qty: ln.quantity ? `${ln.quantity} ${ln.unit}` : "", open: () => drillVoucher(ln.voucher_id, `${ln.voucher_type} ${ln.voucher_number}`) });
+  const draw = (mode) => {
+    const roots = mode === "v"
+      ? [...byVoucher.values()].map((ls) => ({ label: `${ls[0].date} · ${ls[0].voucher_type} ${ls[0].voucher_number || ""} → ${ls[0].produced.join(", ")}`,
+          rows: ls, children: ls.map((ln) => leaf(ln, ln.item)) }))
+      : [...byItem.values()].map((ls) => ({ label: ls[0].item, rows: ls, from: ls[0].from, to: ls[0].to, kind: ls[0].kind,
+          children: ls.map((ln) => leaf(ln, `${ln.date} · ${ln.voucher_type} ${ln.voucher_number || ""}`)) }))
+          .sort((a, b) => sum(b.rows) - sum(a.rows));
+    roots.push({ label: "Total", rows: r.lines, cls: "total" });
+    treeTable($("#mt-t"), cols, roots, { title: mode === "v" ? "Voucher / item consumed" : "Item / voucher" });
+  };
+  el.querySelectorAll("#mt-tabs button").forEach((b) => (b.onclick = () => {
+    el.querySelectorAll("#mt-tabs button").forEach((x) => x.classList.toggle("active", x === b)); draw(b.dataset.v);
+  }));
+  draw("v");
 }
 
 async function misExpenseView(el) {
@@ -1788,7 +1890,8 @@ renderers.reports = async () => {
     "sales-group-wise": groupWiseView, "stock-journal": (el) => stockJournalView(el), "material-transfer-wip": (el) => stockJournalView(el, "material-transfer-wip"),
     "material-transfer-wip-main": (el) => stockJournalView(el, "material-transfer-wip-main"),
     "wo-manufacturing": woManufacturingView,
-    "mis-finance-sheet": misSheetView, "mis-pl": misPlView, "mis-expense": misExpenseView, "mis-exp-breakup": (el) => misBreakupView(el),
+    "mis-finance-sheet": (el) => misSheetView(el), "mis-finance-sheet-coolace": (el) => misSheetView(el, "mis-finance-sheet-coolace"),
+    "mis-pl": misPlView, "mis-expense": misExpenseView, "mis-exp-breakup": (el) => misBreakupView(el),
     "mis-deferred": misDeferredView,
     "fifo-costing": fifoView,
     gstr1: (el) => gstrView(el, "gstr1"), gstr2: (el) => gstrView(el, "gstr2"), "hsn-summary": hsnView,

@@ -421,6 +421,92 @@ def stock_values(db: Session, company_id: uuid.UUID, on: date, settings: dict) -
     return out
 
 
+# ------------------------------------------------------------------ material used by another division
+
+TRANSFER_TYPES = ("Stock Journal", "Manufacturing Journal")    # base types: production, material transfer
+
+
+def inter_division(db: Session, company_id: uuid.UUID, from_date: date, to_date: date, settings: dict,
+                   detail: bool = False) -> dict:
+    """Material one division's production takes from another division's stock (a customised cooler built
+    from a cooler and hydraulic parts, say), from the stock journals of the period.
+
+    The value consumed belongs to the division of the item produced: it is added to that division's RM
+    consumption (From <division>) and taken off the RM consumption of the division whose stock it left
+    (To other divisions), whatever the stock: raw material, WIP or finished goods. So what the divisions
+    received adds up to what they gave, and the company's totals do not change.
+    Returns {"in": {div: value}, "from": {source div: {div: value}}, "out": {kind: {div: value}},
+    "rows": [{from, to, kind, value, vouchers}]}, and with detail=True "lines": each item consumed."""
+    keys = [d["key"] for d in settings["divisions"]]
+    sg = stock_group_map(settings)
+    item_dk = {iid: sg.get(gid, (None, None)) for iid, gid in db.execute(
+        select(StockItem.id, StockItem.group_id).where(StockItem.company_id == company_id))}
+    q = (select(Voucher.id, VoucherType.name, VoucherInventoryLine.stock_item_id, VoucherInventoryLine.quantity,
+                VoucherInventoryLine.amount, VoucherInventoryLine.inward, Voucher.voucher_date, Voucher.voucher_number,
+                VoucherInventoryLine.unit)
+         .join(VoucherType, VoucherType.id == Voucher.voucher_type_id)
+         .join(VoucherInventoryLine, VoucherInventoryLine.voucher_id == Voucher.id)
+         .where(Voucher.company_id == company_id, Voucher.status == VoucherStatus.POSTED,
+                Voucher.voucher_date.between(from_date, to_date), VoucherType.base_type.in_(TRANSFER_TYPES)))
+    by_voucher = defaultdict(list)
+    head = {}
+    for vid, vtype, iid, qty, amount, inward, vdate, vno, unit in db.execute(q):
+        if not MEMO_TYPE.search(vtype):
+            by_voucher[vid].append((iid, qty, amount, inward, unit))
+            head[vid] = (vdate, vno, vtype)
+    item_names = dict(db.execute(select(StockItem.id, StockItem.name).where(StockItem.company_id == company_id)).all()) \
+        if detail else {}
+    detail_lines = []
+    t_in = {k: ZERO for k in keys}
+    t_from = {s: {k: ZERO for k in keys} for s in keys}
+    t_out = {kind: {k: ZERO for k in keys} for kind in KINDS}
+    flows = defaultdict(lambda: [ZERO, set()])
+    for vid, lines in by_voucher.items():
+        produced = defaultdict(lambda: ZERO)        # division of what was produced -> its value
+        made = defaultdict(list)                   # division -> the items it produced (for the detail)
+        consumed = []
+        for iid, qty, amount, inward, unit in lines:
+            is_in = qty > 0 if qty else bool(inward)
+            div, kind = item_dk.get(iid, (None, None))
+            if is_in:
+                if div in keys:
+                    produced[div] += abs(amount) or Decimal(1)
+                    made[div].append(iid)
+            elif div in keys and amount:
+                consumed.append((div, kind if kind in KINDS else "rm", abs(amount), iid, qty, unit))
+        total = sum(produced.values(), ZERO)
+        if not total or not consumed:
+            continue
+        for src, kind, value, iid, qty, unit in consumed:
+            for dst, weight in produced.items():
+                if dst == src:
+                    continue
+                v = (value * weight / total).quantize(Decimal("0.01"))
+                t_in[dst] += v
+                t_from[src][dst] += v
+                t_out[kind][src] += v
+                if detail:
+                    vdate, vno, vtype = head[vid]
+                    detail_lines.append({
+                        "voucher_id": str(vid), "date": str(vdate), "voucher_number": vno, "voucher_type": vtype,
+                        "from_key": src, "to_key": dst, "kind": kind, "item": item_names.get(iid, ""),
+                        "quantity": format(abs(qty * weight / total).quantize(Decimal("0.0001")).normalize(), "f") if qty else "", "unit": unit or "",
+                        "value": m(v), "produced": sorted({item_names.get(i, "") for i in made[dst]})})
+                f = flows[(src, dst, kind)]
+                f[0] += v
+                f[1].add(vid)
+    names = {d["key"]: d["name"] for d in settings["divisions"]}
+    rows = [{"from": names[s], "to": names[d], "from_key": s, "to_key": d, "kind": kind, "value": m(v[0]),
+             "vouchers": len(v[1])} for (s, d, kind), v in sorted(flows.items(), key=lambda x: -x[1][0]) if v[0]]
+    out = {"in": t_in, "from": t_from, "out": t_out, "rows": rows}
+    if detail:
+        for ln in detail_lines:
+            ln["from"], ln["to"] = names[ln["from_key"]], names[ln["to_key"]]
+        detail_lines.sort(key=lambda x: (x["date"], x["voucher_number"] or "", -Decimal(x["value"])))
+        out["lines"] = detail_lines
+    return out
+
+
 # Blocks of the monthly finance sheet, as laid out in the finance team's workbook: (title, [(column, line key)],
 # line key whose % of net revenue is shown)
 SHEET_BLOCKS = [
@@ -439,10 +525,24 @@ SHEET_BLOCKS = [
 ]
 
 
-def finance_sheet(db: Session, company_id: uuid.UUID, from_date: date, to_date: date) -> dict:
+# The same sheet with material used by another division moved to it (see inter_division): a column for
+# what came from each division, and one for what went to the others.
+def _transfer_blocks(divisions: list[dict]) -> list:
+    return [("RM Store", [("Opening Stock Value", "rm_open"), ("Purchase Value", "purchases")]
+             + [(f"From {d['name']}", f"rm_in_{d['key']}") for d in divisions]
+             + [("To Other Divisions", "rm_out"), ("Closing Stock Value", "rm_close"),
+                ("RM Consumption", "rm_consumption")], "rm_consumption")] + SHEET_BLOCKS[1:]
+
+
+# what a click on a transfer figure shows: the items that went to other divisions (row: the row's division)
+DRILL = {"rm_out": {"src": "row"}}
+
+
+def finance_sheet(db: Session, company_id: uuid.UUID, from_date: date, to_date: date, transfers: bool = False) -> dict:
     """The P&L in the workbook's own layout: one block per stage, a row per division and a total row, each
-    with its % of net revenue; plus the purchase block (purchase, carriage inward, P&F ...)."""
-    pl = profit_and_loss(db, company_id, from_date, to_date)
+    with its % of net revenue; plus the purchase block (purchase, carriage inward, P&F ...).
+    transfers=True: material one division's production took from another division is charged to it."""
+    pl = profit_and_loss(db, company_id, from_date, to_date, transfers=transfers)
     lines = {ln["key"]: ln for sec in pl["sections"] for ln in sec["lines"]}
     divs = pl["divisions"]
     revenue = lines["net_revenue"]
@@ -451,7 +551,7 @@ def finance_sheet(db: Session, company_id: uuid.UUID, from_date: date, to_date: 
     def pct(value, base):
         return m(Decimal(value) / Decimal(base) * 100) if Decimal(base) else None
     blocks = []
-    for title, cols, pct_key in SHEET_BLOCKS:
+    for title, cols, pct_key in (_transfer_blocks(divs) if transfers else SHEET_BLOCKS):
         rows = []
         for d in divs:
             row = {"month": period, "category": d["name"], "division": d["key"],
@@ -462,8 +562,15 @@ def finance_sheet(db: Session, company_id: uuid.UUID, from_date: date, to_date: 
                  "pct": pct(lines[pct_key]["total"], revenue["total"]) if pct_key else None}
         editable = {i: lines[key]["editable"] for i, (_, key) in enumerate(cols) if lines[key].get("editable")}
         overridden = {i: lines[key].get("overridden", []) for i in editable for key in [cols[i][1]]}
+        drill = {}
+        if transfers:
+            for i, (_, key) in enumerate(cols):
+                if key.startswith("rm_in_"):
+                    drill[i] = {"src": key[len("rm_in_"):], "dst": "row"}
+                elif key in DRILL:
+                    drill[i] = DRILL[key]
         blocks.append({"title": title, "columns": [c for c, _ in cols], "pct": pct_key is not None, "rows": rows + [total],
-                       "editable": editable, "overridden": overridden})
+                       "editable": editable, "overridden": overridden, "drill": drill})
     heads = pl["purchase_heads"]
     purchase = {"title": "Purchase", "columns": [h["head"] for h in heads] + ["Total"],
                 "rows": [{"category": d["name"], "values": [h["by"][d["key"]] for h in heads] +
@@ -471,12 +578,13 @@ def finance_sheet(db: Session, company_id: uuid.UUID, from_date: date, to_date: 
                 + [{"category": "Total", "total": True,
                     "values": [h["total"] for h in heads] + [m(sum((Decimal(h["total"]) for h in heads), ZERO))]}]}
     return {"from": pl["from"], "to": pl["to"], "period": period, "month": pl["month"], "divisions": divs,
-            "blocks": blocks, "purchase": purchase, "shared_cost_centres": pl["shared_cost_centres"]}
+            "blocks": blocks, "purchase": purchase, "shared_cost_centres": pl["shared_cost_centres"],
+            "transfers": pl.get("transfers")}
 
 
-def profit_and_loss(db: Session, company_id: uuid.UUID, from_date: date, to_date: date) -> dict:
+def profit_and_loss(db: Session, company_id: uuid.UUID, from_date: date, to_date: date, transfers: bool = False) -> dict:
     """The monthly finance sheet: sales, RM consumption, production cost (WIP), finished goods cost, gross and
-    net profit, per division."""
+    net profit, per division. transfers=True: with material used by another division moved to it."""
     settings = load_settings(db, company_id)
     keys = [d["key"] for d in settings["divisions"]]
     amounts = ledger_amounts(db, company_id, from_date, to_date, settings)
@@ -515,8 +623,14 @@ def profit_and_loss(db: Session, company_id: uuid.UUID, from_date: date, to_date
 
     def calc(f):
         return {k: f(k) for k in keys}
+    moved = inter_division(db, company_id, from_date, to_date, settings) if transfers else None
+    # shown as signed amounts, so that each block adds up as it reads (what left a division is negative)
+    rm_in = moved["in"] if moved else zero()
+    # everything a division gave (raw material, WIP and finished goods) comes off its RM consumption
+    rm_out = calc(lambda k: -sum((moved["out"][kind][k] for kind in KINDS), ZERO)) if moved else zero()
     net_revenue = calc(lambda k: sales[k] - returns[k] + direct_income[k])
-    rm_consumption = calc(lambda k: stock[("opening", "rm")][k] + purchases[k] - stock[("closing", "rm")][k])
+    rm_consumption = calc(lambda k: stock[("opening", "rm")][k] + purchases[k] + rm_in[k] + rm_out[k]
+                          - stock[("closing", "rm")][k])
     cogm = calc(lambda k: stock[("opening", "wip")][k] + rm_consumption[k] + factory[k] - stock[("closing", "wip")][k])
     cogs = calc(lambda k: stock[("opening", "fg")][k] + cogm[k] - stock[("closing", "fg")][k])
     gross = calc(lambda k: net_revenue[k] - cogs[k])
@@ -544,6 +658,9 @@ def profit_and_loss(db: Session, company_id: uuid.UUID, from_date: date, to_date
         {"key": "rm", "name": "RM store", "lines": [
             line("rm_open", "Opening stock value", stock[("opening", "rm")], editable="opening:rm"),
             line("purchases", "Purchase value", purchases),
+            *([line(f"rm_in_{d['key']}", f"From {d['name']}", moved["from"][d["key"]]) for d in settings["divisions"]]
+              + [line("rm_in", "From other divisions", rm_in), line("rm_out", "To other divisions", rm_out)]
+              if moved else []),
             line("rm_close", "Closing stock value", stock[("closing", "rm")], editable="closing:rm"),
             line("rm_consumption", "RM consumption", rm_consumption, pct_of=net_revenue, strong=True)]},
         {"key": "wip", "name": "Production cost (WIP)", "lines": [
@@ -584,4 +701,4 @@ def profit_and_loss(db: Session, company_id: uuid.UUID, from_date: date, to_date
                       for n, h in sorted(heads.items(), key=lambda x: (x[0] != "Purchase", x[0]))]
     return {"from": str(from_date), "to": str(to_date), "divisions": settings["divisions"], "sections": sections,
             "month": month_key if one_month else None, "purchase_heads": purchase_heads,
-            "shared_cost_centres": unmapped}
+            "shared_cost_centres": unmapped, "transfers": moved["rows"] if moved else None}

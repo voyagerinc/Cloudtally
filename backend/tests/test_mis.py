@@ -329,3 +329,66 @@ def test_bom_is_read_from_tally_and_listed_with_excel(db, books):  # noqa: F811
     x = api.get(f"/api/v1/companies/{books.id}/masters/bom/xlsx", headers=h)
     sheet = zipfile.ZipFile(io.BytesIO(x.content)).read("xl/worksheets/sheet1.xml").decode()
     assert '<c r="C4" t="inlineStr" s="4"><is><t xml:space="preserve">Primary group</t></is></c>' in sheet and '<c r="F4" t="inlineStr" s="4"><is><t xml:space="preserve">Component' in sheet and ">Component A<" in sheet
+
+
+def test_coolace_sheet_charges_material_to_the_division_that_used_it(db, books):  # noqa: F811
+    """A customised cooler built from a cooler: the cooler's value is in Customised Cooler's cost, and out of
+    Cooler's; the company's totals stay the same."""
+    _setup(db, books)
+    coc = StockGroup(company_id=books.id, name="FINISHED GOODS- COC")
+    db.add(coc)
+    db.flush()
+    db.add(StockItem(company_id=books.id, name="Custom Cooler", group_id=coc.id, unit="Nos"))
+    db.commit()
+    engine.create_voucher(db, books, {            # one of the two coolers made (200 each) goes into a customised one
+        "voucher_type": "Stock Journal", "voucher_number": "WO-1", "date": "2026-06-20", "entries": [],
+        "inventory": [{"item": "Finished Cooler", "quantity": "-1", "rate": "200", "amount": "200", "unit": "Nos"},
+                      {"item": "Custom Cooler", "quantity": "1", "rate": "200", "amount": "200", "unit": "Nos"}]},
+        USER, action="post", source="tally")
+    old = {ln["key"]: ln for s in mis.profit_and_loss(db, books.id, *JUNE)["sections"] for ln in s["lines"]}
+    r = mis.profit_and_loss(db, books.id, *JUNE, transfers=True)
+    new = {ln["key"]: ln for s in r["sections"] for ln in s["lines"]}
+    assert r["transfers"] == [{"from": "Cooler", "to": "Customised Cooler", "from_key": "cooler", "to_key": "coc",
+                               "kind": "fg", "value": "200.00", "vouchers": 1}]
+    assert new["rm_in"]["by"]["coc"] == "200.00" and new["rm_out"]["by"]["cooler"] == "-200.00"
+    assert new["rm_in"]["total"] == "200.00" and new["rm_out"]["total"] == "-200.00"     # received = given
+    assert Decimal(new["cogs"]["by"]["cooler"]) == Decimal(old["cogs"]["by"]["cooler"]) - 200
+    assert Decimal(new["cogm"]["by"]["coc"]) == Decimal(old["cogm"]["by"]["coc"]) + 200
+    for key in ("cogs", "gross", "net"):
+        assert new[key]["total"] == old[key]["total"]
+    sheet = mis.finance_sheet(db, books.id, *JUNE, transfers=True)
+    rm = sheet["blocks"][0]
+    assert rm["columns"] == ["Opening Stock Value", "Purchase Value", "From Cooler", "From Hydraulic",
+                             "From Customised Cooler", "To Other Divisions", "Closing Stock Value", "RM Consumption"]
+    coc_row = next(x for x in rm["rows"] if x.get("division") == "coc")
+    assert coc_row["values"][2] == "200.00" and coc_row["values"][3] == "0.00"      # from Cooler, not Hydraulic
+    assert rm["drill"][2] == {"src": "cooler", "dst": "row"} and rm["drill"][5] == {"src": "row"}
+    total = rm["rows"][-1]["values"]
+    assert sum(Decimal(v) for v in total[2:5]) == -Decimal(total[5])              # From ... = To Other Divisions
+    assert all("Other Divisions" not in c for b in sheet["blocks"][1:] for c in b["columns"])
+    # a click on the figure: the voucher and item behind it
+    db.add(User(username="dr-boss", api_key_hash=hash_key("k-dr"), is_superadmin=True))
+    db.commit()
+    d = TestClient(app).get(f"/api/v1/reports/mis-transfers?company_id={books.id}&from_date=2026-06-01&to_date=2026-06-30"
+                            "&src=cooler&dst=coc", headers={"X-API-Key": "k-dr"}).json()
+    assert d["vouchers"] == 1 and d["total"] == "200.00"
+    ln = d["lines"][0]
+    assert (ln["voucher_number"], ln["item"], ln["quantity"], ln["value"], ln["produced"], ln["kind"]) ==         ("WO-1", "Finished Cooler", "1", "200.00", ["Custom Cooler"], "fg")
+    assert TestClient(app).get(f"/api/v1/reports/mis-transfers?company_id={books.id}&from_date=2026-06-01"
+                               "&to_date=2026-06-30&src=hydraulic", headers={"X-API-Key": "k-dr"}).json()["lines"] == []
+    # the plain MIS sheet is as before
+    assert mis.finance_sheet(db, books.id, *JUNE)["blocks"][0]["columns"][2] == "Closing Stock Value"
+
+
+def test_coolace_sheet_api_and_excel(db, books):  # noqa: F811
+    _setup(db, books)
+    db.add(User(username="co-boss", api_key_hash=hash_key("k-co"), is_superadmin=True))
+    db.commit()
+    api, h = TestClient(app), {"X-API-Key": "k-co"}
+    q = f"company_id={books.id}&from_date=2026-06-01&to_date=2026-06-30"
+    j = api.get(f"/api/v1/reports/mis-finance-sheet-coolace?{q}", headers=h)
+    assert j.status_code == 200 and j.json()["transfers"] == []
+    x = api.get(f"/api/v1/reports/mis-finance-sheet-coolace?{q}&format=xlsx", headers=h)
+    assert x.status_code == 200
+    sheet = zipfile.ZipFile(io.BytesIO(x.content)).read("xl/worksheets/sheet1.xml").decode()
+    assert "Material used by another division" in sheet and "From Cooler" in sheet

@@ -26,6 +26,9 @@ nav .menu-list { position: absolute; top: calc(100% + 4px); right: 0; z-index: 5
   padding: 4px; background: var(--panel, var(--bg)); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
 nav .menu-list button { text-align: left; width: 100%; }
 @media (max-width: 640px) { nav .menu-list { left: 0; right: auto; } }
+table.fs td.drill { cursor: pointer; color: var(--accent); text-decoration: underline dotted; }
+table.fs tr.click { cursor: pointer; }
+table.fs tr.click:hover td { background: var(--chip-info); }
 nav.subnav { flex: none; align-items: center; gap: 6px; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
 nav.subnav button { border-color: var(--line); }
 nav.subnav button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
