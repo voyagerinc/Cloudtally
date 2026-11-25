@@ -15,18 +15,23 @@
     <button data-tab="dashboard" data-perm="sync.read">Sync</button>
     <button data-tab="vouchers" data-perm="voucher.read">Vouchers</button>
     <button data-tab="entry" data-perm="voucher.write">New voucher</button>
-    <button data-tab="conflicts" data-perm="sync.read">Conflicts <span id="conflict-badge" class="badge" hidden></span></button>
     <button data-tab="reports" data-perm="report">Reports</button>
     <button data-tab="masters" data-perm="masters.read">Masters</button>
     <button data-tab="fixedassets" data-href="/fixed-assets" data-perm="report" title="Fixed assets &amp; depreciation (opens in a new tab)">Fixed assets</button>
-    <button data-tab="settings" data-perm="sync.read">Connector</button>
-    <button data-tab="audit" data-perm="audit.read">Audit</button>
-    <button data-tab="users" data-perm="users.manage">Users</button>
-    <button data-tab="server" data-perm="superadmin">System admin</button>
     <button data-tab="customers" data-perm="portal-admin">Customers</button>
     <button data-tab="releases" data-perm="portal-admin">Releases</button>
-    <button data-tab="mylicence" data-perm="portal-customer">My licence</button>
-    <button data-tab="licence" data-perm="licence-client">Licence</button>
+    <details id="admin-menu" class="menu">
+      <summary>Admin <span id="admin-badge" class="badge" hidden></span></summary>
+      <div class="menu-list">
+        <button data-tab="settings" data-perm="sync.read">Connector</button>
+        <button data-tab="conflicts" data-perm="sync.read">Conflicts <span id="conflict-badge" class="badge" hidden></span></button>
+        <button data-tab="users" data-perm="users.manage">Users</button>
+        <button data-tab="audit" data-perm="audit.read">Audit</button>
+        <button data-tab="server" data-perm="superadmin">System admin</button>
+        <button data-tab="licence" data-perm="licence-client">Licence</button>
+        <button data-tab="mylicence" data-perm="portal-customer">My licence</button>
+      </div>
+    </details>
   </nav>
   <span id="whoami"></span>
   <button id="change-pw" class="link" hidden>Change password</button>

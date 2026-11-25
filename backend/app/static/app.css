@@ -16,6 +16,16 @@ header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding
 nav { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; }
 nav button { background: none; color: var(--text); border: 1px solid transparent; }
 nav button.active { border-color: var(--line); background: var(--bg); }
+nav .menu { position: relative; }
+nav .menu[hidden] { display: none; }
+nav .menu > summary { list-style: none; cursor: pointer; padding: 6px 12px; border: 1px solid transparent; border-radius: 6px; user-select: none; }
+nav .menu > summary::-webkit-details-marker { display: none; }
+nav .menu > summary::after { content: " \25BE"; }
+nav .menu.active > summary, nav .menu[open] > summary { border-color: var(--line); background: var(--bg); }
+nav .menu-list { position: absolute; top: calc(100% + 4px); right: 0; z-index: 50; min-width: 180px; display: flex; flex-direction: column;
+  padding: 4px; background: var(--panel, var(--bg)); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+nav .menu-list button { text-align: left; width: 100%; }
+@media (max-width: 640px) { nav .menu-list { left: 0; right: auto; } }
 nav.subnav { flex: none; align-items: center; gap: 6px; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
 nav.subnav button { border-color: var(--line); }
 nav.subnav button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }

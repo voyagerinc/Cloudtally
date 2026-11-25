@@ -127,9 +127,19 @@ function applyPerms() {
     b.hidden = special ? !special() : b.dataset.perm === "report" ? !reportOpts.some((o) => !o.disabled) : !can(b.dataset.perm);
     if (b.dataset.tab === "fixedassets" && state.licModules && !state.licModules.includes("fixed_assets")) b.hidden = true;   // licence module
   });
+  syncAdminMenu();
   $("#r-csv").hidden = $("#r-xlsx").hidden = $("#errors-csv").hidden = !can("export");
   $("#l-new").hidden = $("#ld-edit").hidden = !can("masters.write");
 }
+// The Admin menu (connector, conflicts, users, audit, system admin, licence): shown when any of its items is.
+function syncAdminMenu() {
+  const m = $("#admin-menu");
+  const items = [...m.querySelectorAll("button[data-tab]")];
+  m.hidden = items.every((b) => b.hidden);
+  m.classList.toggle("active", items.some((b) => b.classList.contains("active")));
+}
+document.addEventListener("click", (e) => { const m = $("#admin-menu"); if (m.open && !m.contains(e.target)) m.open = false; });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#admin-menu").open = false; });
 function tabAllowed(tab) { const b = document.querySelector(`#tabs button[data-tab="${tab}"]`); return !!b && !b.hidden; }
 function firstTab() { return [...document.querySelectorAll("#tabs button")].find((b) => !b.hidden && !b.dataset.href)?.dataset.tab; }
 
@@ -165,6 +175,7 @@ async function loadCompanies(select) {
   if (!state.company) {
     // No books yet: only the licence tabs (a company admin of the portal may have no books at all).
     document.querySelectorAll("#tabs button").forEach((b) => { const sp = SPECIAL_TABS[b.dataset.perm]; b.hidden = !(sp && sp()); });
+    syncAdminMenu();
     $("#company").hidden = true;
     $("#noaccess-msg").innerHTML = state.user.is_superadmin ? "No companies yet. Use <b>Open Tally company</b> to link one."
       : "You have no access to any company yet. Ask your company admin.";
@@ -225,6 +236,7 @@ function show(tab) {
   currentTab = tab; store("erp_tab", tab);
   document.querySelectorAll(".tab").forEach((s) => (s.hidden = s.id !== tab));
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  $("#admin-menu").open = false; syncAdminMenu();
   if (tab !== "dashboard") { clearTimeout(progressTimer); progressTimer = null; }
   renderers[tab] && renderers[tab]().catch((e) => alert(e.message));
 }
@@ -366,7 +378,7 @@ $("#fail-masters").onclick = async (e) => {
   finally { e.target.disabled = false; }
 };
 
-function setBadge(n) { const b = $("#conflict-badge"); b.hidden = !n; b.textContent = n; }
+function setBadge(n) { for (const b of [$("#conflict-badge"), $("#admin-badge")]) { b.hidden = !n; b.textContent = n; } }
 
 async function loadJobs() {
   const params = new URLSearchParams({ company_id: state.company, limit: 100 });
