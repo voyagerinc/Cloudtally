@@ -280,7 +280,7 @@ def _run_in_background(company_id: uuid.UUID, who: str) -> None:
             last = n == MAX_PASSES
             stats = run_company(SessionLocal, company_id, force=(n == 1), trigger=trigger, run=run,
                                 more_follows=None if last else more_waiting)
-            if last or "error" in (stats.get("inbound") or {}) or not more_waiting(company_id):
+            if last or stats.get("stopped") or "error" in (stats.get("inbound") or {}) or not more_waiting(company_id):
                 break
             time.sleep(settings.sync_voucher_batch_pause)
     except Exception:   # already recorded on the progress row; nothing to return to
@@ -295,8 +295,33 @@ def run_now(company_id: uuid.UUID, db: DB, user: CurrentUser, background: Backgr
     row = db.get(SyncProgress, company_id)
     if row and progress.is_running(row.data):
         raise HTTPException(409, "A sync is already running for this company")
+    progress.release(company_id)           # Sync now after Stop sync: automatic sync works again too
     background.add_task(_run_in_background, company_id, user.username)
     return {"status": "started", "progress": f"/api/v1/sync/progress?company_id={company_id}"}
+
+
+@router.post("/sync/stop")
+def stop_sync(company_id: uuid.UUID, db: DB, user: CurrentUser):
+    """Stop sync: the running sync ends at the next safe point (after the request Tally is answering now),
+    and automatic sync leaves this company alone until Sync now or Resume."""
+    authorize(db, user, company_id, Perm.SYNC_MANAGE)
+    row = db.get(SyncProgress, company_id)
+    running = bool(row and progress.is_running(row.data))
+    progress.request_stop(company_id, user.username, running=running)
+    audit.record(db, actor_of(user), "sync.stop", "company", company_id, company_id=company_id,
+                 after={"was_running": running})
+    db.commit()
+    return {"status": "stopping" if running else "held", "running": running}
+
+
+@router.post("/sync/resume")
+def resume_sync(company_id: uuid.UUID, db: DB, user: CurrentUser):
+    """After Stop sync: automatic sync takes this company up again (Sync now does the same)."""
+    authorize(db, user, company_id, Perm.SYNC_MANAGE)
+    progress.release(company_id)
+    audit.record(db, actor_of(user), "sync.resume", "company", company_id, company_id=company_id)
+    db.commit()
+    return {"status": "resumed"}
 
 
 @router.get("/sync/progress")
@@ -305,10 +330,12 @@ def sync_progress(company_id: uuid.UUID, db: DB, user: CurrentUser):
     authorize(db, user, company_id, Perm.SYNC_READ)
     row = db.get(SyncProgress, company_id)
     if row is None:
-        return {"state": "never", "steps": []}
+        return {"state": "never", "steps": [], "held_by": progress.held_by(company_id)}
     data = dict(row.data)
     if data.get("state") == "running" and not progress.is_running(data):
         data["state"], data["summary"] = "failed", "Stopped responding (the server or worker was restarted)"
+    data["stopping_by"] = progress.stopping_by(company_id) if data.get("state") == "running" else None
+    data["held_by"] = progress.held_by(company_id)
     return data
 
 

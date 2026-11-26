@@ -18,7 +18,7 @@ from app.core.db import SessionLocal
 from app.models import Company, TallyConnector
 from app.models.base import utcnow
 from app.services.sync import common, inbound, outbound
-from app.services.sync.progress import Progress
+from app.services.sync.progress import Progress, SyncStopped
 
 log = logging.getLogger("sync.worker")
 _stop = False
@@ -139,6 +139,11 @@ def run_company(session_factory: sessionmaker, company_id: uuid.UUID, force: boo
             finally:
                 client.close()
         stats["outbound"] = outbound.process_batch(session_factory, company_id=company_id, progress=progress)
+    except SyncStopped as exc:     # Stop sync: what was saved so far stays, the next sync carries on
+        log.info("sync of %s stopped by %s", company_id, exc)
+        progress.finish(f"Stopped by {exc}. What was read so far is saved; Sync now carries on from there.", stopped=True)
+        stats["stopped"] = str(exc)
+        return stats
     except Exception as exc:
         progress.finish(f"Stopped: {type(exc).__name__}: {exc}", failed=True)
         raise

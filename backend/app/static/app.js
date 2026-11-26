@@ -463,10 +463,15 @@ $("#check-tally").onclick = async (e) => {
 // ------------------------------------------------------------------ sync progress
 // One overall bar for the whole run, the four steps with their status, and a bar under any step
 // that has a count (e.g. vouchers fetched). Polls while a run is going, then refreshes the dashboard.
-const STEP_ICON = { done: "✓", running: "●", failed: "✗", skipped: "–", pending: "○" };
+const STEP_ICON = { done: "✓", running: "●", failed: "✗", skipped: "–", pending: "○", stopped: "■" };
 let progressTimer = null;
 function renderProgress(p) {
   const el = $("#sync-progress");
+  const manage = can("sync.manage");
+  $("#stop-sync").hidden = !manage || p?.state !== "running";
+  $("#stop-sync").disabled = !!p?.stopping_by;
+  $("#stop-sync").textContent = p?.stopping_by ? "Stopping…" : "Stop sync";
+  $("#resume-sync").hidden = !manage || !p?.held_by || p?.state === "running";
   if (!p || p.state === "never") { el.hidden = true; return; }
   el.hidden = false;
   el.className = `panel progress-panel ${p.state}`;
@@ -488,12 +493,13 @@ function renderProgress(p) {
   const secs = Math.max(0, Math.round((ended - started) / 1000));
   const eta = p.state === "running" && run && run.read > 0 && run.read < run.total
     ? ` · about ${dur(Math.round((secs / run.read) * (run.total - run.read)))} left` : "";
-  const title = { running: `Syncing with Tally… ${overall}%`, done: "Last sync finished",
-    failed: `Last sync stopped at ${overall}%` }[p.state] || p.state;
+  const title = { running: p.stopping_by ? `Stopping… (asked by ${p.stopping_by}; after the request Tally is answering now)` : `Syncing with Tally… ${overall}%`,
+    done: "Last sync finished", failed: `Last sync stopped at ${overall}%`, stopped: `Sync stopped at ${overall}%` }[p.state] || p.state;
   const line = p.state === "running"
     ? (run ? `${fmtN(run.read)} of ${fmtN(run.total)} vouchers read · ${overall}%${eta}${run.part > 1 ? ` · part ${run.part}` : ""}`
       : `Step ${Math.min(finished + 1, steps.length)} of ${steps.length} · ${overall}%`)
-    : esc(p.summary || "");
+    : esc(p.summary || "") + (p.held_by && p.state !== "running"
+      ? ` · Automatic sync is held for this company (stopped by ${esc(p.held_by)}): click Sync now or Resume automatic sync.` : "");
   el.innerHTML = `<div class="head"><b>${title}</b><span class="muted small">${esc(p.trigger || "")} · started ${started.toLocaleTimeString()} · ${dur(secs)}</span></div>
     <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${overall}" aria-label="Overall sync progress"><span style="width:${overall}%"></span></div>
     <div class="small muted">${line}</div>
@@ -526,6 +532,17 @@ $("#run-sync").onclick = async (e) => {
     $("#sync-progress").dataset.state = "running";
     watchProgress();
   } catch (err) { alert(err.message); e.target.disabled = false; }
+};
+$("#stop-sync").onclick = async (e) => {
+  if (!confirm("Stop the sync? It stops after the request Tally is answering now (on a large company this can take a "
+    + "minute). What was read so far is saved, and automatic sync leaves this company alone until you click Sync now "
+    + "or Resume automatic sync.")) return;
+  e.target.disabled = true;
+  try { await api(`/sync/stop?${cq()}`, { method: "POST" }); watchProgress(); }
+  catch (err) { alert(err.message); e.target.disabled = false; }
+};
+$("#resume-sync").onclick = async () => {
+  try { await api(`/sync/resume?${cq()}`, { method: "POST" }); watchProgress(); } catch (err) { alert(err.message); }
 };
 $("#inbox-retry").onclick = async (e) => {
   e.target.disabled = true; e.target.textContent = "Reprocessing…";

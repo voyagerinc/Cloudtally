@@ -88,6 +88,8 @@
 <section id="dashboard" class="tab" hidden>
   <div class="row between"><h2>Synchronization</h2>
     <div><button id="check-tally">Check Tally</button> <button id="run-sync" disabled title="Check Tally first">Sync now</button>
+      <button id="stop-sync" class="secondary danger" hidden title="Stops the running sync after the request Tally is answering now. What was read so far is saved.">Stop sync</button>
+      <button id="resume-sync" class="secondary" hidden title="Automatic sync takes this company up again">Resume automatic sync</button>
       <button id="retry-failed" class="secondary">Retry all failed</button>
       <a id="errors-csv" class="button secondary" href="#">Export error log</a></div></div>
   <div id="tally-check" class="check-panel" hidden></div>

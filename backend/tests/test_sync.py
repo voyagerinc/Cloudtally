@@ -1414,3 +1414,52 @@ def test_godowns_come_with_their_parent_from_tally(db, company, tc, mock):
     db.expire_all()
     g = {x.name: x for x in db.scalars(select(Godown).where(Godown.company_id == company.id))}
     assert g["BASEMENT"].parent_id == g["MAIN STORE"].id
+
+
+def test_stop_sync_ends_the_run_at_a_safe_point_and_holds_automatic_sync(db, company, tc, mock, monkeypatch):
+    """Stop sync: the run ends between two Tally requests, what was read stays, and automatic sync waits."""
+    from fastapi.testclient import TestClient
+    from app.api.sync import _run_in_background
+    from app.core.security import hash_key
+    from app.main import app
+    from app.models import User
+    from app.services.sync import progress
+    from app.workers.auto_sync import AutoSync
+    sync()
+    monkeypatch.setattr(settings, "sync_voucher_batch_size", 2)
+    monkeypatch.setattr(settings, "sync_voucher_max_batches", 1)
+    for i in range(6):
+        mock.enter_voucher(tc, receipt_xml("20260501", f"S-{i}"))
+    real = progress.Progress.vouchers_read
+
+    def read_then_stop(self, n):            # someone clicks Stop sync while the first batch is saved
+        real(self, n)
+        if self.run["read"] == 2:
+            progress.request_stop(company.id, "asha")
+    monkeypatch.setattr(progress.Progress, "vouchers_read", read_then_stop)
+    _run_in_background(company.id, "asha")
+    db.expire_all()
+    p = db.get(SyncProgress, company.id).data
+    assert p["state"] == "stopped" and "Stopped by asha" in p["summary"] and p["run"]["read"] == 2
+    assert progress.stopping_by(company.id) is None and progress.held_by(company.id) == "asha"
+    # automatic sync leaves the company alone while held
+    calls = []
+    monkeypatch.setattr("app.workers.auto_sync.run_company", lambda *a, **k: calls.append(a))
+    AutoSync.run_round()
+    assert calls == []
+    db.add(User(username="stop-boss", api_key_hash=hash_key("k-stop"), is_superadmin=True))
+    db.commit()
+    api, h = TestClient(app), {"X-API-Key": "k-stop"}
+    assert api.get(f"/api/v1/sync/progress?company_id={company.id}", headers=h).json()["held_by"] == "asha"
+    r = api.post(f"/api/v1/sync/stop?company_id={company.id}", headers=h)      # nothing running: only holds
+    assert r.json() == {"status": "held", "running": False} and progress.stopping_by(company.id) is None
+    assert api.post(f"/api/v1/sync/resume?company_id={company.id}", headers=h).status_code == 200
+    assert progress.held_by(company.id) is None
+    AutoSync.run_round()
+    assert len(calls) == 1
+    # the next sync carries on with the vouchers not read yet
+    monkeypatch.setattr(progress.Progress, "vouchers_read", real)
+    _run_in_background(company.id, "asha")
+    db.expire_all()
+    assert db.get(SyncProgress, company.id).data["state"] == "done"
+    assert db.scalar(select(func.count()).select_from(Voucher).where(Voucher.voucher_number.like("S-%"))) == 6

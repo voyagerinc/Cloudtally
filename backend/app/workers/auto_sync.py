@@ -83,6 +83,8 @@ class AutoSync:
                 row = db.get(SyncProgress, company_id)
                 if row and progress.is_running(row.data):
                     continue   # a Sync now is already running for this company
+                if progress.held_by(company_id):
+                    continue   # Stop sync was clicked: left alone until Sync now or Resume
                 if not licence.sync_allowed(db, company_id):
                     continue   # licence read-only, or Tally sync not licensed
             run_company(SessionLocal, company_id, trigger="automatic sync")
