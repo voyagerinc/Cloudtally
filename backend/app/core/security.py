@@ -46,6 +46,7 @@ REPORTS: dict[str, str] = {
     "stock-summary": "Stock Summary",
     "receivables": "Receivables (ageing)",
     "receivables-eway": "Receivables (ageing by e-way bill date)",
+    "receivables-eway-monthly": "Receivables monthly (by e-way bill date)",
     "payables": "Payables (ageing)",
     "sales-register": "Sales Register",
     "purchase-register": "Purchase Register",

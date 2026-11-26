@@ -437,6 +437,53 @@ def outstanding(db: Session, company_id: uuid.UUID, as_of: date, kind: str = "re
             "total_dr": m(dr_total), "total_cr": m(cr_total)}
 
 
+def outstanding_monthly(db: Session, company_id: uuid.UUID, from_date: date, to_date: date,
+                        kind: str = "receivable", fifo: bool = True) -> dict:
+    """What is outstanding at the end of the period, by the month its due starts: the e-way bill date of the
+    invoice (the bill date when it has no e-way bill). A bill of 30 Sep with its e-way bill of 15 Oct is in
+    October. Opening: due started before the period; Closing: all outstanding at its end (Opening + months);
+    E-way bill after the period: billed in it, e-way bill made later."""
+    r = outstanding(db, company_id, to_date, kind, fifo=fifo, basis="eway")
+    months, d = [], from_date.replace(day=1)
+    while d <= to_date:
+        months.append(d)
+        d = (d.replace(day=28) + timedelta(days=4)).replace(day=1)
+    keys = ["opening"] + [mo.strftime("%Y-%m") for mo in months] + ["later"]
+    parties: dict[str, dict] = {}
+    bills = []
+    totals = dict.fromkeys(keys, ZERO)
+    for b in r["bills"]:
+        start = date.fromisoformat(b["eway_bill_date"]) if b.get("eway_bill_date") else date.fromisoformat(b["date"])
+        col = "opening" if start < from_date else "later" if start > to_date else start.strftime("%Y-%m")
+        pending = Decimal(b["pending"])
+        p = parties.setdefault(b["ledger_id"], {"party": b["party"], "ledger_id": b["ledger_id"], "state": b["state"],
+                                               "by": dict.fromkeys(keys, ZERO), "bills": 0})
+        p["by"][col] += pending
+        p["bills"] += 1
+        totals[col] += pending
+        bills.append({"party": b["party"], "ledger_id": b["ledger_id"], "voucher_id": b["voucher_id"], "bill": b["bill"],
+                      "bill_date": b["date"], "eway_bill_no": b.get("eway_bill_no"),
+                      "eway_bill_date": b.get("eway_bill_date"), "due_from": str(start), "column": col,
+                      "due_date": b["due_date"], "pending": b["pending"], "overdue_days": b["overdue_days"]})
+    labels = {"opening": "Opening", "later": "E-way bill after period",
+              **{mo.strftime("%Y-%m"): mo.strftime("%b %Y") for mo in months}}
+    if not totals["later"]:
+        keys.remove("later")
+    columns = [{"key": k, "label": labels[k]} for k in keys]
+    rows = []
+    out_parties = []
+    for p in sorted(parties.values(), key=lambda x: x["party"].casefold()):
+        closing = sum(p["by"].values(), ZERO)
+        if not closing and not any(p["by"].values()):
+            continue
+        out_parties.append({**p, "by": {k: m(p["by"][k]) for k in keys}, "closing": m(closing)})
+        rows.append({"party": p["party"], "state": p["state"], **{labels[k]: m(p["by"][k]) for k in keys},
+                     "Closing": m(closing)})
+    return {"from": str(from_date), "to": str(to_date), "kind": kind, "fifo": fifo, "columns": columns,
+            "parties": out_parties, "bills": bills, "rows": rows,
+            "totals": {k: m(totals[k]) for k in keys}, "closing": m(sum(totals.values(), ZERO))}
+
+
 def _fifo_adjust(items: list[dict], unadjusted: list[dict]) -> None:
     """Set each party's On Account amounts (payments, receipts, journals not adjusted against a bill) off
     against that party's oldest open amounts of the other side, first in first out. What cannot be set off

@@ -25,7 +25,7 @@ CSV_ROWS = {
     "sales-analysis": "rows", "purchase-analysis": "rows", "sales-rm-cost": "rows", "fifo-costing": "items",
     "sales-fifo-cost": "rows", "sales-group-wise": "rows", "stock-journal": "rows", "material-transfer-wip": "rows",
     "material-transfer-wip-main": "rows", "wo-manufacturing": "rows",
-    "gstr1": "rows", "gstr2": "rows", "hsn-summary": "rows", "einvoice": "rows", "eway-bill": "rows", "custom-fields": "rows", "cash-flow": "rows", "funds-flow": "rows",
+    "gstr1": "rows", "gstr2": "rows", "hsn-summary": "rows", "einvoice": "rows", "eway-bill": "rows", "outstanding-monthly": "rows", "custom-fields": "rows", "cash-flow": "rows", "funds-flow": "rows",
 }
 
 
@@ -185,6 +185,17 @@ def outstanding(company_id: uuid.UUID, db: DB, user: CurrentUser, as_of: date | 
     return _respond(db, user, company_id, "outstanding",
                     reports.outstanding(db, company_id, t, kind, ageing=limits, age_by=age_by, fifo=fifo,
                                         basis=basis), format)
+
+
+@router.get("/outstanding-monthly")
+def outstanding_monthly(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                        to_date: date | None = None, fifo: bool = True, format: Fmt = "json"):
+    """Receivables at the end of the period by the month their due starts (the e-way bill date, else the
+    bill date): Opening, a column per month of the period, and Closing."""
+    authorize(db, user, company_id, Perm.report("receivables-eway-monthly"))
+    f, t = _default_period(db, company_id, from_date, to_date)
+    return _respond(db, user, company_id, "outstanding-monthly",
+                    reports.outstanding_monthly(db, company_id, f, t, "receivable", fifo=fifo), format)
 
 
 # ------------------------------------------------------------------ GST

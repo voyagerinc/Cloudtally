@@ -544,3 +544,32 @@ def test_ageing_shows_each_bills_opening_amount(books, admin):
     bill = client.get(f"/api/v1/reports/outstanding?company_id={books}&as_of=2026-06-30", headers=admin).json()["bills"][0]
     assert (bill["bill"], bill["opening_amount"], bill["pending"]) == ("INV-001", "11800.00", "6800.00")
     assert "state" in bill and "address" in bill                             # shown after the party name
+
+
+def test_receivables_monthly_by_eway_bill_date(db, books, admin):
+    """A bill of 20 Apr whose e-way bill is of 25 May is in May; Opening is what started before the period."""
+    import uuid as _uuid
+    from app.models import Voucher
+    v = voucher(books, admin).json()                                        # INV-001 dated 20 Apr
+    row = db.get(Voucher, _uuid.UUID(v["id"]))
+    row.statutory = {"eway_bill_no": "391000000001", "eway_bill_date": "2026-05-25"}
+    db.commit()
+    q = f"/api/v1/reports/outstanding-monthly?company_id={books}&from_date=2026-04-01&to_date=2026-06-30"
+    r = client.get(q, headers=admin).json()
+    assert [c["label"] for c in r["columns"]] == ["Opening", "Apr 2026", "May 2026", "Jun 2026"]
+    bill = r["bills"][0]
+    assert (bill["bill_date"], bill["due_from"], bill["column"]) == ("2026-04-20", "2026-05-25", "2026-05")
+    party = r["parties"][0]
+    assert party["by"]["2026-05"] == party["closing"] == r["closing"] and party["by"]["2026-04"] == "0.00"
+    # a period starting after the e-way bill: the bill is in Opening
+    later = client.get(q.replace("from_date=2026-04-01", "from_date=2026-06-01"), headers=admin).json()
+    assert [c["label"] for c in later["columns"]] == ["Opening", "Jun 2026"] and later["totals"]["opening"] == r["closing"]
+    # a period ending before the e-way bill: billed in it, e-way bill made after it
+    early = client.get(q.replace("to_date=2026-06-30", "to_date=2026-04-30"), headers=admin).json()
+    assert early["columns"][-1] == {"key": "later", "label": "E-way bill after period"}
+    # no e-way bill: from the bill date; and Excel downloads
+    row.statutory = {}
+    db.commit()
+    assert client.get(q, headers=admin).json()["bills"][0]["column"] == "2026-04"
+    x = client.get(q + "&format=xlsx", headers=admin)
+    assert x.status_code == 200 and x.content[:2] == b"PK"

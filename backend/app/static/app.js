@@ -1098,6 +1098,7 @@ function reportUrl(fmt) {
   let path = name;
   if (name === "outstanding-payable") { path = "outstanding"; p.set("kind", "payable"); }
   if (name === "receivables-eway") { path = "outstanding"; p.set("basis", "eway"); }
+  if (name === "receivables-eway-monthly") { path = "outstanding-monthly"; p.set("fifo", ageingSetting().fifo); }
   if (name.startsWith("register-")) { path = "register"; p.set("base_type", name.split("-")[1]); }
   if (["balance-sheet", "outstanding"].includes(path)) { if (t) p.set("as_of", t); }
   if (path === "outstanding") {
@@ -1883,6 +1884,7 @@ renderers.reports = async () => {
     "day-book": dayBookView, "stock-summary": stockSummaryView, outstanding: (el) => outstandingView(el, "receivable"),
     "outstanding-payable": (el) => outstandingView(el, "payable"),
     "receivables-eway": (el) => outstandingView(el, "receivable", "eway"),
+    "receivables-eway-monthly": outstandingMonthlyView,
     "sales-analysis": (el) => analysisView(el, "sales-analysis"),
     "purchase-analysis": (el) => analysisView(el, "purchase-analysis"),
     "sales-rm-cost": (el) => analysisView(el, "sales-rm-cost"),
@@ -2063,6 +2065,44 @@ async function outstandingView(el, kind, basis = "voucher") {
     { label: "Balance", num: true, get: (n) => (n.dr == null ? "" : drcr(n.dr - n.cr)) },
     { label: "Overdue days", num: true, get: (n) => (n.b ? n.b.overdue_days : "") },
   ], [...parties.values()].sort(byName), { title: "Party / bill" });
+}
+
+// Receivables at the period's end by the month their due starts (e-way bill date, else bill date).
+async function outstandingMonthlyView(el) {
+  const set = ageingSetting();
+  const p = rParams({ fifo: set.fifo });
+  const r = await api(`/reports/outstanding-monthly?${p}`);
+  const cols = r.columns;
+  const parties = new Map();
+  for (const pt of r.parties) parties.set(pt.ledger_id, { label: pt.party, state: pt.state, by: Object.fromEntries(cols.map((c) => [c.key, paise(pt.by[c.key])])),
+    closing: paise(pt.closing), children: [{ label: "Ledger statement ›", cls: "muted", open: () => openLedgerStatement(pt.ledger_id, pt.party) }] });
+  for (const b of r.bills) {
+    const pt = parties.get(b.ledger_id);
+    if (!pt) continue;
+    pt.children.push({ label: b.bill || "(on account)", b, by: { [b.column]: paise(b.pending) }, closing: paise(b.pending),
+      open: () => (b.voucher_id ? drillVoucher(b.voucher_id, `Bill ${b.bill}`) : openLedgerStatement(b.ledger_id, b.party)) });
+  }
+  const total = { label: "Total", cls: "total", by: Object.fromEntries(cols.map((c) => [c.key, paise(r.totals[c.key])])), closing: paise(r.closing) };
+  el.innerHTML = `<p class="small muted">Outstanding on ${esc(r.to)}, by the month its due starts: the <b>e-way bill date</b>
+      (the bill date when there is no e-way bill). A bill of 30 Sep with its e-way bill of 15 Oct is in Oct.
+      <b>Opening</b>: due started before ${esc(r.from)}. <b>Closing</b> = Opening + the months${cols.some((c) => c.key === "later") ? " + e-way bills made after the period" : ""}.
+      Choose the period with From and To above.</p>
+    <form id="om-form" class="row wrap filters"><label title="Receipts not adjusted against a bill are set off against the oldest bills first">
+      <input type="checkbox" id="om-fifo" ${set.fifo ? "checked" : ""}> Adjust On Account by FIFO</label></form>
+    <div class="cards">${cols.map((c) => `<div class="card"><div class="k">${esc(c.label)}</div><div class="v">${drcr(paise(r.totals[c.key]))}</div></div>`).join("")}
+      <div class="card"><div class="k">Closing balance</div><div class="v">${drcr(paise(r.closing))}</div></div></div><div id="t"></div>`;
+  $("#om-fifo").onchange = () => {
+    try { localStorage.setItem("erp_ageing", JSON.stringify({ ...set, fifo: $("#om-fifo").checked })); } catch (_) { /* private window */ }
+    outstandingMonthlyView(el).catch((err) => alert(err.message));
+  };
+  treeTable($("#t"), [
+    { label: "State", get: (n) => esc(n.state || "") },
+    { label: "Bill date", get: (n) => (n.b ? esc(n.b.bill_date) : "") },
+    { label: "E-way bill", get: (n) => (n.b ? (n.b.eway_bill_no ? `${esc(n.b.eway_bill_no)} · ${esc(n.b.eway_bill_date)}` : `<span class="muted">none</span>`) : "") },
+    { label: "Due from", get: (n) => (n.b ? esc(n.b.due_from) : "") },
+    ...cols.map((c) => ({ label: c.label, num: true, get: (n) => (n.by && n.by[c.key] ? drcr(n.by[c.key]) : "") })),
+    { label: "Closing balance", num: true, get: (n) => (n.closing != null ? drcr(n.closing) : "") },
+  ], [...parties.values()].sort(byName).concat([total]), { title: "Party / bill" });
 }
 
 // ------------------------------------------------------------------ GST reports
