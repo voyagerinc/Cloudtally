@@ -339,6 +339,9 @@ def _parse_inventory(el: etree._Element, default_ledger: str | None = None) -> t
         "batch": X.txt(batch, "BATCHNAME"),
         "ledger": allocs[0][0] if allocs else default_ledger,
     }
+    alt, alt_unit = X.alt_quantity(X.txt(el, "ACTUALQTY") or X.txt(el, "BILLEDQTY"))
+    if alt_unit:        # e.g. 140 PCS = 144.2 KGS: what Tally stored, not always the item's usual conversion
+        line["alt_quantity"], line["alt_unit"] = q(abs(alt) if inward else -abs(alt)), alt_unit
     if qty == 0:
         line["direction"] = "in" if inward else "out"
     return line, allocs

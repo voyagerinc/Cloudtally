@@ -23,7 +23,7 @@ CSV_ROWS = {
     "trial-balance": "lines", "day-book": "vouchers", "ledger": "lines", "stock-summary": "items",
     "outstanding": "bills", "register": "vouchers", "ledger-balances": None, "stock-item": "lines",
     "sales-analysis": "rows", "purchase-analysis": "rows", "sales-rm-cost": "rows", "fifo-costing": "items", "fifo-monthly": "rows", "godown-summary": "rows",
-    "sales-fifo-cost": "rows", "sales-group-wise": "rows", "stock-journal": "rows", "material-transfer-wip": "rows",
+    "sales-fifo-cost": "rows", "sales-group-wise": "rows", "sales-group-units": "rows", "stock-journal": "rows", "material-transfer-wip": "rows",
     "material-transfer-wip-main": "rows", "wo-manufacturing": "rows",
     "gstr1": "rows", "gstr2": "rows", "hsn-summary": "rows", "einvoice": "rows", "eway-bill": "rows", "outstanding-monthly": "rows", "custom-fields": "rows", "cash-flow": "rows", "funds-flow": "rows",
 }
@@ -68,7 +68,13 @@ def _respond(db, user, company_id, name: str, data, fmt: str):
 
 Fmt = Literal["json", "csv", "xlsx"]
 XLSX_LABELS = {"sales-fifo-cost": {"cost": "FIFO cost"}, "sales-rm-cost": {"cost": "Raw-material cost"},
-               "sales-group-wise": {"cost": "FIFO cost", "group_path": "Under"}}
+               "sales-group-wise": {"cost": "FIFO cost", "group_path": "Under"},
+               "sales-group-units": {"group_path": "Under", "quantity": "Qty (main unit)", "unit": "Main unit",
+                                     "rate": "Sale rate (main unit)", "alt_quantity": "Qty (alternate unit)",
+                                     "alt_unit": "Alternate unit", "alt_rate": "Sale rate (alternate unit)",
+                                     "value": "Sales value", "cost_rate": "FIFO cost rate (main unit)",
+                                     "cost_alt_rate": "FIFO cost rate (alternate unit)", "cost": "FIFO cost",
+                                     "margin": "Gross profit", "margin_pct": "Margin %"}}
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
@@ -384,6 +390,20 @@ def sales_group_wise(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date
     return _respond(db, user, company_id, "sales-group-wise", data, format)
 
 
+@router.get("/sales-group-units")
+def sales_group_units(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                      to_date: date | None = None, party: uuid.UUID | None = None, category: str | None = None,
+                      stock_group: uuid.UUID | None = None, voucher_types: str | None = None,
+                      include_returns: bool = True, format: Fmt = "json"):
+    """Item group-wise sales in the main and the alternate unit, each with its sale rate and FIFO cost rate."""
+    authorize(db, user, company_id, Perm.report("sales-group-units"))
+    f, t = _default_period(db, company_id, from_date, to_date)
+    types = [x.strip() for x in voucher_types.split(",") if x.strip()] if voucher_types else None
+    data = analysis.group_wise(db, company_id, "sales", f, t, party=party, category=category, stock_group=stock_group,
+                               voucher_types=types, include_returns=include_returns, units=True)
+    return _respond(db, user, company_id, "sales-group-units", data, format)
+
+
 SJ_HEAD = ["Item", "Item group", "Qty", "Unit", "Rate", "Amount", "Godown", "Batch"]
 MT_HEAD = ["Item", "Item group", "Qty", "Rate", "Amount", "Godown", "Batch"]   # quantity shown with its unit: "1 Nos"
 MTM_HEAD = ["Item", "Item group", "Main group", "Qty", "Rate", "Amount", "Godown", "Batch"]   # main group: the one under Primary
@@ -639,7 +659,7 @@ def report_filters(company_id: uuid.UUID, db: DB, user: CurrentUser):
     from app.core.security import has_perm
     from app.models import Ledger, StockGroup, StockItem, Voucher
     allowed = [k for k in ("sales-analysis", "purchase-analysis", "fifo-costing", "fifo-monthly", "godown-summary", "sales-rm-cost", "sales-fifo-cost",
-                              "sales-group-wise")
+                              "sales-group-wise", "sales-group-units")
                if has_perm(db, user, company_id, Perm.report(k))]
     authorize(db, user, company_id, Perm.report(allowed[0] if allowed else "sales-analysis"))
     parties = db.execute(select(Ledger.id, Ledger.name).where(

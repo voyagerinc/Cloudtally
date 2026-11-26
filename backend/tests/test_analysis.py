@@ -287,3 +287,44 @@ def test_store_wise_stock_summary(db, books):
     assert sum(Decimal(x["closing_qty"]) for x in stores) == Decimal(whole["closing_qty"])
     assert sum(Decimal(x["closing_value"]) for x in stores) == Decimal(whole["closing_value"])
     assert sum(Decimal(x["out_cost"]) for x in stores) == Decimal(whole["out_cost"])
+
+
+def test_group_wise_sales_in_main_and_alternate_unit_with_sale_and_fifo_cost_rates(db, books):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+    from app.connectors.tally import codec, xmlutil as X
+    from app.core.security import hash_key
+    from app.main import app
+    from app.models import User, VoucherInventoryLine
+    assert X.alt_quantity(" 140 PCS =  144.2000 KGS") == (Decimal("144.2000"), "KGS")
+    assert X.alt_quantity(" 140 PCS") == (None, None)
+    el = X.parse("""<INVENTORYENTRIES.LIST><STOCKITEMNAME>Spool</STOCKITEMNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+        <ACTUALQTY> 140 PCS =  144.2000 KGS</ACTUALQTY><RATE>213.00/PCS</RATE><AMOUNT>29820.00</AMOUNT></INVENTORYENTRIES.LIST>""")
+    line, _ = codec._parse_inventory(el)
+    assert (line["quantity"], line["unit"], line["alt_quantity"], line["alt_unit"]) == ("-140.0000", "PCS", "-144.2000", "KGS")
+
+    item = db.query(StockItem).filter_by(company_id=books.id, name="Finished Cooler").one()
+    item.alternate_unit, item.conversion, item.denominator = "Kg", Decimal("2.5"), Decimal("1")   # 1 Nos = 2.5 Kg
+    db.commit()
+    r = analysis.group_wise(db, books.id, "sales", *SPAN, units=True)
+    [row] = [x for x in r["rows"] if x["type"] == "item"]
+    assert (row["quantity"], row["unit"], row["rate"]) == ("1", "Nos", "500.00")
+    assert (row["alt_quantity"], row["alt_unit"], row["alt_rate"]) == ("2.5", "Kg", "200.00")      # by the conversion
+    assert (row["cost"], row["cost_rate"], row["cost_alt_rate"]) == ("200.00", "200.00", "80.00")
+    sale = db.scalar(select(VoucherInventoryLine).where(VoucherInventoryLine.stock_item_id == item.id,
+                                                        VoucherInventoryLine.quantity < 0))
+    sale.alt_quantity, sale.alt_unit = Decimal("-4"), "Kg"           # what Tally stored on the invoice wins
+    db.commit()
+    r = analysis.group_wise(db, books.id, "sales", *SPAN, units=True)
+    [row] = [x for x in r["rows"] if x["type"] == "item"]
+    assert (row["alt_quantity"], row["alt_rate"], row["cost_alt_rate"]) == ("4", "125.00", "50.00")
+    assert r["total"] == analysis.group_wise(db, books.id, "sales", *SPAN)["total"]
+    db.add(User(username="gu-boss", api_key_hash=hash_key("k-gu"), is_superadmin=True))
+    db.commit()
+    api, h = TestClient(app), {"X-API-Key": "k-gu"}
+    url = f"/api/v1/reports/sales-group-units?company_id={books.id}&from_date={SPAN[0]}&to_date={SPAN[1]}"
+    assert api.get(url, headers=h).json()["tree"][0]["children"][0]["alt_unit"] == "Kg"
+    x = api.get(url + "&format=xlsx", headers=h)
+    assert x.status_code == 200 and x.content[:2] == b"PK"
+    labels = {p["key"] for g in api.get("/api/v1/permissions", headers=h).json()["groups"] for p in g["permissions"]}
+    assert "report.sales-group-units" in labels

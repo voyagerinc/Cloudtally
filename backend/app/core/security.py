@@ -59,6 +59,7 @@ REPORTS: dict[str, str] = {
     "sales-rm-cost": "Sales with raw-material cost",
     "sales-fifo-cost": "Sales register with FIFO cost",
     "sales-group-wise": "Item group-wise sales",
+    "sales-group-units": "Item group-wise sales (main & alternate unit, sale and FIFO cost rates)",
     "stock-journal": "Stock journal register (in / out)",
     "material-transfer-wip": "Material transfer to WIP",
     "material-transfer-wip-main": "Material transfer to WIP (main group)",

@@ -91,6 +91,14 @@ def quantity(value: str | None) -> tuple[Decimal, str | None]:
     return Decimal(m.group(0).replace(",", "")), rest
 
 
+def alt_quantity(value: str | None) -> tuple[Decimal | None, str | None]:
+    """' 140 PCS =  144.2000 KGS' -> (Decimal('144.2000'), 'KGS'): the alternate-unit figure; (None, None) without one."""
+    if not value or "=" not in value:
+        return None, None
+    qty, unit = quantity(value.split("=", 1)[1])
+    return (qty, unit) if unit else (None, None)
+
+
 def rate(value: str | None) -> Decimal:
     """'50.00/Nos' -> 50.00"""
     if not value:

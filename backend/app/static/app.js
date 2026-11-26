@@ -1139,7 +1139,7 @@ function reportUrl(fmt) {
     for (const k of ["item", "stock_group"]) if (f2[k]) p.set(k, f2[k]);
     if (sjType && name === "stock-journal") p.set("voucher_type", sjType);
   }
-  if (name in ANALYSIS || ["fifo-costing", "fifo-monthly", "godown-summary", "sales-group-wise"].includes(name)) {
+  if (name in ANALYSIS || ["fifo-costing", "fifo-monthly", "godown-summary", "sales-group-wise", "sales-group-units"].includes(name)) {
     for (const [k, v] of Object.entries(analysisParams())) p.set(k, v);
     if (name in ANALYSIS) p.set("by", $("#ra-by").value);
   }
@@ -1166,7 +1166,7 @@ async function loadAnalysisFilters() {
 }
 function showAnalysisControls() {
   const name = $("#r-name").value;
-  const trade = name in ANALYSIS, fifo = ["fifo-costing", "fifo-monthly", "godown-summary"].includes(name), grouped = name === "sales-group-wise";
+  const trade = name in ANALYSIS, fifo = ["fifo-costing", "fifo-monthly", "godown-summary"].includes(name), grouped = ["sales-group-wise", "sales-group-units"].includes(name);
   const journal = name === "stock-journal" || name.startsWith("material-transfer-wip") || name === "wo-manufacturing";
   $("#ra-filters").hidden = !(trade || fifo || grouped || journal);
   $("#ra-cat").closest("label").hidden = journal;
@@ -1380,6 +1380,39 @@ async function groupWiseView(el) {
     { label: "Value", num: true, get: (x) => money(x.n.value) },
     { label: "Share", num: true, get: (x) => share(x.n) },
     { label: "Tax", num: true, get: (x) => money(x.n.tax) },
+    { label: "FIFO cost", num: true, get: (x) => (x.n.cost == null ? "" : money(x.n.cost)) },
+    { label: "Gross profit", num: true, get: (x) => (x.n.margin == null ? "" : money(x.n.margin)) },
+    { label: "Margin %", num: true, get: (x) => (x.n.margin_pct == null ? "" : `${x.n.margin_pct}%`) },
+  ], roots, { title: "Stock group / item" });
+}
+
+// Item group-wise sales in the main and the alternate unit, each with its sale rate and FIFO cost rate.
+async function groupUnitsView(el) {
+  await loadAnalysisFilters();
+  const p = rParams(analysisParams());
+  p.delete("item");
+  const r = await api(`/reports/sales-group-units?${p}`);
+  const counted = r.voucher_types.filter((t) => t.counted).map((t) => t.name).join(", ");
+  const node = (n) => ({
+    label: n.name, n, children: n.kind === "group" ? n.children.map(node) : undefined,
+    open: n.kind === "item" ? () => drillTo(n.name, (e) => analysisView(e, "sales-fifo-cost", { by: "voucher", item: n.key })) : undefined,
+  });
+  const roots = r.tree.map(node);
+  roots.push({ label: "Total", n: { ...r.total, kind: "total" }, cls: "total" });
+  const rate = (v, unit) => (v == null ? "" : `${money(v)}${unit ? `<span class="muted small">/${esc(unit)}</span>` : ""}`);
+  el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · ${esc(counted || "no voucher types")}`
+    + `${r.include_returns ? " · returns deducted" : ""} · click a group to expand it, an item for its invoices</p>`
+    + `<p class="small muted">Alternate quantities are as Tally stored them on each invoice (e.g. 140 PCS = 144.2 KGS), else by the
+       item's conversion. A group shows a quantity and rate only when everything in it has the same unit. Rates are value ÷ quantity;
+       cost is FIFO.</p><div id="t"></div>`;
+  treeTable($("#t"), [
+    { label: "Qty (main)", num: true, get: (x) => qtyText(x.n.quantity, x.n.unit) },
+    { label: "Sale rate (main)", num: true, get: (x) => rate(x.n.rate, x.n.unit) },
+    { label: "Qty (alternate)", num: true, get: (x) => qtyText(x.n.alt_quantity, x.n.alt_unit) },
+    { label: "Sale rate (alternate)", num: true, get: (x) => rate(x.n.alt_rate, x.n.alt_unit) },
+    { label: "Sales value", num: true, get: (x) => money(x.n.value) },
+    { label: "FIFO cost rate (main)", num: true, get: (x) => rate(x.n.cost_rate, x.n.unit) },
+    { label: "FIFO cost rate (alternate)", num: true, get: (x) => rate(x.n.cost_alt_rate, x.n.alt_unit) },
     { label: "FIFO cost", num: true, get: (x) => (x.n.cost == null ? "" : money(x.n.cost)) },
     { label: "Gross profit", num: true, get: (x) => (x.n.margin == null ? "" : money(x.n.margin)) },
     { label: "Margin %", num: true, get: (x) => (x.n.margin_pct == null ? "" : `${x.n.margin_pct}%`) },
@@ -2042,7 +2075,7 @@ renderers.reports = async () => {
     "purchase-analysis": (el) => analysisView(el, "purchase-analysis"),
     "sales-rm-cost": (el) => analysisView(el, "sales-rm-cost"),
     "sales-fifo-cost": (el) => analysisView(el, "sales-fifo-cost"),
-    "sales-group-wise": groupWiseView, "stock-journal": (el) => stockJournalView(el), "material-transfer-wip": (el) => stockJournalView(el, "material-transfer-wip"),
+    "sales-group-wise": groupWiseView, "sales-group-units": groupUnitsView, "stock-journal": (el) => stockJournalView(el), "material-transfer-wip": (el) => stockJournalView(el, "material-transfer-wip"),
     "material-transfer-wip-main": (el) => stockJournalView(el, "material-transfer-wip-main"),
     "wo-manufacturing": woManufacturingView,
     "mis-finance-sheet": (el) => misSheetView(el), "mis-finance-sheet-coolace": (el) => misSheetView(el, "mis-finance-sheet-coolace"),

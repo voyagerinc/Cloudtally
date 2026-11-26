@@ -83,6 +83,7 @@ def to_doc(v: Voucher) -> dict:
             {"item": i.stock_item.name, "quantity": q(i.quantity), "unit": i.unit, "rate": str(i.rate),
              "discount_pct": str(i.discount_pct), "amount": m(i.amount), "godown": i.godown, "batch": i.batch,
              "ledger": i.ledger.name if i.ledger else None,
+             **({"alt_quantity": q(i.alt_quantity), "alt_unit": i.alt_unit} if i.alt_unit else {}),
              **({"direction": "in" if i.inward else "out"} if i.quantity == 0 else {})}
             for i in v.inventory_lines
         ],
@@ -338,6 +339,8 @@ def _apply(v: Voucher, data: dict, r: _Resolver, entries, inventory) -> None:
             line_no=idx, stock_item=item, quantity=qty, unit=i.get("unit") or item.unit, rate=rate,
             discount_pct=disc, amount=amount, godown=i.get("godown"), batch=i.get("batch"), ledger=ledger,
             inward=(i["direction"] == "in") if qty == ZERO else None,
+            alt_quantity=Decimal(str(i["alt_quantity"])) if i.get("alt_unit") and i.get("alt_quantity") not in (None, "") else None,
+            alt_unit=i.get("alt_unit") if i.get("alt_quantity") not in (None, "") else None,
         ))
 
 

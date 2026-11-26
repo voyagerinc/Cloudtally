@@ -141,6 +141,9 @@ class VoucherInventoryLine(IdMixin, Base):
     # Signed: inward positive, outward negative.
     quantity: Mapped[Decimal] = mapped_column(Qty)
     unit: Mapped[str | None] = mapped_column(String(40))
+    # The same quantity in the item's alternate unit, as Tally stored it (e.g. 140 PCS = 144.2 KGS), signed.
+    alt_quantity: Mapped[Decimal | None] = mapped_column(Qty)
+    alt_unit: Mapped[str | None] = mapped_column(String(40))
     rate: Mapped[Decimal] = mapped_column(Rate, default=ZERO)
     discount_pct: Mapped[Decimal] = mapped_column(Rate, default=ZERO)
     amount: Mapped[Decimal] = mapped_column(Money, default=ZERO)

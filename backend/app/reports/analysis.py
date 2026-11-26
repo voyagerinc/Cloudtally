@@ -159,7 +159,7 @@ def trade_analysis(db: Session, company_id: uuid.UUID, side: str, from_date: dat
                    by: str = "party", party: uuid.UUID | None = None, item: uuid.UUID | None = None,
                    category: str | None = None, stock_group: uuid.UUID | None = None,
                    voucher_types: list[str] | None = None, include_returns: bool = True,
-                   cost: str | None = None) -> dict:
+                   cost: str | None = None, alt: bool = False) -> dict:
     """Item lines of sales (or purchases) in the period, summed by party, date, month, item, category or
     stock group, or listed per voucher. Returns (credit/debit notes) count negative.
 
@@ -194,6 +194,14 @@ def trade_analysis(db: Session, company_id: uuid.UUID, side: str, from_date: dat
     agg: dict = {}
     lines_out = []
     total = {"quantity": ZERO, "value": ZERO, "tax": ZERO, "cost": ZERO, "vouchers": set(), "no_cost": 0}
+
+    def alt_of(line, it):
+        """The line's quantity in the alternate unit: as Tally stored it, else by the item's conversion."""
+        if line.alt_unit and line.alt_quantity is not None:
+            return abs(line.alt_quantity), line.alt_unit
+        if it.alternate_unit and it.conversion and it.denominator:
+            return abs(line.quantity) * Decimal(it.conversion) / Decimal(it.denominator), it.alternate_unit
+        return None, None
     for line, v, base, vtype, it, party_name in rows:
         if party and v.party_ledger_id != party or item and it.id != item or category and (it.category or "") != category \
                 or stock_group and it.group_id != stock_group:
@@ -219,7 +227,13 @@ def trade_analysis(db: Session, company_id: uuid.UUID, side: str, from_date: dat
                "voucher": (str(v.id), f"{vtype} {v.voucher_number}")}[by]
         row = agg.setdefault(key[0], {"key": key[0], "name": key[1], "quantity": ZERO, "value": ZERO, "tax": ZERO,
                                        "cost": ZERO, "vouchers": set(), "no_cost": 0, "units": set(), "date": str(v.voucher_date),
-                                       "party": party_name, "voucher_type": vtype, "voucher_number": v.voucher_number})
+                                       "party": party_name, "voucher_type": vtype, "voucher_number": v.voucher_number,
+                                       "alt_quantity": ZERO, "alt_units": set()})
+        if alt:
+            aq, au = alt_of(line, it)
+            row["alt_units"].add(au)
+            if aq is not None:
+                row["alt_quantity"] += aq * sign
         for target in (row, total):
             target["quantity"] += qty
             target["value"] += value
@@ -254,6 +268,10 @@ def trade_analysis(db: Session, company_id: uuid.UUID, side: str, from_date: dat
             res.update(cost=m(r["cost"]), margin=m(r["value"] - r["cost"]),
                        margin_pct=m(((r["value"] - r["cost"]) / r["value"] * 100) if r["value"] else ZERO),
                        lines_without_cost=r["no_cost"])
+        if alt:     # one alternate unit on every line: its quantity; else none (e.g. no alternate unit)
+            one = len(r["alt_units"]) == 1 and None not in r["alt_units"]
+            res.update(alt_quantity=_qty(r["alt_quantity"]) if one else None,
+                       alt_unit=next(iter(r["alt_units"])) if one else None)
         return res
 
     order = {"date": lambda r: r["key"], "month": lambda r: r["key"], "voucher": lambda r: (r["date"], r["name"])}
@@ -422,12 +440,13 @@ def fifo_line_costs(db: Session, company_id: uuid.UUID, to_date: date, item_ids)
 
 def group_wise(db: Session, company_id: uuid.UUID, side: str, from_date: date, to_date: date, *,
                party: uuid.UUID | None = None, category: str | None = None, stock_group: uuid.UUID | None = None,
-               voucher_types: list[str] | None = None, include_returns: bool = True, cost: str | None = "fifo") -> dict:
+               voucher_types: list[str] | None = None, include_returns: bool = True, cost: str | None = "fifo",
+               units: bool = False) -> dict:
     """Sales (or purchases) by stock group as a tree, like Tally's group-wise reports: each group holds its
     sub-groups and items, and its figures include everything under it. stock_group keeps that group's
     branch only, sub-groups included."""
     data = trade_analysis(db, company_id, side, from_date, to_date, by="item", party=party, category=category,
-                          voucher_types=voucher_types, include_returns=include_returns, cost=cost)
+                          voucher_types=voucher_types, include_returns=include_returns, cost=cost, alt=units)
     groups = {g.id: g for g in db.scalars(select(StockGroup).where(StockGroup.company_id == company_id))}
     item_group = dict(db.execute(select(StockItem.id, StockItem.group_id).where(StockItem.company_id == company_id)).all())
     costed = cost is not None
@@ -442,7 +461,7 @@ def group_wise(db: Session, company_id: uuid.UUID, side: str, from_date: date, t
 
     def blank(key, name, kind):
         return {"key": key, "name": name, "kind": kind, "quantity": ZERO, "value": ZERO, "tax": ZERO, "cost": ZERO,
-                "no_cost": 0, "items": 0, "units": set(), "children": []}
+                "no_cost": 0, "items": 0, "units": set(), "children": [], "alt_quantity": ZERO, "alt_units": set()}
 
     nodes = {}
     roots = []
@@ -453,7 +472,8 @@ def group_wise(db: Session, company_id: uuid.UUID, side: str, from_date: date, t
             continue
         leaf = {"key": r["key"], "name": r["name"], "kind": "item", "quantity": r["quantity"], "unit": r["unit"],
                 "value": r["value"], "tax": r["tax"], "vouchers": r["vouchers"],
-                **({k: r[k] for k in ("cost", "margin", "margin_pct", "lines_without_cost")} if costed else {})}
+                **({k: r[k] for k in ("cost", "margin", "margin_pct", "lines_without_cost")} if costed else {}),
+                **({"alt_quantity": r["alt_quantity"], "alt_unit": r["alt_unit"]} if units else {})}
         parent_list = roots
         # build from the top: the root group first
         for g in reversed(path):
@@ -476,13 +496,26 @@ def group_wise(db: Session, company_id: uuid.UUID, side: str, from_date: date, t
             if r["quantity"] is not None and r["unit"]:
                 n["quantity"] += Decimal(r["quantity"])
             n["units"].add(r["unit"] if r["quantity"] is not None else None)
+            if units:
+                n["alt_units"].add(r["alt_unit"] if r["alt_quantity"] is not None else None)
+                if r["alt_quantity"] is not None:
+                    n["alt_quantity"] += Decimal(r["alt_quantity"])
             if costed:
                 n["cost"] += Decimal(r["cost"])
                 n["no_cost"] += r["lines_without_cost"]
 
+    def with_rates(out):
+        """Sale rate and FIFO cost rate per main unit and per alternate unit."""
+        q = Decimal(out["quantity"]) if out.get("quantity") is not None else ZERO
+        aq = Decimal(out["alt_quantity"]) if out.get("alt_quantity") is not None else ZERO
+        out.update(rate=_rate(out["value"], q), alt_rate=_rate(out["value"], aq))
+        if costed:
+            out.update(cost_rate=_rate(out["cost"], q), cost_alt_rate=_rate(out["cost"], aq))
+        return out
+
     def finish(n):
         if n["kind"] == "item":
-            return n
+            return with_rates(n) if units else n
         one_unit = len(n["units"]) == 1 and None not in n["units"]
         out = {"key": n["key"], "name": n["name"], "kind": "group", "items": n["items"],
                "quantity": _qty(n["quantity"]) if one_unit else None, "unit": next(iter(n["units"])) if one_unit else None,
@@ -491,6 +524,11 @@ def group_wise(db: Session, company_id: uuid.UUID, side: str, from_date: date, t
             out.update(cost=m(n["cost"]), margin=m(n["value"] - n["cost"]),
                        margin_pct=m((n["value"] - n["cost"]) / n["value"] * 100) if n["value"] else None,
                        lines_without_cost=n["no_cost"])
+        if units:
+            one_alt = len(n["alt_units"]) == 1 and None not in n["alt_units"]
+            out.update(alt_quantity=_qty(n["alt_quantity"]) if one_alt else None,
+                       alt_unit=next(iter(n["alt_units"])) if one_alt else None)
+            with_rates(out)
         kids = [finish(c) for c in n["children"]]
         # groups first, then items, each by value (largest first) as in Tally's group summary
         out["children"] = sorted(kids, key=lambda c: (c["kind"] != "group", -abs(Decimal(c["value"]))))
@@ -507,10 +545,13 @@ def group_wise(db: Session, company_id: uuid.UUID, side: str, from_date: date, t
 
     rows = []   # flat, for CSV and Excel: one row per group and item, with its level and group path
 
+    cols = (("quantity", "unit", "rate", "alt_quantity", "alt_unit", "alt_rate", "value", "tax",
+             "cost_rate", "cost_alt_rate", "cost", "margin", "margin_pct") if units
+            else ("quantity", "unit", "value", "tax", "cost", "margin", "margin_pct"))
+
     def flatten(n, level, path):
         rows.append({"level": level, "type": n["kind"], "group_path": " > ".join(path), "name": n["name"],
-                     **{k: n.get(k) for k in ("quantity", "unit", "value", "tax", "cost", "margin", "margin_pct")
-                        if k in n}})
+                     **{k: n.get(k) for k in cols if k in n}})
         for c in n.get("children", []):
             flatten(c, level + 1, path + [n["name"]])
     for n in tree:
