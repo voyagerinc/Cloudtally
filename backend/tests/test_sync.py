@@ -1394,3 +1394,18 @@ def test_a_master_gone_from_tally_can_be_replaced_by_a_similar_one_here(db, comp
     assert r["saved"] == 1 and r["still"] == 0
     assert api.get(f"/api/v1/sync/inbox/failures?{q}", headers=h).json()["total"] == 0
     assert db.scalar(select(AuditEvent).where(AuditEvent.action == "sync.inbox.use_master"))
+
+
+
+def test_godowns_come_with_their_parent_from_tally(db, company, tc, mock):
+    """The store group of a godown (its parent in Tally) is kept, also for godowns read earlier."""
+    from app.models import Godown
+    tc.add_godown("BASEMENT")
+    sync()
+    assert db.scalar(select(Godown).where(Godown.company_id == company.id, Godown.name == "BASEMENT")).parent_id is None
+    tc.add_godown("MAIN STORE")
+    tc.godowns["BASEMENT"]["parent"] = "MAIN STORE"     # moved under a store group; BASEMENT itself not re-sent
+    sync()
+    db.expire_all()
+    g = {x.name: x for x in db.scalars(select(Godown).where(Godown.company_id == company.id))}
+    assert g["BASEMENT"].parent_id == g["MAIN STORE"].id

@@ -51,6 +51,7 @@ class MockCompany:
         self.vtypes: dict[str, dict] = {}
         self.items: dict[str, dict] = {}
         self.stock_groups: dict[str, dict] = {}
+        self.godowns: dict[str, dict] = {}
         self.vouchers: dict[int, etree._Element] = {}
         for name_, parent, rev, pos in DEFAULT_GROUPS:
             self.groups[name_] = self._master(name_, parent=parent, isrevenue=rev, isdeemedpositive=pos)
@@ -62,7 +63,8 @@ class MockCompany:
         return max((int(v.findtext("ALTERID")) for v in self.vouchers.values()), default=0)
 
     def alt_mst_id(self) -> int:
-        return max((r["alter_id"] for store in (self.groups, self.ledgers, self.vtypes, self.items, self.stock_groups)
+        return max((r["alter_id"] for store in (self.groups, self.ledgers, self.vtypes, self.items, self.stock_groups,
+                                                     self.godowns)
                     for r in store.values()), default=0)
 
     def _next_alter(self) -> int:
@@ -81,6 +83,10 @@ class MockCompany:
     def add_item(self, name, unit="Nos", parent=None, **extra) -> dict:
         self.items[name] = self._master(name, parent=parent, baseunits=unit, **extra)
         return self.items[name]
+
+    def add_godown(self, name, parent=None, **extra) -> dict:
+        self.godowns[name] = self._master(name, parent=parent, **extra)
+        return self.godowns[name]
 
     def add_stock_group(self, name, parent=None, **extra) -> dict:
         self.stock_groups[name] = self._master(name, parent=parent, **extra)
@@ -219,7 +225,8 @@ class MockTally:
                     parts.append(etree.tostring(el, encoding="unicode"))
         else:
             store = {"Group": company.groups, "Ledger": company.ledgers, "Voucher Type": company.vtypes,
-                     "Stock Item": company.items, "Stock Group": company.stock_groups}.get(ctype, {})
+                     "Stock Item": company.items, "Stock Group": company.stock_groups,
+                     "Godown": company.godowns}.get(ctype, {})
             tag = ctype.upper().replace(" ", "")
             for rec in store.values():
                 if not keep(rec["alter_id"], rec["master_id"], None, rec["name"]):

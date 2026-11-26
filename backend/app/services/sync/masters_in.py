@@ -161,6 +161,13 @@ class MasterImporter:
 
     def godowns(self, records: list[dict]) -> None:
         self._generic("godown", Godown, records, lambda g, r: setattr(g, "name", r["name"]))
+        # the parent godown (store group), linked once every godown exists
+        godowns = {g.name: g for g in self.db.scalars(select(Godown).where(Godown.company_id == self.company.id))}
+        for r in records:
+            g, parent = godowns.get(r.get("name")), godowns.get(r.get("parent") or "")
+            if g is not None:
+                g.parent_id = parent.id if parent and parent is not g else None
+        self.db.flush()
 
     GST_FIELDS = ("hsn_code", "hsn_description", "gst_rate", "gst_rates", "taxability")
 
@@ -240,7 +247,9 @@ class MasterImporter:
         for n, (ctype, fetch, method) in enumerate(self.SPECS):
             if on_type:
                 on_type(n, len(self.SPECS), ctype.lower() + "s")
-            records = client.masters(ctype, fetch, since_alter_id=since_alter_id)
+            # Godowns: always the whole (short) list, so that every godown's parent is linked, also of
+            # godowns read before their parent was kept.
+            records = client.masters(ctype, fetch, since_alter_id=None if ctype == "Godown" else since_alter_id)
             getattr(self, method)(records)
             for r in records:
                 self.max_alter_id = max(self.max_alter_id, r.get("alter_id") or 0)
