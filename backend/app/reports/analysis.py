@@ -3,7 +3,7 @@ import bisect
 import re
 import uuid
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -292,7 +292,7 @@ def _fifo_moves(db: Session, company_id: uuid.UUID, to_date: date, item_ids,
     return moves
 
 
-def _run_fifo(it: StockItem, moves: list, from_date: date):
+def _run_fifo(it: StockItem, moves: list, from_date: date, monthly: dict | None = None):
     """Walks one item's movements first-in-first-out.
 
     Returns (opening (qty, value) at from_date, remaining layers, period totals, cost per line id). An issue
@@ -306,19 +306,34 @@ def _run_fifo(it: StockItem, moves: list, from_date: date):
     acc = defaultdict(lambda: ZERO)
     line_cost: dict[uuid.UUID, Decimal] = {}
     snap = None
+    on_hand = lambda: (sum((q for q, _ in layers), ZERO), sum((v for _, v in layers), ZERO))  # noqa: E731
+    if monthly is not None:
+        monthly.update(snaps=[], acc=defaultdict(lambda: defaultdict(lambda: ZERO)), i=0)
+    month_acc = None
+
+    def add(key, value):
+        acc[key] += value
+        if month_acc is not None:
+            month_acc[key] += value
     # Same day: receipts before issues, so a purchase and its sale on one date do not go negative.
     for d, line, base in sorted(moves, key=lambda x: (x[0], not _inward(x[1]))):
         if snap is None and d >= from_date:
             snap = (sum((q for q, _ in layers), ZERO), sum((v for _, v in layers), ZERO))
         in_period = d >= from_date
+        if monthly is not None:
+            marks = monthly["marks"]
+            while monthly["i"] < len(marks) and d >= marks[monthly["i"]]:
+                monthly["snaps"].append(on_hand())
+                monthly["i"] += 1
+            month_acc = monthly["acc"][d.strftime("%Y-%m")] if in_period else None
         qty, value = abs(line.quantity), line.amount
         if _inward(line):
             if base == "Credit Note" and qty:       # goods returned by a customer
                 value = qty * (issue_rate if issue_rate is not None else last_rate)
                 line_cost[line.id] = value
                 if in_period:
-                    acc["returned_value"] += line.amount
-                    acc["returned_cost"] += value
+                    add("returned_value", line.amount)
+                    add("returned_cost", value)
             if qty:
                 layers.append([qty, value])
                 if base != "Credit Note":
@@ -326,8 +341,8 @@ def _run_fifo(it: StockItem, moves: list, from_date: date):
             elif layers:
                 layers[-1][1] += value          # value-only receipt (e.g. freight added to the last lot)
             if in_period:
-                acc["in_qty"] += qty
-                acc["in_value"] += value
+                add("in_qty", qty)
+                add("in_value", value)
             continue
         cost, need = ZERO, qty
         while need > 0 and layers:
@@ -342,7 +357,7 @@ def _run_fifo(it: StockItem, moves: list, from_date: date):
         if need > 0:                            # issued more than on hand
             cost += need * last_rate
             if in_period:
-                acc["short_qty"] += need
+                add("short_qty", need)
         if qty == 0 and value:                  # value-only issue
             cost = value
             if layers:
@@ -351,14 +366,17 @@ def _run_fifo(it: StockItem, moves: list, from_date: date):
             issue_rate = cost / qty
         line_cost[line.id] = cost
         if in_period:
-            acc["out_qty"] += qty
-            acc["out_cost"] += cost
+            add("out_qty", qty)
+            add("out_cost", cost)
             if base == "Sales":                 # gross profit is about sales, not issues to production
-                acc["sold_qty"] += qty
-                acc["sold_value"] += value
-                acc["sold_cost"] += cost
+                add("sold_qty", qty)
+                add("sold_value", value)
+                add("sold_cost", cost)
     if snap is None:
         snap = (sum((q for q, _ in layers), ZERO), sum((v for _, v in layers), ZERO))
+    if monthly is not None:
+        while len(monthly["snaps"]) < len(monthly["marks"]):
+            monthly["snaps"].append(on_hand())
     return snap, layers, acc, line_cost
 
 
@@ -538,6 +556,168 @@ def fifo_costing(db: Session, company_id: uuid.UUID, from_date: date, to_date: d
     out_rows.sort(key=lambda r: r["item"].lower())
     return {"from": str(from_date), "to": str(to_date), "method": "FIFO", "items": out_rows,
             "total": {k: m(v) for k, v in totals.items()} | {"gross_profit": m(totals["sold_value"] - totals["sold_cost"])}}
+
+
+def _rate(value: Decimal, qty: Decimal) -> str | None:
+    """Value per unit, or None when there is no quantity."""
+    return m(Decimal(value) / Decimal(qty)) if qty else None
+
+
+def fifo_monthly(db: Session, company_id: uuid.UUID, from_date: date, to_date: date, *, item: uuid.UUID | None = None,
+                 category: str | None = None, stock_group: uuid.UUID | None = None) -> dict:
+    """FIFO stock costing month by month: for each item and month of the period, opening, inward, outward
+    (at FIFO cost) and closing, quantity and value. A month's closing is the next month's opening."""
+    from app.reports.mis import months_in
+    months = months_in(from_date, to_date)
+    marks = [max(mo, from_date) for mo in months] + [to_date + timedelta(days=1)]
+    keys = [mo.strftime("%Y-%m") for mo in months]
+    items = {i.id: i for i in db.scalars(select(StockItem).where(StockItem.company_id == company_id))
+             if (not item or i.id == item) and (not category or (i.category or "") == category)
+             and (not stock_group or i.group_id == stock_group)}
+    moves = _fifo_moves(db, company_id, to_date, items)
+    groups = _group_names(db, company_id)
+    # the parent group: the group straight under Primary that the item's group sits in (itself when it is one)
+    parent = _main_groups(db, company_id)
+    fields = ("opening_value", "in_value", "out_cost", "closing_value")
+    month_totals = {k: dict.fromkeys(fields, ZERO) for k in keys}
+    total = dict.fromkeys(fields, ZERO)
+    out_rows, rows = [], []
+    for iid, it in items.items():
+        mon: dict = {"marks": marks}
+        _, _, acc, _ = _run_fifo(it, moves.get(iid, []), from_date, monthly=mon)
+        snaps = mon["snaps"]
+        if not acc and not snaps[0][0] and not snaps[-1][0] and not snaps[0][1] and not snaps[-1][1]:
+            continue
+        mrows = []
+        for n, k in enumerate(keys):
+            a = mon["acc"].get(k, {})
+            (oq, ov), (cq, cv) = snaps[n], snaps[n + 1]
+            iq, iv = a.get("in_qty", ZERO), a.get("in_value", ZERO)
+            uq, uv = a.get("out_qty", ZERO), a.get("out_cost", ZERO)
+            r = {"month": k, "label": months[n].strftime("%b %Y"),
+                 "opening_qty": _qty(oq), "opening_rate": _rate(ov, oq), "opening_value": m(ov),
+                 "in_qty": _qty(iq), "in_rate": _rate(iv, iq), "in_value": m(iv),
+                 "out_qty": _qty(uq), "out_rate": _rate(uv, uq), "out_cost": m(uv),
+                 "closing_qty": _qty(cq), "closing_rate": _rate(cv, cq), "closing_value": m(cv),
+                 "short_qty": _qty(a["short_qty"]) if a.get("short_qty") else None}
+            mrows.append(r)
+            for f, v in (("opening_value", ov), ("in_value", a.get("in_value", ZERO)),
+                         ("out_cost", a.get("out_cost", ZERO)), ("closing_value", cv)):
+                month_totals[k][f] += v
+            rows.append({"item": it.name, "stock_group": groups.get(it.group_id),
+                         "parent_group": parent.get(it.group_id), "unit": it.unit, "month": r["label"],
+                         **{f: r[f] for f in ("opening_qty", "opening_rate", "opening_value", "in_qty", "in_rate",
+                                              "in_value", "out_qty", "out_rate", "out_cost", "closing_qty",
+                                              "closing_rate", "closing_value")}})
+        (oq, ov), (cq, cv) = snaps[0], snaps[-1]
+        out_rows.append({"item_id": str(iid), "item": it.name, "unit": it.unit, "category": it.category,
+                         "stock_group": groups.get(it.group_id), "parent_group": parent.get(it.group_id),
+                         "opening_qty": _qty(oq), "opening_rate": _rate(ov, oq), "opening_value": m(ov),
+                         "in_qty": _qty(acc["in_qty"]), "in_rate": _rate(acc["in_value"], acc["in_qty"]),
+                         "in_value": m(acc["in_value"]),
+                         "out_qty": _qty(acc["out_qty"]), "out_rate": _rate(acc["out_cost"], acc["out_qty"]),
+                         "out_cost": m(acc["out_cost"]),
+                         "closing_qty": _qty(cq), "closing_rate": _rate(cv, cq), "closing_value": m(cv),
+                         "short_qty": _qty(acc["short_qty"]) if acc["short_qty"] else None, "months": mrows})
+        for f, v in (("opening_value", ov), ("in_value", acc["in_value"]), ("out_cost", acc["out_cost"]),
+                     ("closing_value", cv)):
+            total[f] += v
+    out_rows.sort(key=lambda r: r["item"].lower())
+    rows.sort(key=lambda r: (r["item"].lower(), r["month"]))
+    return {"from": str(from_date), "to": str(to_date), "method": "FIFO",
+            "months": [{"key": k, "label": mo.strftime("%b %Y")} for k, mo in zip(keys, months)],
+            "items": out_rows, "rows": rows, "total": {k: m(v) for k, v in total.items()},
+            "month_totals": [{"month": k, "label": mo.strftime("%b %Y"), **{f: m(v) for f, v in month_totals[k].items()}}
+                             for k, mo in zip(keys, months)]}
+
+
+MAIN_LOCATION = "Main Location"     # Tally's default godown
+
+
+def _main_godowns(db: Session, company_id) -> dict:
+    """Each godown's group: the godown straight under Primary that it sits in (itself when it is one)."""
+    from app.models import Godown
+    gs = {g.id: g for g in db.scalars(select(Godown).where(Godown.company_id == company_id))}
+    out = {}
+    for g in gs.values():
+        top, seen = g, set()
+        while top.parent_id in gs and top.id not in seen:
+            seen.add(top.id)
+            top = gs[top.parent_id]
+        out[g.name] = top.name
+    return out
+
+
+def _godown_parents(db: Session, company_id) -> dict:
+    """Each godown's own parent (its store group), by name; itself when it is straight under Primary."""
+    from app.models import Godown
+    gs = {g.id: g for g in db.scalars(select(Godown).where(Godown.company_id == company_id))}
+    return {g.name: (gs[g.parent_id].name if g.parent_id in gs else g.name) for g in gs.values()}
+
+
+def godown_summary(db: Session, company_id: uuid.UUID, from_date: date, to_date: date, *, item: uuid.UUID | None = None,
+                   category: str | None = None, stock_group: uuid.UUID | None = None) -> dict:
+    """Stock by store (godown) and item for the period: opening, inward, outward and closing, quantity, rate
+    and value. Quantities are those of each godown, as Tally keeps them (they may go below zero); outward is
+    at FIFO cost (of the item as a whole), inward at its value; opening and closing are valued at the item's
+    FIFO rate on those days. Where an item went below zero, its quantities here are Tally's, while the FIFO
+    report cannot hold less than nothing."""
+    items = {i.id: i for i in db.scalars(select(StockItem).where(StockItem.company_id == company_id))
+             if (not item or i.id == item) and (not category or (i.category or "") == category)
+             and (not stock_group or i.group_id == stock_group)}
+    moves = _fifo_moves(db, company_id, to_date, items)
+    groups, main_groups = _group_names(db, company_id), _main_groups(db, company_id)
+    store_group = _main_godowns(db, company_id)         # store group: the godown straight under Primary
+    store_parent = _godown_parents(db, company_id)      # parent store group: the godown's own parent
+    rows = []
+    for iid, it in items.items():
+        mv = moves.get(iid, [])
+        snap, layers, acc, line_cost = _run_fifo(it, mv, from_date)
+        close_q, close_v = sum((q for q, _ in layers), ZERO), sum((v for _, v in layers), ZERO)
+        if not mv and not snap[0] and not close_q:
+            continue
+        open_rate = snap[1] / snap[0] if snap[0] else None
+        close_rate = close_v / close_q if close_q else None
+        by = defaultdict(lambda: {"oq": ZERO, "iq": ZERO, "iv": ZERO, "uq": ZERO, "uv": ZERO})
+        allocs = it.opening_allocations or []
+        for a in allocs:
+            by[a.get("godown") or MAIN_LOCATION]["oq"] += Decimal(str(a.get("qty") or 0))
+        if not allocs and it.opening_qty:
+            by[MAIN_LOCATION]["oq"] += Decimal(it.opening_qty)
+        for d, line, base in mv:
+            g = by[line.godown or MAIN_LOCATION]
+            qty = abs(line.quantity)
+            inward = _inward(line)
+            if d < from_date:
+                g["oq"] += qty if inward else -qty
+            elif inward:
+                g["iq"] += qty
+                g["iv"] += line_cost.get(line.id, line.amount) if base == "Credit Note" else line.amount
+            else:
+                g["uq"] += qty
+                g["uv"] += line_cost.get(line.id, ZERO)
+        for name, g in by.items():
+            cq = g["oq"] + g["iq"] - g["uq"]
+            if not any((g["oq"], g["iq"], g["uq"], cq, g["iv"], g["uv"])):     # keep value-only lines (freight ...)
+                continue
+            ov = g["oq"] * open_rate if open_rate is not None else ZERO
+            cv = cq * close_rate if close_rate is not None else ZERO
+            rows.append({"store": name, "store_group": store_group.get(name, name),
+                         "store_parent": store_parent.get(name, name), "item_id": str(iid),
+                         "item": it.name, "stock_group": groups.get(it.group_id),
+                         "parent_group": _main_groups_name(main_groups, it.group_id), "unit": it.unit,
+                         "opening_qty": _qty(g["oq"]), "opening_rate": _rate(ov, g["oq"]), "opening_value": m(ov),
+                         "in_qty": _qty(g["iq"]), "in_rate": _rate(g["iv"], g["iq"]), "in_value": m(g["iv"]),
+                         "out_qty": _qty(g["uq"]), "out_rate": _rate(g["uv"], g["uq"]), "out_cost": m(g["uv"]),
+                         "closing_qty": _qty(cq), "closing_rate": _rate(cv, cq), "closing_value": m(cv)})
+    rows.sort(key=lambda r: (r["store"].casefold(), r["item"].casefold()))
+    total = {k: m(sum((Decimal(r[k]) for r in rows), ZERO)) for k in ("opening_value", "in_value", "out_cost", "closing_value")}
+    return {"from": str(from_date), "to": str(to_date), "rows": rows, "total": total,
+            "stores": len({r["store"] for r in rows}), "items": len({r["item_id"] for r in rows})}
+
+
+def _main_groups_name(main_groups: dict, group_id) -> str | None:
+    return main_groups.get(group_id) if group_id else None
 
 
 # ------------------------------------------------------------------ stock journal register (in / out)

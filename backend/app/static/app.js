@@ -1113,7 +1113,7 @@ function reportUrl(fmt) {
     for (const k of ["item", "stock_group"]) if (f2[k]) p.set(k, f2[k]);
     if (sjType && name === "stock-journal") p.set("voucher_type", sjType);
   }
-  if (name in ANALYSIS || name === "fifo-costing" || name === "sales-group-wise") {
+  if (name in ANALYSIS || ["fifo-costing", "fifo-monthly", "godown-summary", "sales-group-wise"].includes(name)) {
     for (const [k, v] of Object.entries(analysisParams())) p.set(k, v);
     if (name in ANALYSIS) p.set("by", $("#ra-by").value);
   }
@@ -1140,7 +1140,7 @@ async function loadAnalysisFilters() {
 }
 function showAnalysisControls() {
   const name = $("#r-name").value;
-  const trade = name in ANALYSIS, fifo = name === "fifo-costing", grouped = name === "sales-group-wise";
+  const trade = name in ANALYSIS, fifo = ["fifo-costing", "fifo-monthly", "godown-summary"].includes(name), grouped = name === "sales-group-wise";
   const journal = name === "stock-journal" || name.startsWith("material-transfer-wip") || name === "wo-manufacturing";
   $("#ra-filters").hidden = !(trade || fifo || grouped || journal);
   $("#ra-cat").closest("label").hidden = journal;
@@ -1792,6 +1792,133 @@ async function fifoView(el) {
   draw();
 }
 
+// FIFO month by month: a row per month in the period, for all stock (and each group and item when expanded).
+async function fifoMonthlyView(el) {
+  await loadAnalysisFilters();
+  const r = await api(`/reports/fifo-monthly?${rParams(analysisParams())}`);
+  el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · valued first-in-first-out: every issue takes the cost of the
+    oldest stock still on hand · a month's closing is the next month's opening · expand a stock group and an item for its months;
+    click a month of an item for its movements</p>
+    <div class="mis-grid"><table class="mis fs"><thead><tr><th>Month</th><th class="num">Opening value</th><th class="num">Inward value</th>
+      <th class="num">Outward at FIFO cost</th><th class="num">Closing value</th></tr></thead><tbody>
+      ${r.month_totals.map((x) => `<tr><td>${esc(x.label)}</td><td class="num">${money(x.opening_value)}</td><td class="num">${money(x.in_value)}</td>
+        <td class="num">${money(x.out_cost)}</td><td class="num">${money(x.closing_value)}</td></tr>`).join("")}
+      <tr class="total"><td>Period</td><td class="num">${money(r.total.opening_value)}</td><td class="num">${money(r.total.in_value)}</td>
+        <td class="num">${money(r.total.out_cost)}</td><td class="num">${money(r.total.closing_value)}</td></tr></tbody></table></div>
+    <div class="row wrap"><nav class="subnav" id="fm-by"><button type="button" data-by="item">By item</button>
+      <button type="button" data-by="group">By stock group</button></nav>
+      <input id="fm-q" placeholder="Search item, stock group or parent group"></div><div id="t"></div>`;
+  let by = "item";
+  try { by = localStorage.getItem("erp_fifo_by") || "item"; } catch (_) { /* private window */ }
+  const draw = () => {
+    const q = $("#fm-q").value.trim().toLowerCase();
+    el.querySelectorAll("#fm-by button").forEach((b) => b.classList.toggle("active", b.dataset.by === by));
+    const shown = r.items.filter((i) => !q || [i.item, i.stock_group, i.parent_group].some((t) => (t || "").toLowerCase().includes(q)));
+    // an item, with its months under it
+    const itemNode = (x) => ({ label: x.item, x, isItem: true, items: [x], children: x.months.map((mo) => ({ label: mo.label,
+      x: { ...mo, unit: x.unit }, items: [mo], open: () => drillTo(`${x.item} · ${mo.label}`, (el2) => stockItemView(el2, x.item_id)) })) });
+    let roots;
+    if (by === "item") roots = shown.map(itemNode);                      // stock item wise, A to Z
+    else {
+      const groups = new Map();
+      for (const x of shown) {
+        const g = x.stock_group || "(no group)";
+        if (!groups.has(g)) groups.set(g, { label: g, items: [], children: [] });
+        groups.get(g).items.push(x);
+        groups.get(g).children.push(itemNode(x));
+      }
+      roots = [...groups.values()].sort((a, b) => a.label.localeCompare(b.label));
+    }
+    roots.push(q ? { label: "Total", items: shown, cls: "total" } : { label: "Total", total: r.total, cls: "total" });
+    const sum = (n, k) => (n.total ? money(n.total[k]) : rupees(n.items.reduce((a, x) => a + paise(x[k]), 0)));
+    const q2 = (k) => (n) => (n.x ? qtyText(n.x[k], n.x.unit) : "");
+    const rate = (k) => (n) => (n.x && n.x[k] ? money(n.x[k]) : "");    // an item's or a month's (groups mix units)
+    treeTable($("#t"), [
+      ...(by === "item" ? [{ label: "Stock group", get: (n) => (n.isItem ? esc(n.x.stock_group || "") : "") },
+        { label: "Parent group", get: (n) => (n.isItem ? esc(n.x.parent_group || "") : "") }] : []),
+      { label: "Opening qty", num: true, get: q2("opening_qty") }, { label: "Opening rate", num: true, get: rate("opening_rate") },
+      { label: "Opening value", num: true, get: (n) => sum(n, "opening_value") },
+      { label: "Inward qty", num: true, get: q2("in_qty") }, { label: "Inward rate", num: true, get: rate("in_rate") },
+      { label: "Inward value", num: true, get: (n) => sum(n, "in_value") },
+      { label: "Outward qty", num: true, get: q2("out_qty") }, { label: "Outward rate", num: true, get: rate("out_rate") },
+      { label: "Outward at FIFO cost", num: true, get: (n) => sum(n, "out_cost") },
+      { label: "Closing qty", num: true, get: q2("closing_qty") }, { label: "Closing rate", num: true, get: rate("closing_rate") },
+      { label: "Closing value", num: true, get: (n) => sum(n, "closing_value") },
+      { label: "", get: (n) => (n.x && n.x.short_qty ? `<span class="chip failed" title="Issued more than was in stock">short ${esc(n.x.short_qty)}</span>` : "") },
+    ], roots, { title: by === "item" ? "Stock item / month" : "Stock group / item / month", expandDepth: q && by === "group" ? 1 : 0 });
+  };
+  $("#fm-q").oninput = draw;
+  el.querySelectorAll("#fm-by button").forEach((b) => (b.onclick = () => {
+    by = b.dataset.by;
+    try { localStorage.setItem("erp_fifo_by", by); } catch (_) { /* private window */ }
+    draw();
+  }));
+  draw();
+}
+
+// Stock by store (godown) and item: By store (store > items) or By item (item > stores).
+async function godownSummaryView(el) {
+  await loadAnalysisFilters();
+  const r = await api(`/reports/godown-summary?${rParams(analysisParams())}`);
+  el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · ${r.stores} store(s), ${r.items} item(s) · quantities by store; outward at
+      FIFO cost, inward at its value, opening and closing at the item's FIFO rate · click an item for its movements</p>
+    <div class="cards">${[["Opening value", "opening_value"], ["Inward value", "in_value"], ["Outward at FIFO cost", "out_cost"], ["Closing value", "closing_value"]]
+      .map(([l, k]) => `<div class="card"><div class="k">${l}</div><div class="v">${money(r.total[k])}</div></div>`).join("")}</div>
+    <div class="row wrap"><nav class="subnav" id="gs-by"><button type="button" data-by="store">By store</button>
+      <button type="button" data-by="item">By item</button></nav>
+      <input id="gs-q" placeholder="Search store, store group, item or stock group"></div><div id="t"></div>`;
+  let by = "store";
+  try { by = localStorage.getItem("erp_store_by") || "store"; } catch (_) { /* private window */ }
+  const add = (a, x) => { for (const k of ["opening_qty", "in_qty", "out_qty", "closing_qty"]) a[k] = (a[k] || 0) + Number(x[k]);
+    for (const k of ["opening_value", "in_value", "out_cost", "closing_value"]) a[k] = (a[k] || 0) + paise(x[k]); };
+  const draw = () => {
+    const q = $("#gs-q").value.trim().toLowerCase();
+    el.querySelectorAll("#gs-by button").forEach((b) => b.classList.toggle("active", b.dataset.by === by));
+    const shown = r.rows.filter((x) => !q || [x.store, x.store_group, x.store_parent, x.item, x.stock_group, x.parent_group].some((t) => (t || "").toLowerCase().includes(q)));
+    const leafOpen = (x) => () => drillTo(`${x.item} · ${x.store}`, (el2) => stockItemView(el2, x.item_id));
+    const outer = new Map();
+    for (const x of shown) {
+      const key = by === "store" ? x.store : x.item_id;
+      if (!outer.has(key)) outer.set(key, by === "store"
+        ? { label: x.store, kind: "store", store: x, rows: [], children: [] }
+        : { label: x.item, kind: "item", item: x, unit: x.unit, rows: [], children: [], open: leafOpen(x) });
+      const n = outer.get(key);
+      n.rows.push(x);
+      n.children.push(by === "store" ? { label: x.item, kind: "item", item: x, unit: x.unit, rows: [x], open: leafOpen(x) }
+        : { label: x.store, kind: "store", store: x, unit: x.unit, rows: [x], open: leafOpen(x) });
+    }
+    const roots = [...outer.values()].sort((a, b) => a.label.localeCompare(b.label));
+    for (const n of roots) if (by === "item") delete n.open;
+    roots.push({ label: "Total", rows: shown, cls: "total" });
+    const sums = (n) => (n._s ||= n.rows.reduce((a, x) => (add(a, x), a), {}));
+    const sameUnit = (n) => n.unit != null;                       // an item (or one item in one store): its quantities add up
+    const qty = (k) => (n) => (sameUnit(n) ? qtyText(sums(n)[k], n.unit) : "");
+    const val = (k) => (n) => rupees(sums(n)[k] || 0);
+    const rate = (qk, vk) => (n) => { if (!sameUnit(n)) return ""; const s = sums(n); return s[qk] ? money(s[vk] / 100 / s[qk]) : ""; };
+    treeTable($("#t"), [
+      { label: "Store group", get: (n) => (n.kind === "store" ? esc(n.store.store_group || "") : "") },
+      { label: "Parent store group", get: (n) => (n.kind === "store" ? esc(n.store.store_parent || "") : "") },
+      { label: "Stock group", get: (n) => (n.kind === "item" ? esc(n.item.stock_group || "") : "") },
+      { label: "Parent group", get: (n) => (n.kind === "item" ? esc(n.item.parent_group || "") : "") },
+      { label: "Opening qty", num: true, get: qty("opening_qty") }, { label: "Opening rate", num: true, get: rate("opening_qty", "opening_value") },
+      { label: "Opening value", num: true, get: val("opening_value") },
+      { label: "Inward qty", num: true, get: qty("in_qty") }, { label: "Inward rate", num: true, get: rate("in_qty", "in_value") },
+      { label: "Inward value", num: true, get: val("in_value") },
+      { label: "Outward qty", num: true, get: qty("out_qty") }, { label: "Outward rate", num: true, get: rate("out_qty", "out_cost") },
+      { label: "Outward at FIFO cost", num: true, get: val("out_cost") },
+      { label: "Closing qty", num: true, get: qty("closing_qty") }, { label: "Closing rate", num: true, get: rate("closing_qty", "closing_value") },
+      { label: "Closing value", num: true, get: val("closing_value") },
+    ], roots, { title: by === "store" ? "Store / item" : "Item / store", expandDepth: q ? 1 : 0 });
+  };
+  $("#gs-q").oninput = draw;
+  el.querySelectorAll("#gs-by button").forEach((b) => (b.onclick = () => {
+    by = b.dataset.by;
+    try { localStorage.setItem("erp_store_by", by); } catch (_) { /* private window */ }
+    draw();
+  }));
+  draw();
+}
+
 $("#rform").onsubmit = (e) => { e.preventDefault(); renderers.reports(); };
 $("#r-csv").onclick = (e) => { e.preventDefault(); download(reportUrl("csv"), `${$("#r-name").value}.csv`); };
 $("#r-xlsx").onclick = (e) => { e.preventDefault(); download(reportUrl("xlsx"), `${$("#r-name").value}.xlsx`); };
@@ -1895,7 +2022,7 @@ renderers.reports = async () => {
     "mis-finance-sheet": (el) => misSheetView(el), "mis-finance-sheet-coolace": (el) => misSheetView(el, "mis-finance-sheet-coolace"),
     "mis-pl": misPlView, "mis-expense": misExpenseView, "mis-exp-breakup": (el) => misBreakupView(el),
     "mis-deferred": misDeferredView,
-    "fifo-costing": fifoView,
+    "fifo-costing": fifoView, "fifo-monthly": fifoMonthlyView, "godown-summary": godownSummaryView,
     gstr1: (el) => gstrView(el, "gstr1"), gstr2: (el) => gstrView(el, "gstr2"), "hsn-summary": hsnView,
     einvoice: einvoiceView, "eway-bill": ewayView, "custom-fields": customFieldsView, "cash-flow": cashFlowView, "funds-flow": fundsFlowView,
   };

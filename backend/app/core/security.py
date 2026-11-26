@@ -53,6 +53,8 @@ REPORTS: dict[str, str] = {
     "sales-analysis": "Sales analysis",
     "purchase-analysis": "Purchase analysis",
     "fifo-costing": "FIFO stock costing",
+    "fifo-monthly": "FIFO stock costing month by month",
+    "godown-summary": "Store-wise and item-wise stock summary",
     "sales-rm-cost": "Sales with raw-material cost",
     "sales-fifo-cost": "Sales register with FIFO cost",
     "sales-group-wise": "Item group-wise sales",

@@ -22,7 +22,7 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 CSV_ROWS = {
     "trial-balance": "lines", "day-book": "vouchers", "ledger": "lines", "stock-summary": "items",
     "outstanding": "bills", "register": "vouchers", "ledger-balances": None, "stock-item": "lines",
-    "sales-analysis": "rows", "purchase-analysis": "rows", "sales-rm-cost": "rows", "fifo-costing": "items",
+    "sales-analysis": "rows", "purchase-analysis": "rows", "sales-rm-cost": "rows", "fifo-costing": "items", "fifo-monthly": "rows", "godown-summary": "rows",
     "sales-fifo-cost": "rows", "sales-group-wise": "rows", "stock-journal": "rows", "material-transfer-wip": "rows",
     "material-transfer-wip-main": "rows", "wo-manufacturing": "rows",
     "gstr1": "rows", "gstr2": "rows", "hsn-summary": "rows", "einvoice": "rows", "eway-bill": "rows", "outstanding-monthly": "rows", "custom-fields": "rows", "cash-flow": "rows", "funds-flow": "rows",
@@ -610,13 +610,35 @@ def fifo_costing(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: da
     return _respond(db, user, company_id, "fifo-costing", data, format)
 
 
+@router.get("/fifo-monthly")
+def fifo_monthly(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                 to_date: date | None = None, item: uuid.UUID | None = None, category: str | None = None,
+                 stock_group: uuid.UUID | None = None, format: Fmt = "json"):
+    """FIFO stock costing month by month: opening, inward, outward and closing, quantity and value."""
+    authorize(db, user, company_id, Perm.report("fifo-monthly"))
+    f, t = _default_period(db, company_id, from_date, to_date)
+    data = analysis.fifo_monthly(db, company_id, f, t, item=item, category=category, stock_group=stock_group)
+    return _respond(db, user, company_id, "fifo-monthly", data, format)
+
+
+@router.get("/godown-summary")
+def godown_summary(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                   to_date: date | None = None, item: uuid.UUID | None = None, category: str | None = None,
+                   stock_group: uuid.UUID | None = None, format: Fmt = "json"):
+    """Stock by store (godown) and item: opening, inward, outward and closing, quantity, rate and value."""
+    authorize(db, user, company_id, Perm.report("godown-summary"))
+    f, t = _default_period(db, company_id, from_date, to_date)
+    data = analysis.godown_summary(db, company_id, f, t, item=item, category=category, stock_group=stock_group)
+    return _respond(db, user, company_id, "godown-summary", data, format)
+
+
 @router.get("/filters")
 def report_filters(company_id: uuid.UUID, db: DB, user: CurrentUser):
     """Choices for the analysis filters: parties, items, item categories and stock groups."""
     from sqlalchemy import func
     from app.core.security import has_perm
     from app.models import Ledger, StockGroup, StockItem, Voucher
-    allowed = [k for k in ("sales-analysis", "purchase-analysis", "fifo-costing", "sales-rm-cost", "sales-fifo-cost",
+    allowed = [k for k in ("sales-analysis", "purchase-analysis", "fifo-costing", "fifo-monthly", "godown-summary", "sales-rm-cost", "sales-fifo-cost",
                               "sales-group-wise")
                if has_perm(db, user, company_id, Perm.report(k))]
     authorize(db, user, company_id, Perm.report(allowed[0] if allowed else "sales-analysis"))

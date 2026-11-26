@@ -184,3 +184,106 @@ def test_fifo_closing_rate_on_a_date_is_the_default_rate_of_a_stock_line(db, boo
     r = TestClient(app).get(f"/api/v1/companies/{books.id}/masters/fifo-rates?as_of=2026-06-05&item=Component%20A&item=Finished%20Cooler",
                             headers={"X-API-Key": "k-fifo"}).json()
     assert r["Component A"]["rate"] == "112.50" and r["Finished Cooler"]["rate"] == "200.00"
+
+
+def test_fifo_month_by_month(db, books):
+    """Bought 10 at 100 in April and 10 at 120 in May; 4 issued in June take the April cost (100)."""
+    r = analysis.fifo_monthly(db, books.id, date(2026, 4, 1), date(2026, 6, 30))
+    assert [mo["label"] for mo in r["months"]] == ["Apr 2026", "May 2026", "Jun 2026"]
+    a = next(x for x in r["items"] if x["item"] == "Component A")
+    got = [(mo["opening_qty"], mo["opening_value"], mo["in_qty"], mo["in_value"], mo["out_qty"], mo["out_cost"],
+            mo["closing_qty"], mo["closing_value"]) for mo in a["months"]]
+    assert got == [("0", "0.00", "10", "1000.00", "0", "0.00", "10", "1000.00"),
+                   ("10", "1000.00", "10", "1200.00", "0", "0.00", "20", "2200.00"),
+                   ("20", "2200.00", "0", "0.00", "4", "400.00", "16", "1800.00")]
+    assert "parent_group" in a
+    rates = [(mo["opening_rate"], mo["in_rate"], mo["out_rate"], mo["closing_rate"]) for mo in a["months"]]
+    assert rates == [(None, "100.00", None, "100.00"), ("100.00", "120.00", None, "110.00"),
+                     ("110.00", None, "100.00", "112.50")]          # June: 4 out at April's 100; 16 left worth 1,800
+    # the period figures are those of the FIFO costing report, and each month's closing is the next opening
+    whole = next(x for x in analysis.fifo_costing(db, books.id, date(2026, 4, 1), date(2026, 6, 30))["items"]
+                 if x["item"] == "Component A")
+    assert (a["opening_value"], a["in_value"], a["out_cost"], a["closing_value"]) == \
+        (whole["opening_value"], whole["in_value"], whole["out_cost"], whole["closing_value"])
+    for item in r["items"]:
+        for prev, nxt in zip(item["months"], item["months"][1:]):
+            assert (prev["closing_qty"], prev["closing_value"]) == (nxt["opening_qty"], nxt["opening_value"])
+    june = r["month_totals"][2]
+    assert june["label"] == "Jun 2026" and june["closing_value"] == r["total"]["closing_value"]
+    # a period starting in June: its opening is May's closing
+    j = next(x for x in analysis.fifo_monthly(db, books.id, date(2026, 6, 1), date(2026, 6, 30))["items"]
+             if x["item"] == "Component A")
+    assert (j["opening_qty"], j["opening_value"]) == ("20", "2200.00") and len(j["months"]) == 1
+
+
+def test_fifo_month_by_month_api_and_excel(db, books):
+    import io
+    import zipfile
+    from app.core.security import hash_key
+    db.add(User(username="fm-boss", api_key_hash=hash_key("k-fm"), is_superadmin=True))
+    db.commit()
+    api, h = TestClient(app), {"X-API-Key": "k-fm"}
+    q = f"/api/v1/reports/fifo-monthly?company_id={books.id}&from_date=2026-04-01&to_date=2026-06-30"
+    j = api.get(q, headers=h).json()
+    assert len(j["months"]) == 3 and j["rows"][0]["opening_rate"] is None
+    x = api.get(q + "&format=xlsx", headers=h)
+    assert x.status_code == 200
+    sheet = zipfile.ZipFile(io.BytesIO(x.content)).read("xl/worksheets/sheet1.xml").decode()
+    assert "112.50" in sheet or "112.5" in sheet            # June's closing rate of Component A
+
+
+def test_fifo_month_by_month_shows_the_stock_group_and_its_parent(db, books):
+    from app.models import StockGroup
+    top = StockGroup(company_id=books.id, name="RAW MATERIAL")
+    db.add(top)
+    db.flush()
+    child = StockGroup(company_id=books.id, name="RAW MATERIAL COOLER", parent_id=top.id)
+    db.add(child)
+    db.flush()
+    leaf = StockGroup(company_id=books.id, name="FAN", parent_id=child.id)      # FAN > RAW MATERIAL COOLER > RAW MATERIAL > Primary
+    db.add(leaf)
+    db.flush()
+    db.query(StockItem).filter_by(company_id=books.id, name="Component A").one().group_id = leaf.id
+    db.query(StockItem).filter_by(company_id=books.id, name="Finished Cooler").one().group_id = top.id
+    db.commit()
+    r = analysis.fifo_monthly(db, books.id, date(2026, 4, 1), date(2026, 6, 30))
+    a = next(x for x in r["items"] if x["item"] == "Component A")
+    assert (a["stock_group"], a["parent_group"]) == ("FAN", "RAW MATERIAL")       # the group under Primary
+    f = next(x for x in r["items"] if x["item"] == "Finished Cooler")
+    assert (f["stock_group"], f["parent_group"]) == ("RAW MATERIAL", "RAW MATERIAL")   # itself, when straight under Primary
+    row = next(x for x in r["rows"] if x["item"] == "Component A")
+    assert list(row)[:3] == ["item", "stock_group", "parent_group"]
+
+
+
+def test_store_wise_stock_summary(db, books):
+    """Components bought into BASEMENT, 4 moved to the shop floor for production: each store has its own
+    quantities; values follow FIFO; the store's group (its parent godown) is shown."""
+    from app.models import Godown
+    top = Godown(company_id=books.id, name="MAIN STORE")
+    db.add(top)
+    db.flush()
+    mid = Godown(company_id=books.id, name="RAW MATERIAL STORE", parent_id=top.id)   # BASEMENT > RAW MATERIAL STORE > MAIN STORE
+    db.add(mid)
+    db.flush()
+    db.add(Godown(company_id=books.id, name="BASEMENT", parent_id=mid.id))
+    db.commit()
+    from sqlalchemy import select
+    from app.models import Voucher, VoucherInventoryLine
+    for line in db.scalars(select(VoucherInventoryLine).join(Voucher).where(Voucher.company_id == books.id)):
+        line.godown = "BASEMENT" if line.quantity > 0 and line.stock_item.name == "Component A" else "Shop Floor"
+    db.commit()
+    r = analysis.godown_summary(db, books.id, date(2026, 4, 1), date(2026, 6, 30))
+    by = {(x["store"], x["item"]): x for x in r["rows"]}
+    base, floor = by[("BASEMENT", "Component A")], by[("Shop Floor", "Component A")]
+    assert (base["in_qty"], base["in_value"], base["out_qty"], base["closing_qty"]) == ("20", "2200.00", "0", "20")
+    assert (floor["out_qty"], floor["out_cost"], floor["out_rate"], floor["closing_qty"]) == ("4", "400.00", "100.00", "-4")
+    assert (base["store_group"], base["store_parent"]) == ("MAIN STORE", "RAW MATERIAL STORE")
+    assert (floor["store_group"], floor["store_parent"]) == ("Shop Floor", "Shop Floor")    # a godown of its own
+    assert base["closing_rate"] == "112.50" and base["closing_value"] == "2250.00"    # 16 left worth 1,800: 112.50 each
+    whole = next(x for x in analysis.fifo_costing(db, books.id, date(2026, 4, 1), date(2026, 6, 30))["items"]
+                 if x["item"] == "Component A")
+    stores = [x for x in r["rows"] if x["item"] == "Component A"]
+    assert sum(Decimal(x["closing_qty"]) for x in stores) == Decimal(whole["closing_qty"])
+    assert sum(Decimal(x["closing_value"]) for x in stores) == Decimal(whole["closing_value"])
+    assert sum(Decimal(x["out_cost"]) for x in stores) == Decimal(whole["out_cost"])
