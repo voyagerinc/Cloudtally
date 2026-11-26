@@ -71,6 +71,8 @@ class UserCompanyAccess(Base):
     role: Mapped[str] = mapped_column(String(40))
     # Custom permission list chosen by the company admin; None means the role's defaults.
     permissions: Mapped[list | None] = mapped_column(JSON)
+    # Voucher type name-wise rights, e.g. {"Sales": ["read", "create"]}; None: every voucher type.
+    voucher_rights: Mapped[dict | None] = mapped_column(JSON)
     # Optional maker-checker: vouchers above this amount need approval for this user.
     approval_limit: Mapped[int | None] = mapped_column(Integer)
 

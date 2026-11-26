@@ -16,7 +16,8 @@ class Perm:
     MASTERS_READ = "masters.read"
     MASTERS_WRITE = "masters.write"
     VOUCHER_READ = "voucher.read"
-    VOUCHER_WRITE = "voucher.write"
+    VOUCHER_CREATE = "voucher.create"
+    VOUCHER_ALTER = "voucher.alter"
     VOUCHER_POST = "voucher.post"
     VOUCHER_APPROVE = "voucher.approve"
     VOUCHER_DELETE = "voucher.delete"
@@ -78,9 +79,10 @@ REPORTS: dict[str, str] = {
 
 # What the company admin sees when ticking permissions, grouped by area.
 PERM_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
-    ("Vouchers", [(Perm.VOUCHER_READ, "View vouchers"), (Perm.VOUCHER_WRITE, "Create and alter vouchers"),
-                  (Perm.VOUCHER_POST, "Post vouchers"), (Perm.VOUCHER_APPROVE, "Approve vouchers"),
-                  (Perm.VOUCHER_DELETE, "Cancel vouchers")]),
+    ("Vouchers", [(Perm.VOUCHER_READ, "View vouchers"), (Perm.VOUCHER_CREATE, "Create vouchers"),
+                  (Perm.VOUCHER_ALTER, "Alter vouchers"),
+                  (Perm.VOUCHER_DELETE, "Delete vouchers (made in the software, with remarks)"),
+                  (Perm.VOUCHER_POST, "Post and cancel vouchers"), (Perm.VOUCHER_APPROVE, "Approve vouchers")]),
     ("Masters", [(Perm.MASTERS_READ, "View ledgers and stock items"),
                  (Perm.MASTERS_WRITE, "Create and alter ledgers and stock items")]),
     ("Reports", [(Perm.REPORTS_READ, "All reports")] + [(Perm.report(k), v) for k, v in REPORTS.items()]
@@ -91,24 +93,36 @@ PERM_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
                         (Perm.COMPANY_MANAGE, "Company settings"), (Perm.PERIOD_LOCK, "Lock periods"),
                         (Perm.AUDIT_READ, "View the audit trail")]),
 ]
+# Older permission keys, read as the ones that replaced them ("create and alter" became two ticks).
+LEGACY_PERMS: dict[str, set[str]] = {"voucher.write": {Perm.VOUCHER_CREATE, Perm.VOUCHER_ALTER}}
+
+
+def upgrade_perms(perms) -> set[str]:
+    out = set()
+    for p in perms:
+        out |= LEGACY_PERMS.get(p, {p})
+    return out
+
+
 ALL_PERMS: set[str] = {p for _, perms in PERM_GROUPS for p, _ in perms} | {Perm.INTEGRATION, Perm.SYNC_MANAGE}
 # Only the company admin (manager) role runs Tally sync and changes the Tally connection.
 MANAGER_ONLY = {Perm.SYNC_MANAGE}
 
 _READ = {Perm.MASTERS_READ, Perm.VOUCHER_READ, Perm.REPORTS_READ}
+_WRITE = {Perm.VOUCHER_CREATE, Perm.VOUCHER_ALTER}
 ROLES: dict[str, set[str]] = {
     "owner": {v for k, v in vars(Perm).items() if k.isupper()},
     "accounts_admin": _READ | {
-        Perm.MASTERS_WRITE, Perm.VOUCHER_WRITE, Perm.VOUCHER_POST, Perm.VOUCHER_APPROVE, Perm.VOUCHER_DELETE,
+        Perm.MASTERS_WRITE, *_WRITE, Perm.VOUCHER_POST, Perm.VOUCHER_APPROVE, Perm.VOUCHER_DELETE,
         Perm.PERIOD_LOCK, Perm.EXPORT, Perm.AUDIT_READ, Perm.SYNC_READ, Perm.CONFLICT_RESOLVE,
     },
-    "accountant": _READ | {Perm.VOUCHER_WRITE, Perm.VOUCHER_POST, Perm.EXPORT, Perm.SYNC_READ},
-    "sales_purchase": _READ | {Perm.VOUCHER_WRITE},
-    "inventory": _READ | {Perm.VOUCHER_WRITE},
+    "accountant": _READ | _WRITE | {Perm.VOUCHER_POST, Perm.EXPORT, Perm.SYNC_READ},
+    "sales_purchase": _READ | _WRITE,
+    "inventory": _READ | _WRITE,
     "approver": _READ | {Perm.VOUCHER_APPROVE, Perm.VOUCHER_POST},
     "auditor": _READ | {Perm.AUDIT_READ, Perm.SYNC_READ, Perm.EXPORT},
     "reports_viewer": {Perm.REPORTS_READ},
-    "integration": _READ | {Perm.INTEGRATION, Perm.VOUCHER_WRITE, Perm.VOUCHER_POST, Perm.SYNC_READ},
+    "integration": _READ | _WRITE | {Perm.INTEGRATION, Perm.VOUCHER_POST, Perm.SYNC_READ},
 }
 ROLE_LABELS: dict[str, str] = {
     "owner": "Company admin", "accounts_admin": "Accounts admin", "accountant": "Accountant",
@@ -184,7 +198,7 @@ def role_for(db: Session, user: User, company_id: uuid.UUID) -> str | None:
 
 def perms_of(access: UserCompanyAccess) -> set[str]:
     """A custom permission list replaces the role's defaults."""
-    perms = set(access.permissions) & ALL_PERMS if access.permissions is not None else set(ROLES.get(access.role, set()))
+    perms = upgrade_perms(access.permissions) & ALL_PERMS if access.permissions is not None else set(ROLES.get(access.role, set()))
     return perms if access.role == "owner" else perms - MANAGER_ONLY
 
 
@@ -201,6 +215,29 @@ def allows(perms: set[str], perm: str) -> bool:
 
 def has_perm(db: Session, user: User, company_id: uuid.UUID, perm: str) -> bool:
     return allows(perms_for(db, user, company_id), perm)
+
+
+# ------------------------------------------------------------------ voucher type name-wise rights
+# On top of the voucher ticks: a user may be limited to some voucher types, and to some actions on each.
+VT_ACTIONS: dict[str, str] = {"read": "View", "create": "Create", "alter": "Alter", "delete": "Delete"}
+PERM_ACTION: dict[str, str] = {Perm.VOUCHER_READ: "read", Perm.VOUCHER_CREATE: "create",
+                               Perm.VOUCHER_ALTER: "alter", Perm.VOUCHER_DELETE: "delete"}
+
+
+def voucher_rights_for(db: Session, user: User, company_id: uuid.UUID) -> dict | None:
+    """{voucher type name: [actions]}, or None when every voucher type is allowed."""
+    if user.is_superadmin:
+        return None
+    access = db.get(UserCompanyAccess, (user.id, company_id))
+    return access.voucher_rights if access else {}
+
+
+def type_allows(rights: dict | None, type_name: str, action: str) -> bool:
+    return rights is None or action in (rights.get(type_name) or ())
+
+
+def readable_types(rights: dict | None) -> list[str] | None:
+    return None if rights is None else [t for t, acts in rights.items() if "read" in acts]
 
 
 def allowed_company_ids(db: Session, user: User) -> list[uuid.UUID] | None:

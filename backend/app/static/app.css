@@ -149,6 +149,10 @@ table.fs tr.total td { font-weight: 600; border-top: 1px solid var(--line); }
 .perm-groups legend { font-weight: 600; padding: 0 4px; }
 .perm-groups label.check { margin: 4px 0; }
 .perm-groups label.check.sub { padding-left: 18px; }
+.vt-rights { max-height: 320px; overflow: auto; margin: 6px 0 10px; }
+.vt-rights table { width: 100%; }
+.vt-rights th.c, .vt-rights td.c { text-align: center; width: 70px; }
+.vt-rights thead th { position: sticky; top: 0; background: var(--panel, var(--bg)); }
 button.danger { color: var(--bad); border-color: var(--bad); }
 tr.muted td { color: var(--muted); }
 .chip.active { background: var(--chip-ok); color: var(--ok); }

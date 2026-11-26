@@ -954,7 +954,7 @@ def test_many_vouchers_missing_in_tally_are_not_deleted(db, company, tc, mock, m
     assert db.scalar(select(func.count()).select_from(Voucher).where(Voucher.status == VoucherStatus.DELETED)) == 0
 
 
-def test_only_an_admin_deletes_and_only_software_vouchers_with_remarks(db, company, tc):
+def test_a_user_given_delete_deletes_only_software_vouchers_with_remarks(db, company, tc):
     from fastapi.testclient import TestClient
     from app.core.security import hash_key
     from app.main import app
@@ -965,16 +965,21 @@ def test_only_an_admin_deletes_and_only_software_vouchers_with_remarks(db, compa
     clerk = User(username="del-clerk", api_key_hash=hash_key("k-clerk"))
     db.add_all([User(username="del-boss", api_key_hash=hash_key("k-boss"), is_superadmin=True), clerk])
     db.flush()
-    db.add(UserCompanyAccess(user_id=clerk.id, company_id=company.id, role="accountant",
-                             permissions=["voucher.read", "voucher.delete"]))
+    other = User(username="del-other", api_key_hash=hash_key("k-other"))
+    db.add(other)
+    db.flush()
+    db.add_all([UserCompanyAccess(user_id=clerk.id, company_id=company.id, role="accountant",
+                                  permissions=["voucher.read", "voucher.delete"]),
+                UserCompanyAccess(user_id=other.id, company_id=company.id, role="accountant")])
     db.commit()
     api = TestClient(app)
-    boss, staff = {"X-API-Key": "k-boss"}, {"X-API-Key": "k-clerk"}
-    assert api.delete(f"/api/v1/vouchers/{erp_v.id}?reason=entered%20twice", headers=staff).status_code == 403
+    boss, staff, no_tick = {"X-API-Key": "k-boss"}, {"X-API-Key": "k-clerk"}, {"X-API-Key": "k-other"}
+    assert api.delete(f"/api/v1/vouchers/{erp_v.id}?reason=entered%20twice", headers=no_tick).status_code == 403
+    assert api.delete(f"/api/v1/vouchers/{erp_v.id}", headers=staff).status_code == 422
     assert api.delete(f"/api/v1/vouchers/{erp_v.id}", headers=boss).status_code == 422
     r = api.delete(f"/api/v1/vouchers/{tally_v.id}?reason=not%20needed", headers=boss)
     assert r.status_code == 409 and "delete it in Tally" in r.json()["detail"]
-    r = api.delete(f"/api/v1/vouchers/{erp_v.id}?reason=entered%20twice", headers=boss)
+    r = api.delete(f"/api/v1/vouchers/{erp_v.id}?reason=entered%20twice", headers=staff)
     assert r.status_code == 200 and r.json()["status"] == "deleted"
 
 

@@ -9,7 +9,7 @@ from fastapi.responses import Response
 from sqlalchemy import func, or_, select
 
 from app.api.deps import DB, CurrentUser, actor_of, authorize
-from app.core.security import Perm, role_for
+from app.core.security import Perm, PERM_ACTION, VT_ACTIONS, has_perm, readable_types, type_allows, voucher_rights_for
 from app import audit
 from app.models import Ledger, StockGroup, SyncOutbox, Voucher, VoucherStatus, VoucherType, VoucherVersion
 from app.schemas.vouchers import TransitionIn, VoucherCreate, VoucherOut, VoucherSummary, VoucherUpdate
@@ -19,9 +19,9 @@ from app.services.sync.common import mapping_for_erp
 
 router = APIRouter(tags=["vouchers"])
 
-ADMIN_ROLES = ("owner", "accounts_admin")   # company admin, accounts admin (a system admin counts as owner)
 ACTION_PERMS = {
-    "submit": Perm.VOUCHER_WRITE, "approve": Perm.VOUCHER_APPROVE, "reject": Perm.VOUCHER_APPROVE,
+    "submit": Perm.VOUCHER_READ,     # and create or alter: checked in voucher_action
+    "approve": Perm.VOUCHER_APPROVE, "reject": Perm.VOUCHER_APPROVE,
     "post": Perm.VOUCHER_POST, "cancel": Perm.VOUCHER_POST, "delete": Perm.VOUCHER_DELETE,
 }
 
@@ -51,12 +51,20 @@ def _load(db, user, voucher_id: uuid.UUID, perm: str) -> Voucher:
     if v is None:
         raise HTTPException(404, "Voucher not found")
     authorize(db, user, v.company_id, perm)
+    _check_type(db, user, v.company_id, v.voucher_type.name, PERM_ACTION.get(perm, "read"))
     return v
+
+
+def _check_type(db, user, company_id: uuid.UUID, type_name: str, action: str) -> None:
+    """Voucher type name-wise rights set for the user (Admin > Users > Voucher types)."""
+    if not type_allows(voucher_rights_for(db, user, company_id), type_name, action):
+        raise HTTPException(403, f"You may not {VT_ACTIONS[action].lower()} {type_name} vouchers. Ask your company admin.")
 
 
 @router.post("/companies/{company_id}/vouchers", response_model=VoucherOut, status_code=201)
 def create_voucher(company_id: uuid.UUID, body: VoucherCreate, db: DB, user: CurrentUser):
-    company = authorize(db, user, company_id, Perm.VOUCHER_WRITE)
+    company = authorize(db, user, company_id, Perm.VOUCHER_CREATE)
+    _check_type(db, user, company_id, body.voucher_type, "create")
     if body.action == "post":
         authorize(db, user, company_id, Perm.VOUCHER_POST)
     data = body.model_dump(mode="json", exclude={"action"})
@@ -78,6 +86,8 @@ def list_vouchers(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: d
         stmt = stmt.where(Voucher.voucher_date <= to_date)
     if voucher_type:
         stmt = stmt.where(VoucherType.name == voucher_type)
+    if (types := readable_types(voucher_rights_for(db, user, company_id))) is not None:
+        stmt = stmt.where(VoucherType.name.in_(types))
     stmt = stmt.where(Voucher.status == status) if status else stmt.where(Voucher.status != VoucherStatus.DELETED)
     if sync_status:
         stmt = stmt.where(Voucher.sync_status == sync_status)
@@ -96,8 +106,10 @@ def list_vouchers(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: d
 @router.get("/companies/{company_id}/vouchers/count")
 def count_vouchers(company_id: uuid.UUID, db: DB, user: CurrentUser):
     authorize(db, user, company_id, Perm.VOUCHER_READ)
-    rows = db.execute(select(Voucher.status, Voucher.sync_status, func.count())
-                      .where(Voucher.company_id == company_id).group_by(Voucher.status, Voucher.sync_status))
+    stmt = select(Voucher.status, Voucher.sync_status, func.count()).where(Voucher.company_id == company_id)
+    if (types := readable_types(voucher_rights_for(db, user, company_id))) is not None:
+        stmt = stmt.join(VoucherType).where(VoucherType.name.in_(types))
+    rows = db.execute(stmt.group_by(Voucher.status, Voucher.sync_status))
     return [{"status": s, "sync_status": ss, "count": n} for s, ss, n in rows]
 
 
@@ -184,11 +196,25 @@ def voucher_xlsx(voucher_id: uuid.UUID, db: DB, user: CurrentUser):
 
 @router.patch("/vouchers/{voucher_id}", response_model=VoucherOut)
 def update_voucher(voucher_id: uuid.UUID, body: VoucherUpdate, db: DB, user: CurrentUser):
-    v = _load(db, user, voucher_id, Perm.VOUCHER_WRITE)
+    v = _load(db, user, voucher_id, Perm.VOUCHER_ALTER)
     if v.status == VoucherStatus.POSTED:
         authorize(db, user, v.company_id, Perm.VOUCHER_POST)
+    if body.voucher_type != v.voucher_type.name:
+        _check_type(db, user, v.company_id, body.voucher_type, "alter")
     data = body.model_dump(mode="json", exclude={"expected_version", "reason"})
     engine.update_voucher(db, v, data, actor_of(user), expected_version=body.expected_version, reason=body.reason)
+    db.commit()
+    return _out(db, v)
+
+
+@router.post("/vouchers/{voucher_id}/duplicate", response_model=VoucherOut, status_code=201)
+def duplicate_voucher(voucher_id: uuid.UUID, db: DB, user: CurrentUser):
+    src = _load(db, user, voucher_id, Perm.VOUCHER_READ)
+    company = authorize(db, user, src.company_id, Perm.VOUCHER_CREATE)
+    _check_type(db, user, src.company_id, src.voucher_type.name, "create")
+    doc = dict(engine.to_doc(src), voucher_number=None, is_cancelled=False)
+    v = engine.create_voucher(db, company, doc, actor_of(user),
+                              reason=f"Duplicated from {src.voucher_type.name} {src.voucher_number}")
     db.commit()
     return _out(db, v)
 
@@ -197,6 +223,10 @@ def update_voucher(voucher_id: uuid.UUID, body: VoucherUpdate, db: DB, user: Cur
 def voucher_action(voucher_id: uuid.UUID, action: Literal["submit", "approve", "reject", "post", "cancel"],
                    db: DB, user: CurrentUser, body: TransitionIn | None = None):
     v = _load(db, user, voucher_id, ACTION_PERMS[action])
+    rights = voucher_rights_for(db, user, v.company_id)
+    if action == "submit" and not any(has_perm(db, user, v.company_id, p) and type_allows(rights, v.voucher_type.name, a)
+                                      for p, a in ((Perm.VOUCHER_CREATE, "create"), (Perm.VOUCHER_ALTER, "alter"))):
+        raise HTTPException(403, "You do not have permission for this. Ask your company admin.")
     body = body or TransitionIn()
     engine.transition(db, v, action, actor_of(user), reason=body.reason, expected_version=body.expected_version)
     db.commit()
@@ -205,27 +235,14 @@ def voucher_action(voucher_id: uuid.UUID, action: Literal["submit", "approve", "
 
 @router.delete("/vouchers/{voucher_id}", response_model=VoucherOut)
 def delete_voucher(voucher_id: uuid.UUID, db: DB, user: CurrentUser, reason: str | None = None):
-    """Only an admin, with remarks, and only a voucher made in the software; the delete then goes to Tally.
-    A voucher that came from Tally is deleted in Tally: the next sync removes it here."""
+    """A user given "Delete vouchers", with remarks, and only a voucher made in the software; the delete then
+    goes to Tally. A voucher that came from Tally is deleted in Tally: the next sync removes it here."""
     v = _load(db, user, voucher_id, Perm.VOUCHER_DELETE)
-    if role_for(db, user, v.company_id) not in ADMIN_ROLES:
-        raise HTTPException(403, "Only an admin can delete vouchers")
     if len((reason or "").strip()) < 3:
         raise HTTPException(422, "Enter remarks: why the voucher is deleted")
     if v.source_system != "erp":
         raise HTTPException(409, "This voucher came from Tally: delete it in Tally, and the next sync removes it here")
     engine.transition(db, v, "delete", actor_of(user), reason=reason.strip())
-    db.commit()
-    return _out(db, v)
-
-
-@router.post("/vouchers/{voucher_id}/duplicate", response_model=VoucherOut, status_code=201)
-def duplicate_voucher(voucher_id: uuid.UUID, db: DB, user: CurrentUser):
-    src = _load(db, user, voucher_id, Perm.VOUCHER_WRITE)
-    company = authorize(db, user, src.company_id, Perm.VOUCHER_WRITE)
-    doc = dict(engine.to_doc(src), voucher_number=None, is_cancelled=False)
-    v = engine.create_voucher(db, company, doc, actor_of(user),
-                              reason=f"Duplicated from {src.voucher_type.name} {src.voucher_number}")
     db.commit()
     return _out(db, v)
 

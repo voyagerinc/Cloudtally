@@ -13,10 +13,10 @@ from app.audit import Actor
 from app.core.config import settings
 from app.core.security import (
     ALL_PERMS, PERM_GROUPS, REPORTS, ROLE_LABELS, ROLES, Perm, allows, check_password_rules, has_perm, hash_key,
-    hash_password, new_session_token, perms_for, perms_of, verify_password,
+    hash_password, new_session_token, perms_for, perms_of, upgrade_perms, verify_password, VT_ACTIONS, voucher_rights_for,
 )
 from app.licensing import enforce as licence
-from app.models import Company, User, UserCompanyAccess, UserSession
+from app.models import Company, User, UserCompanyAccess, UserSession, VoucherType
 from app.models.base import utcnow
 
 router = APIRouter(tags=["sign-in & users"])
@@ -42,6 +42,7 @@ class CompanyUserIn(BaseModel):
     password: str | None = None
     role: str = "accountant"
     permissions: list[str] | None = None     # given: a custom set instead of the role's defaults
+    voucher_rights: dict[str, list[str]] | None = None   # voucher type name -> actions; None: every voucher type
     add_existing: bool = False                # the user ID exists: give that user access to this company
 
 
@@ -49,6 +50,7 @@ class CompanyUserPatch(BaseModel):
     display_name: str | None = Field(None, max_length=200)
     role: str | None = None
     permissions: list[str] | None = None
+    voucher_rights: dict[str, list[str]] | None = None
     password: str | None = None
     is_active: bool | None = None
     unlock: bool = False
@@ -128,7 +130,7 @@ def ping(user: CurrentUser):
 @router.get("/me")
 def me(db: DB, user: CurrentUser):
     companies = [{"company_id": a.company_id, "role": a.role, "role_label": ROLE_LABELS.get(a.role, a.role),
-                  "permissions": sorted(perms_of(a))} for a in user.access]
+                  "permissions": sorted(perms_of(a)), "voucher_rights": a.voucher_rights} for a in user.access]
     return {"id": user.id, "username": user.username, "display_name": user.display_name,
             "is_superadmin": user.is_superadmin, "must_change_password": user.must_change_password,
             "has_password": bool(user.password_hash),
@@ -170,7 +172,7 @@ def _permissions(db, actor: User, company_id: uuid.UUID, role: str, permissions:
         raise HTTPException(422, f"Unknown role {role!r}")
     if role == "custom" and permissions is None:
         raise HTTPException(422, "Choose the permissions for a custom role")
-    wanted = set(permissions) if permissions is not None else ROLES[role]
+    wanted = upgrade_perms(permissions) if permissions is not None else ROLES[role]
     if unknown := wanted - ALL_PERMS:
         raise HTTPException(422, f"Unknown permissions: {', '.join(sorted(unknown))}")
     mine = perms_for(db, actor, company_id)
@@ -179,6 +181,28 @@ def _permissions(db, actor: User, company_id: uuid.UUID, role: str, permissions:
     if permissions is None or (role in ROLES and wanted == ROLES[role]):
         return None
     return sorted(wanted)
+
+
+def _voucher_rights(db, actor: User, company_id: uuid.UUID, rights: dict | None) -> dict | None:
+    """Validated voucher type name-wise rights to store (None = every voucher type)."""
+    mine = voucher_rights_for(db, actor, company_id)
+    if rights is None:
+        if mine is not None:
+            raise HTTPException(403, "You are limited to some voucher types: choose the voucher types for this user")
+        return None
+    names = set(db.scalars(select(VoucherType.name).where(VoucherType.company_id == company_id)))
+    if unknown := sorted(set(rights) - names):
+        raise HTTPException(422, f"Unknown voucher types: {', '.join(unknown)}")
+    out = {}
+    for name, acts in sorted(rights.items()):
+        if bad := set(acts) - set(VT_ACTIONS):
+            raise HTTPException(422, f"Unknown voucher rights: {', '.join(sorted(bad))}")
+        if mine is not None and (beyond := set(acts) - set(mine.get(name) or ())):
+            raise HTTPException(403, f"You cannot give rights you do not have yourself: {name} "
+                                     f"({', '.join(VT_ACTIONS[a] for a in VT_ACTIONS if a in beyond)})")
+        if acts:
+            out[name] = [a for a in VT_ACTIONS if a in acts]
+    return out
 
 
 def _online(db, u: User) -> datetime | None:
@@ -196,6 +220,7 @@ def _out(u: User, access: UserCompanyAccess, db=None) -> dict:
         "id": u.id, "username": u.username, "display_name": u.display_name,
         "role": access.role, "role_label": ROLE_LABELS.get(access.role, access.role),
         "custom": access.permissions is not None, "permissions": sorted(perms_of(access)),
+        "voucher_rights": access.voucher_rights,
         "is_active": u.is_active, "is_superadmin": u.is_superadmin, "has_password": bool(u.password_hash),
         "must_change_password": u.must_change_password, "locked": bool(u.locked_until and u.locked_until > now),
         "last_login_at": u.last_login_at, "created_at": u.created_at, "created_by": u.created_by,
@@ -223,6 +248,7 @@ def create_company_user(company_id: uuid.UUID, body: CompanyUserIn, db: DB, user
     company: Company = authorize(db, user, company_id, Perm.USERS_MANAGE)
     username = body.username.strip()
     perms = _permissions(db, user, company_id, body.role, body.permissions)
+    rights = _voucher_rights(db, user, company_id, body.voucher_rights)
     existing = _find_user(db, username)
     if existing is not None:
         if not body.add_existing:
@@ -246,10 +272,11 @@ def create_company_user(company_id: uuid.UUID, body: CompanyUserIn, db: DB, user
         db.flush()
         audit.record(db, actor_of(user), "user.create", "user", target.id, company_id=company_id,
                      after={"username": username, "display_name": body.display_name})
-    access = UserCompanyAccess(user_id=target.id, company_id=company_id, role=body.role, permissions=perms)
+    access = UserCompanyAccess(user_id=target.id, company_id=company_id, role=body.role, permissions=perms,
+                               voucher_rights=rights)
     db.add(access)
     audit.record(db, actor_of(user), "user.access", "user", target.id, company_id=company_id,
-                 after={"role": body.role, "permissions": perms})
+                 after={"role": body.role, "permissions": perms, "voucher_rights": rights})
     db.commit()
     db.refresh(target)
     return _out(target, access)
@@ -270,6 +297,10 @@ def update_company_user(company_id: uuid.UUID, user_id: uuid.UUID, body: Company
         access.permissions = _permissions(db, user, company_id, role,
                                           body.permissions if "permissions" in fields else access.permissions)
         access.role = role
+    if "voucher_rights" in fields:
+        if is_self:
+            raise HTTPException(403, "You cannot change your own permissions. Ask another admin.")
+        access.voucher_rights = _voucher_rights(db, user, company_id, body.voucher_rights)
 
     profile = {f for f in ("display_name", "password", "is_active") if f in fields} | ({"unlock"} if body.unlock else set())
     if profile and not is_self:

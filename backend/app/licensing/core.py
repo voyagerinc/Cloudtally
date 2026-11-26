@@ -33,7 +33,7 @@ ALL_MODULES = list(MODULES)
 # Given only to approved customers: a new licence starts without it (Tally to software only).
 APPROVAL_MODULES = {"tally_two_way"}
 # Without two-way sync, a Tally-connected company's data is entered in Tally: these are refused in the software.
-TWO_WAY_PERMS = {"voucher.write", "voucher.post", "voucher.approve", "voucher.delete", "masters.write"}
+TWO_WAY_PERMS = {"voucher.create", "voucher.alter", "voucher.post", "voucher.approve", "voucher.delete", "masters.write"}
 
 
 def module_of(perm: str) -> str | None:
@@ -55,7 +55,7 @@ def module_of(perm: str) -> str | None:
 # Not allowed while the software is read-only (expired, suspended, or offline past the grace period).
 # Viewing, reports, export and user management keep working: customers keep access to their data.
 WRITE_PERMS = {
-    Perm.MASTERS_WRITE, Perm.VOUCHER_WRITE, Perm.VOUCHER_POST, Perm.VOUCHER_APPROVE, Perm.VOUCHER_DELETE,
+    Perm.MASTERS_WRITE, Perm.VOUCHER_CREATE, Perm.VOUCHER_ALTER, Perm.VOUCHER_POST, Perm.VOUCHER_APPROVE, Perm.VOUCHER_DELETE,
     Perm.SYNC_MANAGE, Perm.CONFLICT_RESOLVE, Perm.PERIOD_LOCK, Perm.COMPANY_MANAGE, Perm.INTEGRATION,
 }
 

@@ -118,7 +118,7 @@ class StateIn(BaseModel):
 
 @router.post("/state")
 def save_state(body: StateIn, db: DB, user: CurrentUser):
-    c = _company(db, user, body.company, Perm.VOUCHER_WRITE)
+    c = _company(db, user, body.company, Perm.VOUCHER_CREATE)
     st = dict(body.state)
     st["savedAt"] = datetime.now().isoformat(timespec="seconds")
     st["savedBy"] = user.username

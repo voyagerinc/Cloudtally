@@ -14,7 +14,7 @@
   <nav id="tabs">
     <button data-tab="dashboard" data-perm="sync.read">Sync</button>
     <button data-tab="vouchers" data-perm="voucher.read">Vouchers</button>
-    <button data-tab="entry" data-perm="voucher.write">New voucher</button>
+    <button data-tab="entry" data-perm="voucher.create">New voucher</button>
     <button data-tab="reports" data-perm="report">Reports</button>
     <button data-tab="masters" data-perm="masters.read">Masters</button>
     <button data-tab="fixedassets" data-href="/fixed-assets" data-perm="report" title="Fixed assets &amp; depreciation (opens in a new tab)">Fixed assets</button>
@@ -616,6 +616,11 @@
     <h3>Permissions</h3>
     <p class="muted small" id="uf-perm-note">Choosing a role ticks its permissions. Change any tick for a custom set.</p>
     <div id="uf-perms" class="perm-groups"></div>
+    <h3>Voucher types</h3>
+    <p class="muted small">Which voucher types this user may view, create, alter and delete. The voucher ticks above
+      still apply: e.g. Alter here works only with "Alter vouchers" ticked.</p>
+    <label class="check"><input type="checkbox" id="uf-vt-all"> All voucher types</label>
+    <div id="uf-vt" class="vt-rights"></div>
     <div id="uf-actions" class="row" hidden>
       <button type="button" id="uf-active" class="secondary"></button>
       <button type="button" id="uf-unlock" class="secondary" hidden>Unlock</button>

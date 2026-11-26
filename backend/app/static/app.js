@@ -104,12 +104,18 @@ function isAdmin() {   // company admin or accounts admin in the selected compan
 // Reports the customer's licence includes (set on the licence server). null: every report.
 const licensedReport = (key) => !state.licReports || state.licReports.includes(key);
 // Licence without two-way Tally sync: a Tally-connected company's data is entered in Tally, not here.
-const ONE_WAY_PERMS = ["voucher.write", "voucher.post", "voucher.approve", "voucher.delete", "masters.write"];
+const ONE_WAY_PERMS = ["voucher.create", "voucher.alter", "voucher.post", "voucher.approve", "voucher.delete", "masters.write"];
 function can(perm) {
   if (perm.startsWith("report.") && !licensedReport(perm.slice(7))) return false;
   if (state.oneWay && ONE_WAY_PERMS.includes(perm)) return false;
   const p = myPerms();
   return p === null || p.has(perm) || (perm.startsWith("report.") && p.has("reports.read"));
+}
+// Voucher type name-wise rights (Admin > Users > Voucher types): none set means every voucher type.
+function vtCan(type, action) {
+  if (state.user?.is_superadmin) return true;
+  const a = (state.user?.companies || []).find((c) => c.company_id === state.company);
+  return !a?.voucher_rights || (a.voucher_rights[type] || []).includes(action);
 }
 // Tabs that do not belong to a books company.
 const SPECIAL_TABS = {
@@ -254,8 +260,9 @@ async function loadMasters() {
   [state.ledgers, state.vtypes] = await Promise.all([
     api(`/companies/${state.company}/masters/ledgers?limit=5000`), api(`/companies/${state.company}/masters/voucher-types`)]);
   $("#ledger-names").innerHTML = state.ledgers.map((l) => `<option value="${esc(l.name)}">`).join("");
-  const opts = state.vtypes.filter((v) => v.is_active).map((v) => `<option>${esc(v.name)}</option>`).join("");
-  $("#ve-type").innerHTML = opts; $("#vf-type").innerHTML = `<option value="">All types</option>` + opts;
+  const opts = (ok) => state.vtypes.filter((v) => v.is_active && ok(v.name)).map((v) => `<option>${esc(v.name)}</option>`).join("");
+  $("#ve-type").innerHTML = opts((n) => vtCan(n, "create") || vtCan(n, "alter"));
+  $("#vf-type").innerHTML = `<option value="">All types</option>` + opts((n) => vtCan(n, "read"));
   const groups = await api(`/companies/${state.company}/masters/groups`);
   state.groups = Object.fromEntries(groups.map((g) => [g.name, g]));
   $("#group-names").innerHTML = groups.map((g) => `<option value="${esc(g.name)}">`).join("");
@@ -622,7 +629,9 @@ async function openVoucher(id) {
   const d = v.doc;
   const acts = { draft: ["post", "submit", "cancel", "delete"], pending_approval: ["approve", "reject", "cancel"], approved: ["post", "cancel"],
     posted: ["cancel", "delete"], rejected: ["submit", "cancel", "delete"], cancelled: ["delete"] }[v.status]
-    ?.filter((a) => a !== "delete" || (isAdmin() && v.source_system === "erp")) || [];   // delete: admin, software vouchers only
+    ?.filter((a) => ({ delete: can("voucher.delete") && vtCan(d.voucher_type, "delete") && v.source_system === "erp",   // software vouchers only
+      submit: (can("voucher.create") && vtCan(d.voucher_type, "create")) || (can("voucher.alter") && vtCan(d.voucher_type, "alter")), approve: can("voucher.approve"), reject: can("voucher.approve"),
+      post: can("voucher.post"), cancel: can("voucher.post") })[a]) || [];
   const el = $("#vdetail"); el.hidden = false;
   el.innerHTML = `<div class="row between"><h3>${esc(d.voucher_type)} ${esc(d.voucher_number)} · ${esc(d.date)}</h3>
     <div>${chip(v.status)} ${chip(v.sync_status)} <span class="muted small">v${v.version} · by ${esc(v.updated_by)} · origin ${esc(v.source_system)}</span></div></div>
@@ -636,9 +645,9 @@ async function openVoucher(id) {
     ${customFieldsHtml({ ...(d.custom_fields || {}), itemsInTable: d.inventory.length > 0 })}
     <p class="small muted">${v.tally ? `Tally: MasterID ${esc(v.tally.master_id)} · AlterID ${esc(v.tally.alter_id)} · GUID ${esc(v.tally.guid)} · last sync ${when(v.tally.last_synced_at)}
       ${v.tally.last_error ? `<br><span class="error">${esc(v.tally.error_code)}: ${esc(v.tally.last_error)}</span>` : ""}` : "Not yet in Tally"}</p>
-    <div class="row">${!["cancelled", "deleted"].includes(v.status) ? `<button data-edit>Edit</button>` : ""}
+    <div class="row">${!["cancelled", "deleted"].includes(v.status) && can("voucher.alter") && vtCan(d.voucher_type, "alter") ? `<button data-edit>Edit</button>` : ""}
       ${acts.map((a) => `<button class="secondary" data-act="${a}">${a[0].toUpperCase() + a.slice(1)}</button>`).join("")}
-      <button class="secondary" data-dup>Duplicate</button>${can("export") ? `<button class="secondary" data-xlsx>Excel</button>` : ""}
+      ${can("voucher.create") && vtCan(d.voucher_type, "create") ? `<button class="secondary" data-dup>Duplicate</button>` : ""}${can("export") ? `<button class="secondary" data-xlsx>Excel</button>` : ""}
       <button class="link" data-hist>History</button></div><div id="vhist" hidden></div>`;
   el.querySelectorAll("[data-act]").forEach((b) => (b.onclick = async () => {
     const reason = ["cancel", "delete", "reject"].includes(b.dataset.act)
@@ -654,7 +663,7 @@ async function openVoucher(id) {
   el.querySelector("[data-edit]") && (el.querySelector("[data-edit]").onclick = () => editVoucher(v));
   el.querySelector("[data-xlsx]") && (el.querySelector("[data-xlsx]").onclick = () =>
     download(`/vouchers/${id}/xlsx`, `${d.voucher_type} ${d.voucher_number}.xlsx`.replace(/[\\/:*?"<>|]/g, "-")));
-  el.querySelector("[data-dup]").onclick = async () => { const n = await api(`/vouchers/${id}/duplicate`, { method: "POST" }); openVoucher(n.id); };
+  el.querySelector("[data-dup]") && (el.querySelector("[data-dup]").onclick = async () => { const n = await api(`/vouchers/${id}/duplicate`, { method: "POST" }); openVoucher(n.id); });
   el.querySelector("[data-hist]").onclick = async () => {
     const box = $("#vhist"); box.hidden = false; box.innerHTML = await historyHtml(id);
   };
@@ -3109,7 +3118,8 @@ renderers.users = async () => {
   table($("#utable"), [
     { label: "User ID", key: "username" }, { label: "Name", key: "display_name" },
     { label: "Role", get: (u) => (u.custom ? "Custom" : u.role_label) },
-    { label: "Can use", wrap: true, get: (u) => permSummary(u.permissions) },
+    { label: "Can use", wrap: true, get: (u) => permSummary(u.permissions)
+      + (u.voucher_rights ? ` · ${Object.keys(u.voucher_rights).length} voucher type${Object.keys(u.voucher_rights).length === 1 ? "" : "s"}` : "") },
     { label: "Status", html: status },
     { label: "Working now", html: (u) => (u.online ? `${chip("active")} <span class="small muted">${when(u.active_at)}</span>` : "") },
     { label: "Last sign-in", get: (u) => when(u.last_login_at) || "never" },
@@ -3138,6 +3148,43 @@ function drawPerms() {
   }));
 }
 
+// Voucher type name-wise rights in the user form: null = every voucher type.
+let chosenVt = null;
+const VT_ACTS = [["read", "View"], ["create", "Create"], ["alter", "Alter"], ["delete", "Delete"]];
+function drawVtRights() {
+  const self = editingUser && editingUser.id === state.user.id;
+  const all = chosenVt === null;
+  $("#uf-vt-all").checked = all; $("#uf-vt-all").disabled = self;
+  const box = $("#uf-vt");
+  if (all) { box.innerHTML = `<p class="muted small">Every voucher type, as the voucher ticks above allow. Untick to choose voucher types one by one.</p>`; return; }
+  const types = state.vtypes.filter((v) => v.is_active || chosenVt[v.name]);
+  const has = (n, a) => (chosenVt[n] || []).includes(a);
+  const off = self ? "disabled" : "";
+  box.innerHTML = `<table><thead><tr><th>Voucher type</th><th>Type of voucher</th>${VT_ACTS.map(([a, l]) =>
+    `<th class="c"><label title="Tick or untick ${l} for every voucher type"><input type="checkbox" data-col="${a}" ${off}
+      ${types.length && types.every((v) => has(v.name, a)) ? "checked" : ""}> ${l}</label></th>`).join("")}</tr></thead><tbody>${types.map((v) =>
+    `<tr><td><label><input type="checkbox" data-row="${esc(v.name)}" ${off} ${VT_ACTS.every(([a]) => has(v.name, a)) ? "checked" : ""}> ${esc(v.name)}</label></td>
+      <td class="muted small">${esc(v.base_type || "")}</td>${VT_ACTS.map(([a]) =>
+      `<td class="c"><input type="checkbox" data-vt="${esc(v.name)}" data-act="${a}" ${off} ${has(v.name, a) ? "checked" : ""}></td>`).join("")}</tr>`).join("")
+    || `<tr><td colspan="6" class="muted">No voucher types yet: they come with the masters from Tally.</td></tr>`}</tbody></table>`;
+  const set = (n, a, on) => {
+    const cur = new Set(chosenVt[n] || []);
+    if (on) { cur.add(a); if (a !== "read") cur.add("read"); }      // create, alter or delete needs view
+    else { cur.delete(a); if (a === "read") cur.clear(); }
+    if (cur.size) chosenVt[n] = VT_ACTS.map(([x]) => x).filter((x) => cur.has(x)); else delete chosenVt[n];
+  };
+  box.querySelectorAll("input[data-vt]").forEach((cb) => (cb.onchange = () => { set(cb.dataset.vt, cb.dataset.act, cb.checked); drawVtRights(); }));
+  box.querySelectorAll("input[data-row]").forEach((cb) => (cb.onchange = () => {
+    VT_ACTS.forEach(([a]) => set(cb.dataset.row, a, cb.checked)); drawVtRights(); }));
+  box.querySelectorAll("input[data-col]").forEach((cb) => (cb.onchange = () => {
+    types.forEach((v) => set(v.name, cb.dataset.col, cb.checked)); drawVtRights(); }));
+}
+$("#uf-vt-all").onchange = (e) => { chosenVt = e.target.checked ? null : {}; drawVtRights(); };
+const sameVt = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+function sortedVt(r) {
+  return r === null ? null : Object.fromEntries(Object.keys(r).sort().map((k) => [k, VT_ACTS.map(([a]) => a).filter((a) => r[k].includes(a))]));
+}
+
 async function openUserForm(u) {
   await catalog();
   editingUser = u || null;
@@ -3158,6 +3205,9 @@ async function openUserForm(u) {
     : "Choosing a role ticks its permissions. Change any tick for a custom set. Running Tally sync and changing the "
       + "Tally connection are for the company admin (manager) only.";
   drawPerms();
+  if (!state.vtypes.length && can("masters.read")) state.vtypes = await api(`/companies/${state.company}/masters/voucher-types`);
+  chosenVt = u?.voucher_rights ? structuredClone(u.voucher_rights) : null;
+  drawVtRights();
   $("#uf-actions").hidden = !u || self;
   if (u) { $("#uf-active").textContent = u.is_active ? "Switch off user" : "Switch on user"; $("#uf-unlock").hidden = !u.locked; $("#uf-signout").hidden = !u.online; }
   $("#user-dlg").showModal();
@@ -3188,12 +3238,15 @@ $("#uf").onsubmit = async (e) => {
       if (editingUser.id !== state.user.id && (role !== wasRole || !sameSet(chosenPerms, new Set(editingUser.permissions)))) {
         body.role = role; body.permissions = permissions;
       }
+      if (editingUser.id !== state.user.id && !sameVt(sortedVt(chosenVt), sortedVt(editingUser.voucher_rights ?? null))) {
+        body.voucher_rights = sortedVt(chosenVt);
+      }
       if (password) body.password = password;
       await api(`/companies/${state.company}/users/${editingUser.id}`, { method: "PATCH", body });
     } else {
       await api(`/companies/${state.company}/users`, { method: "POST", body: {
         username, display_name: el("display_name").value.trim() || null, password: password || null,
-        role, permissions, add_existing: el("add_existing").checked } });
+        role, permissions, voucher_rights: sortedVt(chosenVt), add_existing: el("add_existing").checked } });
     }
     $("#user-dlg").close();
     if (password) alert(`Give ${username} this password:\n\n${password}\n\nThey choose their own at the first sign-in.`);

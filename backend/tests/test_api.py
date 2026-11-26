@@ -573,3 +573,72 @@ def test_receivables_monthly_by_eway_bill_date(db, books, admin):
     assert client.get(q, headers=admin).json()["bills"][0]["column"] == "2026-04"
     x = client.get(q + "&format=xlsx", headers=admin)
     assert x.status_code == 200 and x.content[:2] == b"PK"
+
+
+def test_voucher_view_create_alter_delete_are_separate_ticks(db, books, admin):
+    def user(name, perms):
+        h = make_user(db, name)
+        uid = db.query(User).filter_by(username=name).one().id
+        db.add(UserCompanyAccess(user_id=uid, company_id=books, role="custom", permissions=perms))
+        db.commit()
+        return h
+    viewer = user("v-view", ["voucher.read"])
+    maker = user("v-make", ["voucher.read", "voucher.create"])
+    editor = user("v-edit", ["voucher.read", "voucher.alter"])
+    remover = user("v-del", ["voucher.read", "voucher.delete"])
+    old = user("v-old", ["voucher.read", "voucher.write"])      # saved before the split: create and alter
+    assert voucher(books, viewer, action="draft").status_code == 403
+    assert voucher(books, editor, action="draft").status_code == 403
+    v = voucher(books, maker, action="draft").json()
+    assert client.get(f"/api/v1/vouchers/{v['id']}", headers=viewer).status_code == 200
+    body = {**v["doc"], "narration": "changed", "expected_version": v["version"]}
+    assert client.patch(f"/api/v1/vouchers/{v['id']}", json=body, headers=maker).status_code == 403
+    assert client.patch(f"/api/v1/vouchers/{v['id']}", json=body, headers=viewer).status_code == 403
+    r = client.patch(f"/api/v1/vouchers/{v['id']}", json=body, headers=editor)
+    assert r.status_code == 200 and r.json()["doc"]["narration"] == "changed"
+    assert client.post(f"/api/v1/vouchers/{v['id']}/duplicate", headers=editor).status_code == 403
+    assert client.post(f"/api/v1/vouchers/{v['id']}/duplicate", headers=maker).status_code == 201
+    assert client.post(f"/api/v1/vouchers/{v['id']}/submit", headers=viewer).status_code == 403
+    assert client.delete(f"/api/v1/vouchers/{v['id']}?reason=entered%20twice", headers=maker).status_code == 403
+    assert client.delete(f"/api/v1/vouchers/{v['id']}", headers=remover).status_code == 422      # remarks needed
+    r = client.delete(f"/api/v1/vouchers/{v['id']}?reason=entered%20twice", headers=remover)
+    assert r.status_code == 200 and r.json()["status"] == "deleted"
+    assert voucher(books, old, action="draft").status_code == 201
+    me = client.get("/api/v1/me", headers=old).json()
+    assert {"voucher.create", "voucher.alter"} <= set(me["companies"][0]["permissions"])
+    labels = {p["key"]: p["label"] for g in client.get("/api/v1/permissions", headers=admin).json()["groups"]
+              for p in g["permissions"]}
+    assert labels["voucher.create"] == "Create vouchers" and labels["voucher.alter"] == "Alter vouchers"
+    assert "voucher.write" not in labels and labels["voucher.delete"].startswith("Delete vouchers")
+
+
+def test_voucher_type_name_wise_rights(db, books, admin):
+    clerk = make_user(db, "vt-clerk", company=books, role="accountant")
+    uid = db.query(User).filter_by(username="vt-clerk").one().id
+    url = f"/api/v1/companies/{books}/users/{uid}"
+    assert client.patch(url, json={"voucher_rights": {"No Such Type": ["read"]}}, headers=admin).status_code == 422
+    assert client.patch(url, json={"voucher_rights": {"Sales": ["fly"]}}, headers=admin).status_code == 422
+    sale = voucher(books, admin).json()
+    pay = client.post(f"/api/v1/companies/{books}/vouchers", headers=admin, json={
+        "voucher_type": "Payment", "date": "2026-04-21", "action": "post",
+        "entries": [{"ledger": "Rent", "debit": "100"}, {"ledger": "HDFC Bank", "credit": "100"}]}).json()
+    r = client.patch(url, json={"voucher_rights": {"Sales": ["create", "read"], "Payment": ["read"]}}, headers=admin)
+    assert r.status_code == 200 and r.json()["voucher_rights"] == {"Payment": ["read"], "Sales": ["read", "create"]}
+    me = client.get("/api/v1/me", headers=clerk).json()
+    assert me["companies"][0]["voucher_rights"]["Sales"] == ["read", "create"]
+    # Sales: view and create, not alter; Payment: view only; Receipt and the rest: nothing
+    assert voucher(books, clerk, number=None).status_code == 201
+    r = client.patch(f"/api/v1/vouchers/{sale['id']}", headers=clerk,
+                     json={**sale["doc"], "narration": "x", "expected_version": sale["version"]})
+    assert r.status_code == 403 and "alter Sales" in r.json()["detail"]
+    assert client.get(f"/api/v1/vouchers/{pay['id']}", headers=clerk).status_code == 200
+    assert client.post(f"/api/v1/vouchers/{pay['id']}/duplicate", headers=clerk).status_code == 403
+    assert client.post(f"/api/v1/vouchers/{sale['id']}/duplicate", headers=clerk).status_code == 201
+    client.patch(url, json={"voucher_rights": {"Sales": ["read"]}}, headers=admin)
+    assert client.get(f"/api/v1/vouchers/{pay['id']}", headers=clerk).status_code == 403
+    listed = {v["voucher_type"] for v in client.get(f"/api/v1/companies/{books}/vouchers", headers=clerk).json()}
+    assert listed == {"Sales"}
+    assert sum(r["count"] for r in client.get(f"/api/v1/companies/{books}/vouchers/count", headers=clerk).json()) == 3
+    r = client.patch(url, json={"voucher_rights": None}, headers=admin)      # back to every voucher type
+    assert r.json()["voucher_rights"] is None
+    assert client.get(f"/api/v1/vouchers/{pay['id']}", headers=clerk).status_code == 200
