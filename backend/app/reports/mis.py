@@ -102,6 +102,16 @@ def load_settings(db: Session, company_id: uuid.UUID) -> dict:
             "_groups": {g.id: g for g in groups}}
 
 
+def item_map(db: Session, company_id, settings: dict) -> dict:
+    """{item id: (division, kind)}: the sheet's own map when it has one (the category-wise sheet), else from
+    the stock groups' settings."""
+    if settings.get("_item_dk") is not None:
+        return settings["_item_dk"]
+    sg = stock_group_map(settings)
+    return {iid: sg.get(gid, (None, None)) for iid, gid in db.execute(
+        select(StockItem.id, StockItem.group_id).where(StockItem.company_id == company_id))}
+
+
 def stock_group_map(settings: dict) -> dict:
     """Effective (division, kind) of every stock group: its own setting, else its nearest parent's, per field."""
     groups, explicit = settings["_groups"], settings["stock_groups_explicit"]
@@ -171,6 +181,8 @@ def split_of(settings: dict, ledger_id) -> dict:
     pct = {k: Decimal(str(raw.get(k) or 0)) for k in keys}
     total = sum(pct.values(), ZERO)
     if total <= 0:
+        if settings.get("_split"):         # the category-wise sheet: by each category's share of sales
+            return settings["_split"]
         return {k: Decimal(1) / len(keys) for k in keys}
     return {k: pct[k] / total for k in keys}
 
@@ -196,9 +208,7 @@ def ledger_amounts(db: Session, company_id: uuid.UUID, from_date: date, to_date:
         return {}
     keys = [d["key"] for d in settings["divisions"]]
     cc_map = settings["cost_centres"]
-    sg = stock_group_map(settings)
-    item_div = {iid: sg.get(gid, (None, None))[0]
-                for iid, gid in db.execute(select(StockItem.id, StockItem.group_id).where(StockItem.company_id == company_id))}
+    item_div = {iid: dk[0] for iid, dk in item_map(db, company_id, settings).items()}
 
     rows = db.execute(
         select(VoucherEntry.id, VoucherEntry.voucher_id, VoucherEntry.ledger_id, VoucherEntry.amount,
@@ -206,6 +216,7 @@ def ledger_amounts(db: Session, company_id: uuid.UUID, from_date: date, to_date:
         .join(Voucher, Voucher.id == VoucherEntry.voucher_id)
         .join(VoucherType, VoucherType.id == Voucher.voucher_type_id)
         .where(Voucher.company_id == company_id, Voucher.status == VoucherStatus.POSTED,
+               VoucherType.affects_accounts.is_(True),       # not orders, delivery notes ... (as the P&L)
                Voucher.voucher_date.between(from_date, to_date), VoucherEntry.ledger_id.in_(wanted))).all()
     rows = [r for r in rows if not MEMO_TYPE.search(r[5])]
     entry_ids = [r[0] for r in rows]
@@ -411,11 +422,10 @@ def stock_values(db: Session, company_id: uuid.UUID, on: date, settings: dict) -
     """{division: {kind: value}} of closing stock on a date, from the stock groups' settings. An item below zero
     (sold or issued before its receipt was entered) counts as nil stock, not as a negative value."""
     from app.reports import stock_summary
-    sg = stock_group_map(settings)
-    item_group = dict(db.execute(select(StockItem.id, StockItem.group_id).where(StockItem.company_id == company_id)).all())
+    dk = item_map(db, company_id, settings)
     out = defaultdict(lambda: defaultdict(lambda: ZERO))
     for it in stock_summary(db, company_id, on)["items"]:
-        div, kind = sg.get(item_group.get(uuid.UUID(it["item_id"])), (None, None))
+        div, kind = dk.get(uuid.UUID(it["item_id"]), (None, None))
         if div and kind:
             out[div][kind] += max(Decimal(it["closing_value"]), ZERO)
     return out
@@ -438,9 +448,7 @@ def inter_division(db: Session, company_id: uuid.UUID, from_date: date, to_date:
     Returns {"in": {div: value}, "from": {source div: {div: value}}, "out": {kind: {div: value}},
     "rows": [{from, to, kind, value, vouchers}]}, and with detail=True "lines": each item consumed."""
     keys = [d["key"] for d in settings["divisions"]]
-    sg = stock_group_map(settings)
-    item_dk = {iid: sg.get(gid, (None, None)) for iid, gid in db.execute(
-        select(StockItem.id, StockItem.group_id).where(StockItem.company_id == company_id))}
+    item_dk = item_map(db, company_id, settings)
     q = (select(Voucher.id, VoucherType.name, VoucherInventoryLine.stock_item_id, VoucherInventoryLine.quantity,
                 VoucherInventoryLine.amount, VoucherInventoryLine.inward, Voucher.voucher_date, Voucher.voucher_number,
                 VoucherInventoryLine.unit)
@@ -538,11 +546,12 @@ def _transfer_blocks(divisions: list[dict]) -> list:
 DRILL = {"rm_out": {"src": "row"}}
 
 
-def finance_sheet(db: Session, company_id: uuid.UUID, from_date: date, to_date: date, transfers: bool = False) -> dict:
+def finance_sheet(db: Session, company_id: uuid.UUID, from_date: date, to_date: date, transfers: bool = False,
+                  settings: dict | None = None) -> dict:
     """The P&L in the workbook's own layout: one block per stage, a row per division and a total row, each
     with its % of net revenue; plus the purchase block (purchase, carriage inward, P&F ...).
     transfers=True: material one division's production took from another division is charged to it."""
-    pl = profit_and_loss(db, company_id, from_date, to_date, transfers=transfers)
+    pl = profit_and_loss(db, company_id, from_date, to_date, transfers=transfers, settings=settings)
     lines = {ln["key"]: ln for sec in pl["sections"] for ln in sec["lines"]}
     divs = pl["divisions"]
     revenue = lines["net_revenue"]
@@ -560,7 +569,8 @@ def finance_sheet(db: Session, company_id: uuid.UUID, from_date: date, to_date: 
             rows.append(row)
         total = {"month": "", "category": "Total", "total": True, "values": [lines[key]["total"] for _, key in cols],
                  "pct": pct(lines[pct_key]["total"], revenue["total"]) if pct_key else None}
-        editable = {i: lines[key]["editable"] for i, (_, key) in enumerate(cols) if lines[key].get("editable")}
+        editable = {i: lines[key]["editable"] for i, (_, key) in enumerate(cols)
+                    if lines[key].get("editable") and not (settings or {}).get("_item_dk")}
         overridden = {i: lines[key].get("overridden", []) for i in editable for key in [cols[i][1]]}
         drill = {}
         if transfers:
@@ -578,14 +588,16 @@ def finance_sheet(db: Session, company_id: uuid.UUID, from_date: date, to_date: 
                 + [{"category": "Total", "total": True,
                     "values": [h["total"] for h in heads] + [m(sum((Decimal(h["total"]) for h in heads), ZERO))]}]}
     return {"from": pl["from"], "to": pl["to"], "period": period, "month": pl["month"], "divisions": divs,
+            "basis": (settings or {}).get("basis"),
             "blocks": blocks, "purchase": purchase, "shared_cost_centres": pl["shared_cost_centres"],
             "transfers": pl.get("transfers")}
 
 
-def profit_and_loss(db: Session, company_id: uuid.UUID, from_date: date, to_date: date, transfers: bool = False) -> dict:
+def profit_and_loss(db: Session, company_id: uuid.UUID, from_date: date, to_date: date, transfers: bool = False,
+                    settings: dict | None = None) -> dict:
     """The monthly finance sheet: sales, RM consumption, production cost (WIP), finished goods cost, gross and
     net profit, per division. transfers=True: with material used by another division moved to it."""
-    settings = load_settings(db, company_id)
+    settings = settings or load_settings(db, company_id)
     keys = [d["key"] for d in settings["divisions"]]
     amounts = ledger_amounts(db, company_id, from_date, to_date, settings)
     breakup = expense_breakup(db, company_id, from_date, to_date, settings)
@@ -702,3 +714,87 @@ def profit_and_loss(db: Session, company_id: uuid.UUID, from_date: date, to_date
     return {"from": str(from_date), "to": str(to_date), "divisions": settings["divisions"], "sections": sections,
             "month": month_key if one_month else None, "purchase_heads": purchase_heads,
             "shared_cost_centres": unmapped, "transfers": moved["rows"] if moved else None}
+
+
+# ------------------------------------------------------------------ the finance sheet by category, for every company
+
+_FG = re.compile(r"\bFG\b|FINISH", re.I)
+_WIP = re.compile(r"\bWIP\b|WORK IN PROGRESS|SEMI", re.I)
+_RM = re.compile(r"\bRM\b|RAW MATERIAL", re.I)
+
+
+def category_settings(db: Session, company_id: uuid.UUID, from_date: date, to_date: date) -> dict:
+    """The finance sheet's rows for any company without setting it up: its stock item categories, or, when
+    it keeps none, its top stock groups. Raw material / WIP / finished goods: from the stock group settings
+    when made, else from the group names (RM, WIP, FG / finished), else an item that is sold is a finished
+    good and any other is raw material. Amounts with no category of their own (overheads, a sale without
+    items) are shared by each category's share of the period's sales."""
+    from app.models import VoucherType as VT
+    base = load_settings(db, company_id)
+    groups = base["_groups"]
+    sg = stock_group_map(base)
+    items = db.execute(select(StockItem.id, StockItem.category, StockItem.group_id).where(StockItem.company_id == company_id)).all()
+    cats = sorted({(c or "").strip() for _, c, _ in items if (c or "").strip()}, key=str.upper)
+
+    def chain(gid):
+        out, seen = [], set()
+        while gid in groups and gid not in seen:
+            seen.add(gid)
+            out.append(groups[gid])
+            gid = groups[gid].parent_id
+        return out
+    basis = "category" if cats else "group"
+    # group-wise: the top stock groups, going down a level while one group holds nearly everything (a company
+    # whose groups all sit under one group named after it is shown by the groups under that one)
+    rp = {iid: [g.name for g in reversed(chain(gid))] for iid, _, gid in items}
+    level = {iid: 1 for iid in rp}
+    for _ in range(5):
+        if basis != "group" or not any(rp.values()):
+            break
+        counts = defaultdict(int)
+        for iid, p in rp.items():
+            if p:
+                counts[tuple(p[:level[iid]])] += 1
+        top, n = max(counts.items(), key=lambda x: x[1])
+        deeper = [i for i, p in rp.items() if p and tuple(p[:level[i]]) == top and len(p) > level[i]]
+        if n < 0.8 * sum(counts.values()) or not deeper:
+            break
+        for i in deeper:
+            level[i] += 1
+    group_name = {iid: (p[level[iid] - 1] if p else "") for iid, p in rp.items()}
+    names = cats if cats else sorted({n for n in group_name.values() if n}, key=str.upper)
+    key_of = {n: f"d{i}" for i, n in enumerate(names)}
+    divisions = [{"key": key_of[n], "name": n} for n in names]
+    none_name = "(No category)" if basis == "category" else "(No stock group)"
+    sold = set(db.scalars(select(VoucherInventoryLine.stock_item_id).join(Voucher).join(VT, VT.id == Voucher.voucher_type_id)
+                          .where(Voucher.company_id == company_id, VT.base_type == "Sales").distinct()))
+    item_dk = {}
+    for iid, cat, gid in items:
+        path = chain(gid)
+        name = (cat or "").strip() if basis == "category" else group_name[iid]
+        if name:
+            div = key_of[name]
+        else:
+            if not any(d["key"] == "none" for d in divisions):
+                divisions.append({"key": "none", "name": none_name})
+            div = "none"
+        kind = sg.get(gid, (None, None))[1]
+        if kind is None:
+            text = " ".join(g.name for g in path)
+            kind = "wip" if _WIP.search(text) else "fg" if _FG.search(text) else "rm" if _RM.search(text) else None
+        item_dk[iid] = (div, kind or ("fg" if iid in sold else "rm"))
+    if not divisions:
+        divisions = [{"key": "none", "name": none_name}]
+    # each category's share of the period's sales, for amounts that have no category of their own
+    sales = defaultdict(lambda: ZERO)
+    for iid, amount in db.execute(
+            select(VoucherInventoryLine.stock_item_id, VoucherInventoryLine.amount).join(Voucher)
+            .join(VT, VT.id == Voucher.voucher_type_id)
+            .where(Voucher.company_id == company_id, Voucher.status == VoucherStatus.POSTED, VT.base_type == "Sales",
+                   Voucher.voucher_date.between(from_date, to_date))):
+        sales[item_dk.get(iid, ("none", None))[0]] += abs(amount or ZERO)
+    total = sum(sales.values(), ZERO)
+    keys = [d["key"] for d in divisions]
+    split = {k: (sales[k] / total if total else Decimal(1) / len(keys)) for k in keys}
+    return {"divisions": divisions, "cost_centres": {}, "stock_groups_explicit": {}, "ledgers": base["ledgers"],
+            "stock_overrides": {}, "_groups": groups, "_item_dk": item_dk, "_split": split, "basis": basis}

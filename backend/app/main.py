@@ -38,7 +38,7 @@ async def lifespan(_app: FastAPI):
     from app.licensing.client import heartbeat
     from app.licensing.service import expiry_notices
     from app.workers.auto_sync import auto_sync
-    if settings.auto_sync:
+    if auto_sync.load_saved():
         auto_sync.start()   # when off, it can still be switched on from the Sync tab
     if settings.license_mode == "client":
         heartbeat.start()   # daily licence check-in with the cloud

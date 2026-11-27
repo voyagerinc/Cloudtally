@@ -46,6 +46,33 @@ class TallyConnector(TimestampMixin, Base):
     health_status: Mapped[str] = mapped_column(String(20), default="unknown")
     health_message: Mapped[str | None] = mapped_column(Text)
     health_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Automatic sync of this company (Admin > Connector; kept in the database, so a software update never
+    # changes it): pull = read Tally's changes, push = write the software's vouchers into Tally.
+    auto_pull: Mapped[bool] = mapped_column(Boolean, default=True)
+    auto_push: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Last Pull / Push that finished, and who started it ("automatic" for automatic sync).
+    last_pull_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_pull_by: Mapped[str | None] = mapped_column(String(100))
+    last_push_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_push_by: Mapped[str | None] = mapped_column(String(100))
+
+
+class SyncRun(IdMixin, Base):
+    """Push / pull history: one row per Pull or Push someone started, and per automatic run that moved
+    something. The vouchers each run moved are found from the inbox / outbox by its time window."""
+
+    __tablename__ = "sync_runs"
+    __table_args__ = (Index("ix_sync_runs_company_started", "company_id", "started_at"),)
+
+    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id"))
+    direction: Mapped[str] = mapped_column(String(10))            # pull | push | both
+    trigger: Mapped[str] = mapped_column(String(20), default="manual")   # manual | automatic
+    started_by: Mapped[str | None] = mapped_column(String(100))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    state: Mapped[str] = mapped_column(String(20), default="running")   # running | done | failed | stopped
+    summary: Mapped[str | None] = mapped_column(Text)
+    counts: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class TallyMapping(IdMixin, TimestampMixin, Base):

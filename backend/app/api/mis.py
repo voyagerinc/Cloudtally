@@ -21,7 +21,7 @@ from app.reports import mis, xlsx
 router = APIRouter(tags=["mis"])
 
 REPORT_KEYS = ("mis-pl", "mis-finance-sheet", "mis-finance-sheet-coolace", "mis-expense", "mis-exp-breakup",
-               "mis-deferred")
+               "mis-deferred", "mis-monthly-sheet")
 CSV_ROWS.update({k: "rows" for k in REPORT_KEYS})
 
 
@@ -173,6 +173,24 @@ def mis_finance_sheet(company_id: uuid.UUID, db: DB, user: CurrentUser, from_dat
     if format != "xlsx":
         return _respond(db, user, company_id, "mis-finance-sheet", data, format)
     return _xlsx(db, user, company_id, "mis-finance-sheet", _sheet_grid(data), [11, 20, 18, 18, 18, 18, 18, 10],
+                 f"Monthly P&L {data['period']}", len(data["rows"]))
+
+
+@router.get("/reports/mis-monthly-sheet")
+def mis_monthly_sheet(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                      to_date: date | None = None, format: Fmt = "json"):
+    """The monthly finance sheet for any company: a row per stock item category (or, with no categories,
+    per top stock group), with no MIS set-up needed."""
+    key = "mis-monthly-sheet"
+    authorize(db, user, company_id, Perm.report(key))
+    f, t = _period(from_date, to_date)
+    data = mis.finance_sheet(db, company_id, f, t, settings=mis.category_settings(db, company_id, f, t))
+    data["rows"] = [{"block": b["title"], "month": r.get("month"), "category": r["category"],
+                     **dict(zip(b["columns"], r["values"])), **({"%": r.get("pct")} if b.get("pct") else {})}
+                    for b in data["blocks"] + [data["purchase"]] for r in b["rows"]]
+    if format != "xlsx":
+        return _respond(db, user, company_id, key, data, format)
+    return _xlsx(db, user, company_id, key, _sheet_grid(data), [11, 24, 18, 18, 18, 18, 18, 10],
                  f"Monthly P&L {data['period']}", len(data["rows"]))
 
 

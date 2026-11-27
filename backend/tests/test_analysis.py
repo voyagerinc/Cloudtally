@@ -328,3 +328,54 @@ def test_group_wise_sales_in_main_and_alternate_unit_with_sale_and_fifo_cost_rat
     assert x.status_code == 200 and x.content[:2] == b"PK"
     labels = {p["key"] for g in api.get("/api/v1/permissions", headers=h).json()["groups"] for p in g["permissions"]}
     assert "report.sales-group-units" in labels
+
+
+def test_group_wise_sales_stock_item_wise_shows_stock_group_and_parent_group(db, books):
+    """Both group-wise sales reports can be shown stock item-wise: one row per item, with its stock group and
+    that group's parent, and the same totals."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.models import User
+    from app.core.security import hash_key
+    for units in (False, True):
+        tree = analysis.group_wise(db, books.id, "sales", *SPAN, units=units)
+        flat = analysis.group_wise(db, books.id, "sales", *SPAN, units=units, view="item")
+        assert flat["view"] == "item" and "tree" not in flat and flat["total"] == tree["total"]
+        items = [x for x in tree["rows"] if x["type"] == "item"]
+        assert sorted(r["stock_item"] for r in flat["rows"]) == sorted(x["name"] for x in items)
+        assert sum(Decimal(r["value"]) for r in flat["rows"]) == Decimal(tree["total"]["value"])
+        for r in flat["rows"]:
+            [x] = [x for x in items if x["name"] == r["stock_item"]]
+            path = [g for g in x["group_path"].split(" > ") if g and g != "(no group)"]
+            assert (r["stock_group"], r["parent_group"]) == ((path[-1] if path else ""), (path[-2] if len(path) > 1 else ""))
+            if units:
+                assert r["alt_rate"] == x.get("alt_rate") and r["cost_rate"] == x.get("cost_rate")
+    db.add(User(username="iw-boss", api_key_hash=hash_key("k-iw"), is_superadmin=True))
+    db.commit()
+    api, h = TestClient(app), {"X-API-Key": "k-iw"}
+    for key in ("sales-group-wise", "sales-group-units"):
+        url = f"/api/v1/reports/{key}?company_id={books.id}&from_date={SPAN[0]}&to_date={SPAN[1]}&view=item"
+        assert {"stock_item", "stock_group", "parent_group"} <= set(api.get(url, headers=h).json()["rows"][0])
+        assert api.get(url + "&format=xlsx", headers=h).content[:2] == b"PK"
+
+
+def test_item_wise_sales_with_fifo_cost_in_main_and_alternate_unit_is_its_own_report(db, books):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.models import User
+    from app.core.security import hash_key
+    db.add(User(username="iu-boss", api_key_hash=hash_key("k-iu"), is_superadmin=True))
+    db.commit()
+    api, h = TestClient(app), {"X-API-Key": "k-iu"}
+    base = f"company_id={books.id}&from_date={SPAN[0]}&to_date={SPAN[1]}"
+    r = api.get(f"/api/v1/reports/sales-item-units?{base}", headers=h).json()
+    same = api.get(f"/api/v1/reports/sales-group-units?{base}&view=item", headers=h).json()
+    assert r["view"] == "item" and r["rows"] == same["rows"] and r["total"] == same["total"]
+    assert {"stock_item", "stock_group", "parent_group", "quantity", "rate", "alt_quantity", "alt_rate",
+            "cost", "cost_rate", "cost_alt_rate", "margin"} <= set(r["rows"][0])
+    one = r["rows"][0]
+    only = api.get(f"/api/v1/reports/sales-item-units?{base}&item={one['key']}", headers=h).json()["rows"]
+    assert [x["stock_item"] for x in only] == [one["stock_item"]]          # the item filter works here
+    assert api.get(f"/api/v1/reports/sales-item-units?{base}&format=xlsx", headers=h).content[:2] == b"PK"
+    keys = {p["key"] for g in api.get("/api/v1/permissions", headers=h).json()["groups"] for p in g["permissions"]}
+    assert "report.sales-item-units" in keys

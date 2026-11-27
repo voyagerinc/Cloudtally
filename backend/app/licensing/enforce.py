@@ -99,7 +99,7 @@ def check_perm(db: Session, company_id: uuid.UUID | None, perm: str) -> None:
 
 
 ONE_WAY_MESSAGE = ("Your licence syncs from Tally to the software only: enter and change this company's vouchers and "
-                   "masters in Tally, then Sync now. Contact Voyager to approve two-way sync.")
+                   "masters in Tally, then Pull. Contact Voyager to approve two-way sync.")
 
 
 def one_way(db: Session, company_id: uuid.UUID | None, ent: Entitlement | None = None) -> bool:

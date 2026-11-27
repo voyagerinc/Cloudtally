@@ -8,7 +8,7 @@ from app.models.masters import (
 from app.models.mis import DeferredExpense, FixedAssetState, MisSettings
 from app.models.sync import (
     Attachment, AuditEvent, ImportBatch, OutboxStatus, ReconciliationRun, SyncAttempt, SyncConflict,
-    SyncInbox, SyncOutbox, SyncProgress, TallyConnector, TallyMapping,
+    SyncInbox, SyncOutbox, SyncProgress, SyncRun, TallyConnector, TallyMapping,
 )
 from app.models.vouchers import (
     BankAllocation, BillAllocation, CostAllocation, SyncStatus, Voucher, VoucherEntry,
@@ -20,7 +20,7 @@ __all__ = [
     "Attachment", "AuditEvent", "Customer", "DownloadEvent", "Installation", "License", "LicenseEvent",
     "LicenseState", "SoftwareRelease", "UserInvite", "BankAllocation", "BillAllocation", "Company", "CostAllocation", "CostCentre",
     "FinancialYear", "Godown", "ImportBatch", "Ledger", "LedgerGroup", "OutboxStatus", "ReconciliationRun",
-    "StockGroup", "StockItem", "SyncAttempt", "SyncConflict", "SyncInbox", "SyncOutbox", "SyncProgress", "SyncStatus",
+    "StockGroup", "StockItem", "SyncAttempt", "SyncConflict", "SyncInbox", "SyncOutbox", "SyncProgress", "SyncRun", "SyncStatus",
     "TallyConnector", "TallyMapping", "TaxCode", "Unit", "User", "UserCompanyAccess", "UserSession", "Voucher",
     "AppSetting",
     "VoucherEntry", "VoucherInventoryLine", "VoucherStatus", "VoucherType", "VoucherVersion",

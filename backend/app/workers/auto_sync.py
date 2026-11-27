@@ -15,9 +15,9 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.licensing import enforce as licence
-from app.models import SyncProgress, TallyConnector
+from app.models import AppSetting, SyncProgress, TallyConnector
 from app.models.base import utcnow
-from app.services.sync import progress
+from app.services.sync import history, progress
 from app.workers.sync_worker import run_company
 
 log = logging.getLogger("sync.auto")
@@ -43,8 +43,20 @@ class AutoSync:
         self._stop.set()
         self._wake.set()
 
+    def load_saved(self) -> bool:
+        """The on / off chosen in the software (kept in the database, so a software update or a changed start
+        script does not switch it); ERP_AUTO_SYNC only until someone chooses. True when it is on."""
+        try:
+            with SessionLocal() as db:
+                row = db.get(AppSetting, "auto_sync")
+                if row is not None and row.value is not None:
+                    self.paused = not bool(row.value)
+        except Exception:
+            log.exception("could not read the automatic sync setting")
+        return not self.paused
+
     def set_paused(self, paused: bool) -> None:
-        """Switched from the Sync tab; takes effect at once (a running round finishes first)."""
+        """Switched from Admin > Pull / Push; takes effect at once (a running round finishes first)."""
         self.paused = paused
         if not paused:
             self.start()
@@ -87,7 +99,15 @@ class AutoSync:
                     continue   # Stop sync was clicked: left alone until Sync now or Resume
                 if not licence.sync_allowed(db, company_id):
                     continue   # licence read-only, or Tally sync not licensed
-            run_company(SessionLocal, company_id, trigger="automatic sync")
+                conn = db.get(TallyConnector, company_id)
+                pull, push = conn.auto_pull, conn.auto_push and conn.outbound_enabled
+            if not (pull or push):
+                continue       # Admin > Connector: automatic pull and push both off for this company
+            direction = "both" if pull and push else "pull" if pull else "push"
+            started = utcnow()
+            stats = run_company(SessionLocal, company_id, trigger=f"automatic {history.LABEL[direction].lower()}",
+                                direction=direction)
+            history.record_automatic(company_id, direction, started, stats)
             with SessionLocal() as db:
                 conn = db.get(TallyConnector, company_id)
                 backlog |= bool(conn and conn.voucher_backlog and conn.health_status == "ok")

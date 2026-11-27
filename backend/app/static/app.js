@@ -104,7 +104,7 @@ function isAdmin() {   // company admin or accounts admin in the selected compan
 // Reports the customer's licence includes (set on the licence server). null: every report.
 const licensedReport = (key) => !state.licReports || state.licReports.includes(key);
 // Licence without two-way Tally sync: a Tally-connected company's data is entered in Tally, not here.
-const ONE_WAY_PERMS = ["voucher.create", "voucher.alter", "voucher.post", "voucher.approve", "voucher.delete", "masters.write"];
+const ONE_WAY_PERMS = ["voucher.create", "voucher.alter", "voucher.post", "voucher.approve", "voucher.delete", "masters.write", "sync.push"];
 function can(perm) {
   if (perm.startsWith("report.") && !licensedReport(perm.slice(7))) return false;
   if (state.oneWay && ONE_WAY_PERMS.includes(perm)) return false;
@@ -225,14 +225,25 @@ async function discoverTally() {
       const res = await api("/import/tally/link", { method: "POST", body: { ...target, tally_company_name: b.dataset.link } });
       $("#tally-dlg").close();
       await loadCompanies(res.company_id);
-      alert(`Linked. Masters are importing in the background; progress shows on the Sync tab.
+      alert(`Linked. Masters are importing in the background; progress shows on Admin > Pull / Push.
 Mode: ${res.mode}`);
     } catch (err) { $("#td-msg").textContent = err.message; b.disabled = false; }
   }));
 }
 $("#td-form").onsubmit = (e) => { e.preventDefault(); discoverTally(); };
 
-function resetCheck() { $("#run-sync").dataset.checked = ""; $("#sync-progress").hidden = true; $("#tally-check").hidden = true; $("#run-sync").disabled = true; $("#run-sync").title = "Check Tally first"; }
+// Pull and Push: enabled once Check Tally found the company, for users with that right, while nothing runs.
+const ppState = { checked: false, running: false, oneWay: false, frozen: false };
+function ppButtons() {
+  const pull = $("#pull-sync"), push = $("#push-sync");
+  pull.hidden = !can("sync.pull"); push.hidden = !can("sync.push");
+  const why = ppState.running ? "A pull or push is running" : !ppState.checked ? "Check Tally first" : "";
+  pull.disabled = !!why; pull.title = why || "Read what changed in Tally into the software";
+  const pushWhy = why || (ppState.oneWay ? "Push is off: the connector is one way (Admin > Connector)"
+    : ppState.frozen ? "Push is frozen (Admin > Connector)" : "");
+  push.disabled = !!pushWhy; push.title = pushWhy || "Write the vouchers waiting below into Tally";
+}
+function resetCheck() { ppState.checked = false; $("#sync-progress").hidden = true; $("#tally-check").hidden = true; ppButtons(); }
 
 let currentTab = "dashboard";
 const renderers = {};
@@ -274,34 +285,43 @@ renderers.dashboard = async () => {
   const d = await api(`/sync/dashboard?${cq()}`);
   const c = d.connector || {};
   const a = d.auto_sync || {};
-  const autoText = !a.enabled ? "off: sync only runs when you click Sync now" : c.voucher_backlog
+  ppState.oneWay = !c.outbound_enabled; ppState.frozen = !!c.freeze_outbound; ppButtons();
+  const byWho = (x) => (x && x.by ? ` by ${esc(x.by)}` : "");
+  const lastRun = (k) => d.last_runs?.[k] ? `${esc(d.last_runs[k].summary || "")}${d.last_runs[k].state !== "done" ? ` · ${chip(d.last_runs[k].state)}` : ""}` : "";
+  $("#last-pp").innerHTML = `<div><div class="k small muted">Last pull (Tally → software)</div>
+      <div class="v">${d.last_pull?.at ? esc(when(d.last_pull.at)) : "never"}</div><div class="small muted">${byWho(d.last_pull)} ${lastRun("pull")}</div></div>
+    <div class="push"><div class="k small muted">Last push (software → Tally)</div>
+      <div class="v">${d.last_push?.at ? esc(when(d.last_push.at)) : "never"}</div><div class="small muted">${byWho(d.last_push)} ${lastRun("push")}
+      ${d.push_waiting ? ` · <b>${Number(d.push_waiting).toLocaleString("en-IN")}</b> waiting to push` : ""}</div></div>`;
+  const autoText = !a.enabled ? "off: pull and push run only when you click them" : c.voucher_backlog
     ? `catching up: ${Number(c.voucher_backlog).toLocaleString("en-IN")} changed vouchers left, next slot right after this one`
     : `every ${a.poll_seconds} s while Tally is open${a.last_round_at ? ` · last ${when(a.last_round_at)}` : ""}`;
   const cards = [
     ["Automatic sync", `${a.enabled ? (c.voucher_backlog ? "Catching up" : "On") : "Off"}
       ${state.user?.is_superadmin ? `<button type="button" class="secondary small" id="auto-toggle">${a.enabled ? "Turn off" : "Turn on"}</button>` : ""}`, esc(autoText)],
     ["Tally connection", chip(c.health_status || "not configured"), esc(c.health_message || c.tally_company_name || "")],
-    ["Pending", d.pending, d.oldest_pending_seconds != null ? `oldest ${Math.round(d.oldest_pending_seconds / 60)} min` : ""],
+    ["Pending push", d.push_waiting ?? d.pending, d.oldest_pending_seconds != null ? `oldest ${Math.round(d.oldest_pending_seconds / 60)} min` : (c.outbound_enabled ? "" : "one way: push is off")],
     ["Failed", d.failed, Object.entries(d.failed_by_error).map(([k, v]) => `${k}: ${v}`).join(", ")],
     ["Open conflicts", d.open_conflicts, ""],
     ["Inbound failures", d.inbox_failed ? `<button type="button" class="linklike" id="open-failures">${Number(d.inbox_failed).toLocaleString("en-IN")}</button>` : 0,
       d.inbox_failed ? "click to see why and fix" : ""],
     ["Vouchers in Tally", Number(d.vouchers.in_tally).toLocaleString("en-IN"),
-      (d.vouchers.waiting_in_tally ? `${Number(d.vouchers.waiting_in_tally).toLocaleString("en-IN")} still to read · click Sync now` : "all read")
+      (d.vouchers.waiting_in_tally ? `${Number(d.vouchers.waiting_in_tally).toLocaleString("en-IN")} still to pull · click Pull` : "all pulled")
         + (d.vouchers.cancelled_in_tally ? ` · ${Number(d.vouchers.cancelled_in_tally).toLocaleString("en-IN")} cancelled in Tally, not imported` : "")],
     ["Synced vouchers", Number(d.vouchers.synced).toLocaleString("en-IN"),
       d.vouchers.in_tally ? `${Math.floor((d.vouchers.synced / Math.max(1, d.vouchers.in_tally - (d.vouchers.cancelled_in_tally || 0))) * 100)}% of Tally` +
         (d.vouchers.not_stored ? ` · ${d.vouchers.not_stored} need attention` : "") : ""],
     ["Amended in Tally", Number(d.vouchers.amended_in_tally).toLocaleString("en-IN"), "vouchers whose amendment was synced"],
-    ["Last import", when(c.last_inbound_at) || "never", c.freeze_inbound ? "inbound frozen" : ""],
-    ["Last export", when(c.last_outbound_at) || "never", c.freeze_outbound ? "outbound frozen" : (c.outbound_enabled ? "bidirectional" : "one way: Tally → software")],
+    ["Mode", c.outbound_enabled ? "Bidirectional" : "One way", (c.freeze_inbound ? "pull frozen · " : "") + (c.freeze_outbound ? "push frozen · " : "")
+      + `automatic: ${[c.auto_pull && "pull", c.auto_push && c.outbound_enabled && "push"].filter(Boolean).join(" and ") || "off for this company"}`],
   ];
   $("#health").innerHTML = cards.map(([k, v, s]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="small muted">${s}</div></div>`).join("");
   setBadge(d.open_conflicts);
   $("#open-failures") && ($("#open-failures").onclick = openFailures);
   $("#auto-toggle") && ($("#auto-toggle").onclick = async () => {
-    if (!a.enabled && !confirm("Automatic sync reads every company's changes from Tally on its own, and works through any backlog " +
-      "one slot after another. While a large backlog is read, Tally is busy most of the time. Turn it on?")) return;
+    if (!a.enabled && !confirm("Automatic sync pulls (and, where set, pushes) every company on its own, as chosen in " +
+      "Admin > Connector, and works through any backlog one slot after another. While a large backlog is read, Tally is " +
+      "busy most of the time. Turn it on? (Kept until someone turns it off; a software update does not change it.)")) return;
     await api("/sync/auto", { method: "PUT", body: { enabled: !a.enabled } });
     renderers.dashboard();
   });
@@ -311,6 +331,7 @@ renderers.dashboard = async () => {
     { label: "What changed", wrap: true, get: (x) => x.changes.map(fieldLabel).join(", ") || "no content change" }],
     amends, (x) => openVoucher(x.voucher_id));
   $("#errors-csv").href = "#";
+  await Promise.all([loadPushPending(), loadHistory()]);
   await loadJobs();
   const inbox = await api(`/sync/inbox?${cq()}&limit=50`);
   table($("#inbox"), [
@@ -325,9 +346,14 @@ renderers.dashboard = async () => {
 };
 // Sync > Inbound failures: why vouchers from Tally were not saved, and what to do about it.
 let failData = null;
+// "Use instead": pick any master of that kind (the lists the voucher screen uses).
+const PICK_LIST = { "Ledger": "ledger-names", "Stock item": "item-names", "Godown": "godown-names", "Voucher type": "vt-pick-names" };
 async function openFailures() {
   const dlg = $("#fail-dlg");
   if (!dlg.open) dlg.showModal();
+  await loadEntryItems().catch(() => {});
+  if (!$("#vt-pick-names")) document.body.insertAdjacentHTML("beforeend", `<datalist id="vt-pick-names"></datalist>`);
+  $("#vt-pick-names").innerHTML = (state.vtypes || []).map((v) => `<option value="${esc(v.name)}">`).join("");
   $("#fail-body").innerHTML = `<p class="muted">Loading…</p>`;
   try { failData = await api(`/sync/inbox/failures?${cq()}`); }
   catch (err) { $("#fail-body").innerHTML = `<p class="error">${esc(err.message)}</p>`; return; }
@@ -343,8 +369,11 @@ async function openFailures() {
       ${manage ? `<div class="row wrap">${g.master ? `<button type="button" data-fix-g="${gi}" title="Asks Tally for this ${esc(g.master.kind.toLowerCase())}, reads these vouchers again if it was renamed, and saves them">Fix</button>` : ""}
         <button type="button" class="secondary" data-retry-g="${gi}">Try these ${n(g.count)} again</button>
         <button type="button" class="secondary danger" data-ignore-g="${gi}">Ignore these</button></div>
-        ${g.master && g.master.suggestions.length ? `<div class="row wrap small"><span class="muted">Not in Tally any more? Use instead:</span>
-          ${g.master.suggestions.map((s) => `<button type="button" class="secondary small" data-use-g="${gi}" data-use="${esc(s)}">${esc(s)}</button>`).join("")}</div>` : ""}` : ""}
+        ${g.master ? `<div class="row wrap small"><span class="muted">Not in Tally any more? Use instead:</span>
+          ${g.master.suggestions.map((s) => `<button type="button" class="secondary small" data-use-g="${gi}" data-use="${esc(s)}">${esc(s)}</button>`).join("")}
+          <input class="use-pick" data-pick-g="${gi}" list="${PICK_LIST[g.master.kind] || ""}" placeholder="or type / select the ${esc(g.master.kind.toLowerCase())} name"
+            aria-label="${esc(g.master.kind)} to use instead">
+          <button type="button" class="small" data-pick-use="${gi}">Use this</button></div>` : ""}` : ""}
       <div class="tablewrap"><table class="small"><thead><tr><th>Type</th><th>No.</th><th>Date</th><th>Tries</th><th></th></tr></thead><tbody>
       ${g.vouchers.slice(0, 200).map((v) => `<tr><td>${esc(v.voucher_type || "")}</td><td>${esc(v.voucher_number || "")}</td>
         <td>${esc(v.date || "")}</td><td class="num">${v.attempts}</td>
@@ -357,8 +386,21 @@ async function openFailures() {
   $("#fail-body").querySelectorAll("[data-retry]").forEach((b) => (b.onclick = () => retryFailures([b.dataset.retry], b)));
   $("#fail-body").querySelectorAll("[data-ignore-g]").forEach((b) => (b.onclick = () => ignoreFailures(ids(b.dataset.ignoreG))));
   $("#fail-body").querySelectorAll("[data-ignore]").forEach((b) => (b.onclick = () => ignoreFailures([b.dataset.ignore])));
-  $("#fail-body").querySelectorAll("[data-fix-g]").forEach((b) => (b.onclick = () => fixMaster(ids(b.dataset.fixG), b)));
+  // A name picked in the "Use instead" box is what Fix uses; empty: Fix asks Tally for the missing master.
+  const picked = (gi) => ($("#fail-body").querySelector(`[data-pick-g="${gi}"]`)?.value || "").trim();
+  $("#fail-body").querySelectorAll("[data-fix-g]").forEach((b) => (b.onclick = () =>
+    picked(b.dataset.fixG) ? useMaster(failData.groups[b.dataset.fixG], picked(b.dataset.fixG)) : fixMaster(ids(b.dataset.fixG), b)));
+  $("#fail-body").querySelectorAll("[data-pick-g]").forEach((inp) => inp.addEventListener("change", () => {
+    const list = document.getElementById(inp.getAttribute("list"));
+    const v = inp.value.trim();
+    if (v && list && [...list.options].some((o) => o.value === v)) useMaster(failData.groups[inp.dataset.pickG], v);
+  }));
   $("#fail-body").querySelectorAll("[data-use-g]").forEach((b) => (b.onclick = () => useMaster(failData.groups[b.dataset.useG], b.dataset.use)));
+  $("#fail-body").querySelectorAll("[data-pick-use]").forEach((b) => (b.onclick = () => {
+    const name = $("#fail-body").querySelector(`[data-pick-g="${b.dataset.pickUse}"]`).value.trim();
+    if (!name) return alert("Type or select the name to use instead.");
+    useMaster(failData.groups[b.dataset.pickUse], name);
+  }));
 }
 // Fix: Tally is asked for the missing master (and the vouchers are read again if it was renamed there).
 let fixTimer = null;
@@ -382,12 +424,14 @@ async function useMaster(g, use) {
   if (!confirm(`Save these ${g.count} voucher(s) with the ${kind} "${use}" instead of "${g.master.name}"?\n\n`
     + `Do this only when "${g.master.name}" is the same ${kind} under another name (renamed or merged in Tally). `
     + "Tally is not changed; the audit trail records it.")) return;
-  $("#fail-msg").textContent = "Saving…";
+  $("#fail-msg").textContent = `Saving ${g.count} voucher(s) with "${use}"…`;
+  $("#fail-dlg").scrollTop = 0;
   try {
     const r = await api(`/sync/inbox/use-master?${cq()}`, { method: "POST", body: { ids: g.vouchers.map((v) => v.id), use } });
     await openFailures(); renderers.dashboard();
-    $("#fail-msg").textContent = `${r.saved} voucher(s) saved with "${use}"` + (r.still ? `, ${r.still} still waiting (another problem).` : ".");
-  } catch (err) { $("#fail-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; }
+    const msg = `${r.saved} voucher(s) saved with "${use}"` + (r.still ? `, ${r.still} still waiting (another problem).` : ".");
+    $("#fail-msg").textContent = msg; alert(msg);
+  } catch (err) { $("#fail-msg").innerHTML = `<span class="error">${esc(err.message)}</span>`; alert(err.message); }
 }
 async function retryFailures(ids, btn) {
   if (btn) btn.disabled = true;
@@ -410,7 +454,7 @@ $("#fail-close").onclick = () => $("#fail-dlg").close();
 $("#fail-retry-all").onclick = (e) => retryFailures(failData.groups.flatMap((g) => g.vouchers.map((v) => v.id)), e.target);
 $("#fail-masters").onclick = async (e) => {
   if (!confirm("Read every master (ledgers, stock items, groups…) from Tally again, then try the waiting vouchers again?\n\n"
-    + "Tally is busy for a few minutes on a large company; the Sync tab shows the progress.")) return;
+    + "Tally is busy for a few minutes on a large company; Admin > Pull / Push shows the progress.")) return;
   e.target.disabled = true;
   try {
     await api(`/sync/inbox/read-masters?${cq()}`, { method: "POST" });
@@ -439,19 +483,16 @@ async function loadJobs() {
   $("#jobs").querySelectorAll("[data-retry]").forEach((b) => (b.onclick = async () => { await api(`/sync/jobs/${b.dataset.retry}/retry`, { method: "POST" }); loadJobs(); }));
 }
 $("#job-filter").onclick = loadJobs;
-// Check Tally: reachable? linked company open (same name + GUID)? Only then allow Sync now.
+// Check Tally: reachable? linked company open (same name + GUID)? Only then allow Pull and Push.
 function showCheck(r) {
   const el = $("#tally-check"); el.hidden = false; el.className = `check-panel ${r.matched ? "ok" : "bad"}`;
   const open = r.open_companies.length
     ? `<div class="small muted">Open in Tally:</div><ul>${r.open_companies.map((n) => `<li>${esc(n)}${n === r.tally_company_name ? " ✓" : ""}</li>`).join("")}</ul>` : "";
   el.innerHTML = r.matched
     ? `<div class="small muted">Tally is running. Linked company found:</div><div class="company">✓ ${esc(r.tally_company_name)}</div>
-       <div class="small muted">Books from ${esc(r.books_from)} · checked ${when(r.checked_at)}</div>
-       <div class="row"><button id="check-sync">Sync now</button></div>`
+       <div class="small muted">Books from ${esc(r.books_from)} · checked ${when(r.checked_at)} · you can Pull or Push now</div>`
     : `<div class="small muted">Linked company: <b>${esc(r.tally_company_name)}</b></div><div>${chip(r.status)} ${esc(r.message)}</div>${open}`;
-  $("#run-sync").dataset.checked = r.matched ? "yes" : "";
-  $("#run-sync").disabled = !r.matched; $("#run-sync").title = r.matched ? "" : "Check Tally first";
-  if (r.matched) $("#check-sync").onclick = () => $("#run-sync").click();
+  ppState.checked = !!r.matched; ppButtons();
 }
 $("#check-tally").onclick = async (e) => {
   e.target.disabled = true; const el = $("#tally-check");
@@ -467,10 +508,12 @@ const STEP_ICON = { done: "✓", running: "●", failed: "✗", skipped: "–", 
 let progressTimer = null;
 function renderProgress(p) {
   const el = $("#sync-progress");
-  const manage = can("sync.manage");
+  const manage = can("sync.pull") || can("sync.push");
+  const what = { pull: "Pull", push: "Push", both: "Pull and push" }[p?.direction || "both"];
   $("#stop-sync").hidden = !manage || p?.state !== "running";
   $("#stop-sync").disabled = !!p?.stopping_by;
-  $("#stop-sync").textContent = p?.stopping_by ? "Stopping…" : "Stop sync";
+  $("#stop-sync").textContent = p?.stopping_by ? "Stopping…" : `Stop ${what.toLowerCase()}`;
+  ppState.running = p?.state === "running"; ppButtons();
   $("#resume-sync").hidden = !manage || !p?.held_by || p?.state === "running";
   if (!p || p.state === "never") { el.hidden = true; return; }
   el.hidden = false;
@@ -488,19 +531,20 @@ function renderProgress(p) {
   const byVouchers = run ? Math.round((100 * run.read) / run.total) : null;
   const overall = p.state === "running"
     ? Math.min(99, byVouchers ?? Math.round(((finished + part) / (steps.length || 1)) * 100))
-    : (p.state === "done" ? 100 : (byVouchers ?? 100));
+    : (p.state === "done" ? 100 : (byVouchers ?? Math.round((finished / (steps.length || 1)) * 100)));
   const started = new Date((p.run && p.run.started_at) || p.started_at), ended = p.finished_at ? new Date(p.finished_at) : new Date();
   const secs = Math.max(0, Math.round((ended - started) / 1000));
   const eta = p.state === "running" && run && run.read > 0 && run.read < run.total
     ? ` · about ${dur(Math.round((secs / run.read) * (run.total - run.read)))} left` : "";
-  const title = { running: p.stopping_by ? `Stopping… (asked by ${p.stopping_by}; after the request Tally is answering now)` : `Syncing with Tally… ${overall}%`,
-    done: "Last sync finished", failed: `Last sync stopped at ${overall}%`, stopped: `Sync stopped at ${overall}%` }[p.state] || p.state;
+  const doing = { pull: "Pulling from Tally", push: "Pushing to Tally", both: "Pulling from and pushing to Tally" }[p.direction || "both"];
+  const title = { running: p.stopping_by ? `Stopping… (asked by ${p.stopping_by}; after the request Tally is answering now)` : `${doing}… ${overall}%`,
+    done: `Last ${what.toLowerCase()} finished`, failed: `Last ${what.toLowerCase()} failed${overall < 100 ? ` at ${overall}%` : ""}`, stopped: `${what} stopped at ${overall}%` }[p.state] || p.state;
   const line = p.state === "running"
     ? (run ? `${fmtN(run.read)} of ${fmtN(run.total)} vouchers read · ${overall}%${eta}${run.part > 1 ? ` · part ${run.part}` : ""}`
       : `Step ${Math.min(finished + 1, steps.length)} of ${steps.length} · ${overall}%`)
     : esc(p.summary || "") + (p.held_by && p.state !== "running"
-      ? ` · Automatic sync is held for this company (stopped by ${esc(p.held_by)}): click Sync now or Resume automatic sync.` : "");
-  el.innerHTML = `<div class="head"><b>${title}</b><span class="muted small">${esc(p.trigger || "")} · started ${started.toLocaleTimeString()} · ${dur(secs)}</span></div>
+      ? ` · Automatic sync is held for this company (stopped by ${esc(p.held_by)}): click Pull, Push or Resume automatic sync.` : "");
+  el.innerHTML = `<div class="head"><b>${title}</b><span class="muted small">${esc(p.trigger || "")} · started ${started.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })} ${started.toLocaleTimeString()} · ${dur(secs)}</span></div>
     <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${overall}" aria-label="Overall sync progress"><span style="width:${overall}%"></span></div>
     <div class="small muted">${line}</div>
     <ol class="steps">${steps.map((st) => {
@@ -509,7 +553,6 @@ function renderProgress(p) {
         <div class="small">${esc(st.detail || "")}${st.total ? ` — ${Number(st.done).toLocaleString("en-IN")} / ${Number(st.total).toLocaleString("en-IN")} · <b>${pctDone}%</b>` : ""}</div>
         ${pctDone !== null && st.state !== "skipped" ? `<div class="bar small" role="progressbar" aria-valuenow="${pctDone}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(st.name)}"><span style="width:${pctDone}%"></span></div>` : ""}</div></li>`;
     }).join("")}</ol>`;
-  $("#run-sync").disabled = p.state === "running" || $("#run-sync").dataset.checked !== "yes";
 }
 async function watchProgress() {
   clearTimeout(progressTimer);
@@ -525,17 +568,81 @@ async function watchProgress() {
     progressTimer = setTimeout(watchProgress, 15000);   // notice runs started by the background worker
   }
 }
-$("#run-sync").onclick = async (e) => {
-  e.target.disabled = true;
+async function startPP(direction, btn) {
+  if (direction === "push") {
+    const n = Number($("#pp-count").dataset.n || 0);
+    if (!confirm(n ? `Push ${n.toLocaleString("en-IN")} voucher change(s) from the software into Tally?\n\nThe list under `
+      + "Pending push shows each one. Tally keeps what is written; check the list first." : "Nothing is waiting to push. Push anyway?")) return;
+  }
+  btn.disabled = true;
   try {
-    await api(`/sync/run?${cq()}`, { method: "POST" });
-    $("#sync-progress").dataset.state = "running";
+    await api(`/sync/${direction}?${cq()}`, { method: "POST" });
+    $("#sync-progress").dataset.state = "running"; ppState.running = true; ppButtons();
     watchProgress();
-  } catch (err) { alert(err.message); e.target.disabled = false; }
-};
+  } catch (err) { alert(err.message); ppButtons(); }
+}
+$("#pull-sync").onclick = (e) => startPP("pull", e.currentTarget);
+$("#push-sync").onclick = (e) => startPP("push", e.currentTarget);
+// Pending push: the audit before pushing. Every voucher made or changed in the software that Tally does not have yet.
+async function loadPushPending() {
+  const r = await api(`/sync/push/pending?${cq()}`);
+  const f = $("#pp-status").value;
+  const rows = r.items.filter((i) => !f || i.status === f || (f === "pending" && i.status === "processing"));
+  $("#pp-count").hidden = !r.total; $("#pp-count").textContent = r.total; $("#pp-count").dataset.n = r.total;
+  $("#pp-blocked").hidden = !r.blocked; $("#pp-blocked").textContent = r.blocked || "";
+  const OP = { new: "New", alter: "Altered", cancel: "Cancelled", delete: "Deleted" };
+  table($("#push-pending"), [
+    { label: "Changed", get: (x) => when(x.changed_at) }, { label: "By", key: "changed_by" },
+    { label: "Change", get: (x) => OP[x.operation] || x.operation }, { label: "Type", get: (x) => x.voucher_type || x.entity_type },
+    { label: "No./name", key: "voucher_number" }, { label: "Date", key: "date" }, { label: "Version", get: (x) => `v${x.version}` },
+    { label: "Status", html: (x) => chip(x.status) }, { label: "Tries", key: "attempts", num: true },
+    { label: "Why waiting", wrap: true, get: (x) => x.why + (x.error ? `: ${x.error}` : "") },
+  ], rows, (x) => x.voucher_id && openVoucher(x.voucher_id));
+}
+$("#pp-status").onchange = () => loadPushPending().catch((e) => alert(e.message));
+async function loadHistory() {
+  const dir = $("#hist-dir").value;
+  const rows = await api(`/sync/history?${cq()}&limit=100${dir ? `&direction=${dir}` : ""}`);
+  const dur = (x) => { if (!x.finished_at) return ""; const s = Math.round((new Date(x.finished_at) - new Date(x.started_at)) / 1000);
+    return s >= 60 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${s} s`; };
+  table($("#sync-history"), [
+    { label: "Started", get: (x) => when(x.started_at) }, { label: "Took", get: dur },
+    { label: "What", html: (x) => `<span class="dir-${x.direction === "push" ? "push" : "pull"}">${x.direction === "pull" ? "⬇ " : x.direction === "push" ? "⬆ " : "⬇⬆ "}${esc(x.label)}</span>` },
+    { label: "By", get: (x) => x.trigger === "automatic" ? "automatic" : x.started_by },
+    { label: "Result", html: (x) => chip(x.state) }, { label: "What moved", wrap: true, key: "summary" },
+  ], rows, openRun);
+}
+$("#hist-dir").onchange = () => loadHistory().catch((e) => alert(e.message));
+async function openRun(x) {
+  const dlg = $("#run-dlg"); if (!dlg.open) dlg.showModal();
+  $("#run-title").textContent = `${x.label} · ${when(x.started_at)} · ${x.trigger === "automatic" ? "automatic" : x.started_by}`;
+  $("#run-body").innerHTML = `<p class="muted">Loading…</p>`;
+  let d;
+  try { d = await api(`/sync/history/${x.id}`); } catch (err) { $("#run-body").innerHTML = `<p class="error">${esc(err.message)}</p>`; return; }
+  const ACT = { new: "New", altered: "Altered", cancelled: "Cancelled", unchanged: "No change", ignored: "Ignored", failed: "Failed", conflict: "Conflict" };
+  const OP = { new: "New", alter: "Altered", cancel: "Cancelled", delete: "Deleted" };
+  $("#run-body").innerHTML = `<p>${chip(d.run.state)} ${esc(d.run.summary || "")}</p>`
+    + (d.truncated ? `<p class="small muted">Only the first 2,000 rows of each list are shown.</p>` : "")
+    + (d.run.direction !== "push" ? `<h3>Pulled from Tally (${d.pulled.length})</h3><div class="tablewrap"><table id="run-pulled"></table></div>` : "")
+    + (d.run.direction !== "pull" ? `<h3>Pushed to Tally (${d.pushed.length})</h3><div class="tablewrap"><table id="run-pushed"></table></div>` : "");
+  const close = (v) => { if (v.voucher_id) { dlg.close(); openVoucher(v.voucher_id); } };
+  if ($("#run-pulled")) table($("#run-pulled"), [
+    { label: "Received", get: (r) => when(r.at) }, { label: "Kind", get: (r) => r.entity_type === "voucher" ? (r.voucher_type || "") : r.entity_type },
+    { label: "No./name", key: "voucher_number" }, { label: "Date", key: "date" },
+    { label: "Change", get: (r) => (ACT[r.action] || r.action) + (r.version > 1 ? ` (v${r.version})` : "") },
+    { label: "What changed", wrap: true, get: (r) => r.changes.map(fieldLabel).join(", ") || (r.error || "") },
+  ], d.pulled, close);
+  if ($("#run-pushed")) table($("#run-pushed"), [
+    { label: "Sent", get: (r) => when(r.at) }, { label: "Type", get: (r) => r.voucher_type || r.entity_type },
+    { label: "No./name", key: "voucher_number" }, { label: "Change", get: (r) => `${OP[r.operation] || r.operation} (v${r.version})` },
+    { label: "Changed by", key: "changed_by" }, { label: "Result", html: (r) => chip(r.result) },
+    { label: "Error", wrap: true, get: (r) => r.error || "" },
+  ], d.pushed, close);
+}
+$("#run-close").onclick = () => $("#run-dlg").close();
 $("#stop-sync").onclick = async (e) => {
-  if (!confirm("Stop the sync? It stops after the request Tally is answering now (on a large company this can take a "
-    + "minute). What was read so far is saved, and automatic sync leaves this company alone until you click Sync now "
+  if (!confirm("Stop? It stops after the request Tally is answering now (on a large company this can take a "
+    + "minute). What was done so far is saved, and automatic sync leaves this company alone until you click Pull, Push "
     + "or Resume automatic sync.")) return;
   e.target.disabled = true;
   try { await api(`/sync/stop?${cq()}`, { method: "POST" }); watchProgress(); }
@@ -620,19 +727,28 @@ function inventoryTable(lines, groups = {}, custom = {}) {
   const mixed = new Set(lines.map(dir)).size > 1;
   const qtyNum = (n) => n.toLocaleString("en-IN", { maximumFractionDigits: 4 });
   const qtyText = (i) => `${qtyNum(Math.abs(Number(i.quantity)))} ${i.unit || ""}`.trim();
+  // alternate unit (e.g. 800 PCS = 1,336 KGS) and its rate: amount / alternate quantity
+  const altQ = (i) => (i.alt_unit && Number(i.alt_quantity) ? Math.abs(Number(i.alt_quantity)) : 0);
+  const altText = (i) => (altQ(i) ? `${qtyNum(altQ(i))} ${i.alt_unit}` : "");
+  const altRate = (i) => (altQ(i) && Number(i.amount) ? `${money(Math.abs(Number(i.amount)) / altQ(i))} / ${esc(i.alt_unit)}` : "");
   const part = (title, rows) => {
     const units = new Set(rows.map((i) => i.unit || ""));
+    const altUnits = new Set(rows.filter(altQ).map((i) => i.alt_unit));
+    const altSum = rows.reduce((a, i) => a + altQ(i), 0);
     const qty = rows.reduce((a, i) => a + Math.abs(Number(i.quantity)), 0);
     const amount = rows.reduce((a, i) => a + paise(i.amount), 0);
     return `<h3>${esc(title)} <span class="muted small">${rows.length} item${rows.length === 1 ? "" : "s"}</span></h3>
-      <table><thead><tr><th>Item</th><th>Item group</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th>
+      <table><thead><tr><th>Item</th><th>Item group</th><th class="num">Qty</th><th class="num">Alt. qty</th><th class="num">Rate</th>
+      <th class="num" title="Amount ÷ alternate quantity">Alt. rate</th><th class="num">Amount</th>
       <th>Godown</th><th>Batch</th>${cfCols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${rows.map((i) =>
       `<tr><td>${esc(i.item)}</td><td>${esc(groups[i.item] || "")}</td>
-        <td class="num">${Number(i.quantity) === 0 ? "value only" : esc(qtyText(i))}</td><td class="num">${money(i.rate)}</td>
+        <td class="num">${Number(i.quantity) === 0 ? "value only" : esc(qtyText(i))}</td><td class="num">${esc(altText(i))}</td>
+        <td class="num">${money(i.rate)}</td><td class="num">${altRate(i)}</td>
         <td class="num">${money(i.amount)}</td><td>${esc(i.godown || "")}</td><td>${cfOf(i).length > 1 ? cfOf(i).map((r) => esc(r.batch || "")).join("<br>") : esc(i.batch || "")}</td>
         ${cfCols.map((c) => `<td>${cfCell(i, c)}</td>`).join("")}</tr>`).join("")}
       <tr class="total"><td><b>Total</b></td><td></td><td class="num"><b>${units.size === 1 ? esc(`${qtyNum(qty)} ${[...units][0]}`.trim()) : ""}</b></td>
-        <td></td><td class="num"><b>${rupees(amount)}</b></td><td></td><td></td>${cfCols.map(() => "<td></td>").join("")}</tr></tbody></table>`;
+        <td class="num"><b>${altUnits.size === 1 ? esc(`${qtyNum(altSum)} ${[...altUnits][0]}`) : ""}</b></td>
+        <td></td><td></td><td class="num"><b>${rupees(amount)}</b></td><td></td><td></td>${cfCols.map(() => "<td></td>").join("")}</tr></tbody></table>`;
   };
   // stock and manufacturing journals move stock both ways: what came in and what went out, as separate tables
   if (mixed) return part("In (produced / received)", lines.filter((i) => dir(i) === "In"))
@@ -815,26 +931,51 @@ function addItemLine(tbodyId, l = {}) {
     <td><input class="i-godown" list="godown-names" value="${esc(l.godown || "")}"></td>
     <td><input class="i-batch" value="${esc(l.batch || "")}"></td>
     <td><input class="i-qty num" inputmode="decimal" value="${qty === 0 ? "" : qty}"></td>
+    <td class="alt-cell"><input class="i-alt num" inputmode="decimal" title="Quantity in the alternate unit (e.g. KGS)"
+      value="${l.alt_quantity != null && +l.alt_quantity ? Math.abs(+l.alt_quantity) : ""}"><span class="i-altunit small">${esc(l.alt_unit || "")}</span></td>
     <td><input class="i-rate num" inputmode="decimal" value="${l.rate && +l.rate ? +l.rate : ""}"></td>
     <td class="i-unit small">${esc(l.unit || "")}</td>
+    <td class="i-altrate num small" title="Amount ÷ alternate quantity"></td>
     <td><input class="i-amount num" inputmode="decimal" value="${l.amount && +l.amount ? Math.abs(+l.amount) : ""}"></td>
     <td><button type="button" class="link" tabindex="-1" title="Remove line">✕</button></td>`;
   tr.dataset.unit = l.unit || "";
+  tr.dataset.altUnit = l.alt_unit || "";
+  // alternate units per main unit: this line's own (as entered in Tally), else the item's conversion
+  tr.dataset.altPer = l.alt_quantity && +l.quantity ? Math.abs(+l.alt_quantity / +l.quantity) : "";
   if (l.rate && +l.rate) tr.dataset.rateEdited = "1";   // a rate already on the voucher stays
   tr.dataset.manual = l.amount && +l.amount && Math.abs(num2((+l.quantity || 0) * (+l.rate || 0))) !== Math.abs(num2(l.amount)) ? "1" : "";
   const $q = (c) => tr.querySelector(c);
-  const recalc = () => { if (!tr.dataset.manual) { const a = num2(Math.abs(+$q(".i-qty").value || 0) * (+$q(".i-rate").value || 0)); $q(".i-amount").value = a ? a.toFixed(2) : ""; } entryTotals(); };
+  // Alternate quantity follows the quantity (until typed over); alternate rate = amount / alternate quantity.
+  const altRate = () => {
+    const alt = Math.abs(+$q(".i-alt").value || 0), amt = Math.abs(+$q(".i-amount").value || 0);
+    $q(".i-altrate").textContent = alt && amt && tr.dataset.altUnit ? `${(amt / alt).toFixed(2)} / ${tr.dataset.altUnit}` : "";
+  };
+  const altQty = () => {
+    if (tr.dataset.altEdited || !tr.dataset.altPer) return;
+    const q = Math.abs(+$q(".i-qty").value || 0);
+    $q(".i-alt").value = q ? +(q * +tr.dataset.altPer).toFixed(4) : "";
+  };
+  const recalc = () => { altQty(); if (!tr.dataset.manual) { const a = num2(Math.abs(+$q(".i-qty").value || 0) * (+$q(".i-rate").value || 0)); $q(".i-amount").value = a ? a.toFixed(2) : ""; } altRate(); entryTotals(); };
   tr._recalc = recalc;
+  const setAltUnit = (it) => {
+    const per = it && it.alternate_unit && +it.conversion && +it.denominator ? +it.conversion / +it.denominator : 0;
+    tr.dataset.altUnit = per ? it.alternate_unit : ""; tr.dataset.altPer = per || "";
+    $q(".i-altunit").textContent = tr.dataset.altUnit; $q(".i-alt").disabled = !per;
+  };
+  if (!l.alt_unit) loadEntryItems().then(() => { if (!tr.dataset.altUnit) setAltUnit(itemInfo($q(".i-item").value)); altRate(); }).catch(() => {});
   $q(".i-item").addEventListener("change", () => {
     const it = itemInfo($q(".i-item").value);
     if (!it) return;
     tr.dataset.unit = it.unit || ""; $q(".i-unit").textContent = it.unit || "";
+    delete tr.dataset.altEdited; setAltUnit(it);
     if (usesFifo()) { delete tr.dataset.rateEdited; fifoRates([it.name]).then((r) => setFifoRate(tr, r[it.name])).catch(() => {}); }
     recalc();
   });
   $q(".i-qty").addEventListener("input", recalc);
   $q(".i-rate").addEventListener("input", () => { tr.dataset.rateEdited = $q(".i-rate").value ? "1" : ""; $q(".i-rate").classList.remove("auto-rate"); recalc(); });
-  $q(".i-amount").addEventListener("input", () => { tr.dataset.manual = $q(".i-amount").value ? "1" : ""; entryTotals(); });
+  $q(".i-amount").addEventListener("input", () => { tr.dataset.manual = $q(".i-amount").value ? "1" : ""; altRate(); entryTotals(); });
+  $q(".i-alt").addEventListener("input", () => { tr.dataset.altEdited = $q(".i-alt").value ? "1" : ""; altRate(); });
+  altRate();
   $q("button").onclick = () => { tr.remove(); entryTotals(); };
   $(`#${tbodyId}`).appendChild(tr);
   return tr;
@@ -844,6 +985,7 @@ function itemLines(tbodyId) {
     item: tr.querySelector(".i-item").value.trim(), godown: tr.querySelector(".i-godown").value.trim() || null,
     batch: tr.querySelector(".i-batch").value.trim() || null, qty: Math.abs(+tr.querySelector(".i-qty").value || 0),
     rate: +tr.querySelector(".i-rate").value || 0, amount: num2(tr.querySelector(".i-amount").value), unit: tr.dataset.unit || null,
+    alt: Math.abs(+tr.querySelector(".i-alt").value || 0), alt_unit: tr.dataset.altUnit || null,
   })).filter((l) => l.item);
 }
 const linesTotal = (id) => itemLines(id).reduce((s, l) => s + l.amount, 0);
@@ -1013,7 +1155,8 @@ function entryBody(prev) {
     party_ledger: $("#ve-party").value || null, reference_no: $("#ve-ref").value || null, narration: $("#ve-narration").value,
   };
   const inv = (l, inward, ledger = null) => ({ item: l.item, quantity: (inward ? l.qty : -l.qty).toString(), unit: l.unit, rate: l.rate.toString(),
-    amount: l.amount.toFixed(2), godown: l.godown, batch: l.batch, ledger, ...(l.qty ? {} : { direction: inward ? "in" : "out" }) });
+    amount: l.amount.toFixed(2), godown: l.godown, batch: l.batch, ledger, ...(l.qty ? {} : { direction: inward ? "in" : "out" }),
+    ...(l.alt && l.alt_unit ? { alt_quantity: (inward ? l.alt : -l.alt).toString(), alt_unit: l.alt_unit } : {}) });
   if (entryLayout === "acc") {
     if (totals() !== 0) throw new Error("Debits and credits must match");
     const entries = [...$("#ve-lines").querySelectorAll("tr")].map((tr, i) => {
@@ -1139,9 +1282,10 @@ function reportUrl(fmt) {
     for (const k of ["item", "stock_group"]) if (f2[k]) p.set(k, f2[k]);
     if (sjType && name === "stock-journal") p.set("voucher_type", sjType);
   }
-  if (name in ANALYSIS || ["fifo-costing", "fifo-monthly", "godown-summary", "sales-group-wise", "sales-group-units"].includes(name)) {
+  if (name in ANALYSIS || ["fifo-costing", "fifo-monthly", "godown-summary", "sales-group-wise", "sales-group-units", "sales-item-units"].includes(name)) {
     for (const [k, v] of Object.entries(analysisParams())) p.set(k, v);
     if (name in ANALYSIS) p.set("by", $("#ra-by").value);
+    if (["sales-group-wise", "sales-group-units"].includes(name) && $("#ra-view").value === "item") p.set("view", "item");
   }
   if (fmt) p.set("format", fmt);
   return `/reports/${path}?${p}`;
@@ -1166,13 +1310,14 @@ async function loadAnalysisFilters() {
 }
 function showAnalysisControls() {
   const name = $("#r-name").value;
-  const trade = name in ANALYSIS, fifo = ["fifo-costing", "fifo-monthly", "godown-summary"].includes(name), grouped = ["sales-group-wise", "sales-group-units"].includes(name);
+  const trade = name in ANALYSIS, fifo = ["fifo-costing", "fifo-monthly", "godown-summary"].includes(name), grouped = ["sales-group-wise", "sales-group-units", "sales-item-units"].includes(name);
   const journal = name === "stock-journal" || name.startsWith("material-transfer-wip") || name === "wo-manufacturing";
   $("#ra-filters").hidden = !(trade || fifo || grouped || journal);
   $("#ra-cat").closest("label").hidden = journal;
   $("#ra-by-label").hidden = !trade;
   ["#ra-party-label", "#ra-returns-label"].forEach((id) => ($(id).hidden = !(trade || grouped)));
-  $("#ra-item-label").hidden = grouped;
+  $("#ra-item-label").hidden = grouped && name !== "sales-item-units";
+  $("#ra-view-label").hidden = !grouped || name === "sales-item-units";
   if (journal) loadAnalysisFilters().catch(() => {});
   if (COSTED[name] && $("#ra-by").dataset.touched !== "1") $("#ra-by").value = COSTED[name].by;
   if (trade || fifo || grouped) loadAnalysisFilters().catch(() => {});
@@ -1350,14 +1495,91 @@ async function woManufacturingView(el) {
   ], roots, { title: "Produced item / consumed group / item" });
 }
 
+// Stock item-wise view of the group-wise sales reports: one row per item with its stock group and parent
+// group; an item opens its invoices.
+function itemWiseTable(el, r, counted, cols) {
+  const all = [
+    { label: "Stock item", get: (x) => x.stock_item },
+    { label: "Stock group", get: (x) => x.stock_group || "" }, { label: "Parent group", get: (x) => x.parent_group || "" },
+    ...cols,
+  ];
+  el.innerHTML = `<p class="muted">${esc(r.from)} to ${esc(r.to)} · ${esc(counted || "no voucher types")}`
+    + `${r.include_returns ? " · returns deducted" : ""} · <span id="iw-count"></span> · click an item for its invoices</p>`
+    + `<p class="small muted">Type in the box under a heading to filter: text matches anywhere (e.g. <b>black</b>);
+       numbers can use <b>&gt;</b>, <b>&lt;</b>, <b>&gt;=</b>, <b>&lt;=</b>, <b>=</b> (e.g. <b>&gt;100000</b>). The Total row adds up
+       the rows shown. <button type="button" class="linklike" id="iw-clear">Clear filters</button></p>`
+    + `<div class="tablewrap full"><table id="t" class="colfilter"></table></div>`;
+  const t = $("#t");
+  const text = (c, x) => (c.html ? c.html(x) : String(c.get ? c.get(x) ?? "" : x[c.key] ?? "")).replace(/<[^>]*>/g, "").trim();
+  const cell = (c, x) => (c.html ? c.html(x) : esc(c.get ? c.get(x) ?? "" : x[c.key] ?? ""));
+  t.innerHTML = `<thead><tr>${all.map((c) => `<th class="${c.num ? "num" : ""}">${esc(c.label)}</th>`).join("")}</tr>
+    <tr class="filters">${all.map((c, i) => `<th><input data-cf="${i}" class="${c.num ? "num" : ""}" placeholder="${c.num ? "e.g. >0" : "filter"}"
+      aria-label="Filter ${esc(c.label)}"></th>`).join("")}</tr></thead><tbody></tbody><tfoot></tfoot>`;
+  const num = (v) => { const n = parseFloat(String(v).replace(/[^0-9.\-]/g, "")); return Number.isFinite(n) ? n : null; };
+  const test = (f, v) => {
+    const m = f.match(/^(>=|<=|>|<|=)\s*(-?[\d,]*\.?\d+)$/);
+    if (m) {
+      const n = num(v), want = +m[2].replace(/,/g, "");
+      if (n == null) return false;
+      return { ">=": n >= want, "<=": n <= want, ">": n > want, "<": n < want, "=": Math.abs(n - want) < 0.005 }[m[1]];
+    }
+    return v.toLowerCase().includes(f.toLowerCase());
+  };
+  // Total of every column for the rows shown: quantities add up (the unit is named when they all share one),
+  // rates are total value (or cost) / total quantity, groups are counted.
+  const totalOf = (rows) => {
+    const sum = (k) => rows.reduce((a, x) => a + (Number(x[k]) || 0), 0);
+    const one = (q, u) => { const us = new Set(rows.filter((x) => x[q] != null).map((x) => x[u])); return us.size === 1 ? [...us][0] : null; };
+    const unit = one("quantity", "unit"), alt = one("alt_quantity", "alt_unit");
+    const value = sum("value"), cost = sum("cost"), qty = sum("quantity"), aq = sum("alt_quantity");
+    const rate = (v, q) => (q ? (v / q).toFixed(2) : null);
+    const hasCost = rows.some((x) => x.cost != null);
+    const groups = (k) => { const n = new Set(rows.map((x) => x[k]).filter(Boolean)).size; return `${n.toLocaleString("en-IN")} group${n === 1 ? "" : "s"}`; };
+    return { kind: "total", stock_item: `Total (${rows.length.toLocaleString("en-IN")} items)`, value: value.toFixed(2), tax: sum("tax").toFixed(2),
+      stock_group: groups("stock_group"), parent_group: groups("parent_group"),
+      quantity: +qty.toFixed(4), unit, alt_quantity: +aq.toFixed(4), alt_unit: alt, rate: rate(value, qty), alt_rate: rate(value, aq),
+      ...(hasCost ? { cost: cost.toFixed(2), margin: (value - cost).toFixed(2), margin_pct: value ? ((value - cost) / value * 100).toFixed(2) : null,
+        cost_rate: rate(cost, qty), cost_alt_rate: rate(cost, aq) } : {}) };
+  };
+  const draw = () => {
+    const fs = [...t.querySelectorAll("[data-cf]")].map((i) => i.value.trim());
+    const rows = r.rows.filter((x) => fs.every((f, i) => !f || test(f, text(all[i], x))));
+    t.querySelector("tbody").innerHTML = rows.length
+      ? rows.map((x, i) => `<tr data-i="${i}" class="click">${all.map((c) => `<td class="${c.num ? "num" : ""} ${c.wrap ? "wrap" : ""}">${cell(c, x)}</td>`).join("")}</tr>`).join("")
+      : `<tr><td colspan="${all.length}" class="muted">No stock item matches the filters</td></tr>`;
+    const tot = totalOf(rows);
+    t.querySelector("tfoot").innerHTML = `<tr class="total">${all.map((c) => `<td class="${c.num ? "num" : ""}">${cell(c, tot)}</td>`).join("")}</tr>`;
+    $("#iw-count").textContent = rows.length === r.rows.length ? `${r.rows.length.toLocaleString("en-IN")} stock items`
+      : `${rows.length.toLocaleString("en-IN")} of ${r.rows.length.toLocaleString("en-IN")} stock items (filtered)`;
+    t.querySelectorAll("tbody tr[data-i]").forEach((tr) => (tr.onclick = () => {
+      const x = rows[+tr.dataset.i];
+      drillTo(x.stock_item, (e) => analysisView(e, "sales-fifo-cost", { by: "voucher", item: x.key }));
+    }));
+  };
+  let timer = null;
+  t.querySelectorAll("[data-cf]").forEach((i) => i.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(draw, 200); }));
+  $("#iw-clear").onclick = () => { t.querySelectorAll("[data-cf]").forEach((i) => (i.value = "")); draw(); };
+  draw();
+}
+
 // Item group-wise sales: stock groups expand into sub-groups and items; an item opens its invoices.
 async function groupWiseView(el) {
   await loadAnalysisFilters();
   const p = rParams(analysisParams());
   p.delete("item");
+  if ($("#ra-view").value === "item") p.set("view", "item");
   const r = await api(`/reports/sales-group-wise?${p}`);
   const counted = r.voucher_types.filter((t) => t.counted).map((t) => t.name).join(", ");
   const total = Number(r.total.value) || 0;
+  if (r.view === "item") return itemWiseTable(el, r, counted, [
+    { label: "Quantity", num: true, get: (x) => qtyText(x.quantity, x.unit) },
+    { label: "Value", num: true, get: (x) => money(x.value) },
+    { label: "Share", num: true, html: (x) => (total ? `${((Number(x.value) / total) * 100).toFixed(1)}%` : "") },
+    { label: "Tax", num: true, get: (x) => money(x.tax) },
+    { label: "FIFO cost", num: true, get: (x) => (x.cost == null ? "" : money(x.cost)) },
+    { label: "Gross profit", num: true, get: (x) => (x.margin == null ? "" : money(x.margin)) },
+    { label: "Margin %", num: true, get: (x) => (x.margin_pct == null ? "" : `${x.margin_pct}%`) },
+  ]);
   const node = (n) => ({
     label: n.name, n, cls: n.kind === "group" ? "" : "",
     children: n.kind === "group" ? n.children.map(node) : undefined,
@@ -1387,12 +1609,25 @@ async function groupWiseView(el) {
 }
 
 // Item group-wise sales in the main and the alternate unit, each with its sale rate and FIFO cost rate.
-async function groupUnitsView(el) {
+async function groupUnitsView(el, key = "sales-group-units") {
   await loadAnalysisFilters();
   const p = rParams(analysisParams());
-  p.delete("item");
-  const r = await api(`/reports/sales-group-units?${p}`);
+  if (key === "sales-group-units") { p.delete("item"); if ($("#ra-view").value === "item") p.set("view", "item"); }
+  const r = await api(`/reports/${key}?${p}`);
   const counted = r.voucher_types.filter((t) => t.counted).map((t) => t.name).join(", ");
+  const rateH = (v, unit) => (v == null ? "" : `${money(v)}${unit ? `<span class="muted small">/${esc(unit)}</span>` : ""}`);
+  if (r.view === "item") return itemWiseTable(el, r, counted, [
+    { label: "Qty (main)", num: true, get: (x) => qtyText(x.quantity, x.unit) },
+    { label: "Sale rate (main)", num: true, html: (x) => rateH(x.rate, x.unit) },
+    { label: "Qty (alternate)", num: true, get: (x) => qtyText(x.alt_quantity, x.alt_unit) },
+    { label: "Sale rate (alternate)", num: true, html: (x) => rateH(x.alt_rate, x.alt_unit) },
+    { label: "Sales value", num: true, get: (x) => money(x.value) },
+    { label: "FIFO cost rate (main)", num: true, html: (x) => rateH(x.cost_rate, x.unit) },
+    { label: "FIFO cost rate (alternate)", num: true, html: (x) => rateH(x.cost_alt_rate, x.alt_unit) },
+    { label: "FIFO cost", num: true, get: (x) => (x.cost == null ? "" : money(x.cost)) },
+    { label: "Gross profit", num: true, get: (x) => (x.margin == null ? "" : money(x.margin)) },
+    { label: "Margin %", num: true, get: (x) => (x.margin_pct == null ? "" : `${x.margin_pct}%`) },
+  ]);
   const node = (n) => ({
     label: n.name, n, children: n.kind === "group" ? n.children.map(node) : undefined,
     open: n.kind === "item" ? () => drillTo(n.name, (e) => analysisView(e, "sales-fifo-cost", { by: "voucher", item: n.key })) : undefined,
@@ -1486,9 +1721,10 @@ async function misEditStock(month, divs, key) {
 
 // The P&L as the finance workbook lays it out: a block per stage, a row per division, a total and its %.
 async function misSheetView(el, report = "mis-finance-sheet") {
-  const [r, st] = await Promise.all([api(`/reports/${report}?${misPeriod()}`), misSettings()]);
+  const generic = report === "mis-monthly-sheet";     // by category / stock group: needs no MIS settings
+  const [r, st] = await Promise.all([api(`/reports/${report}?${misPeriod()}`), generic ? {} : misSettings()]);
   const divName = (k) => (r.divisions.find((d) => d.key === k) || {}).name || k;
-  const editable = st.can_edit && r.month;
+  const editable = !generic && st.can_edit && r.month;
   const pctText = (v) => (v == null ? "" : `${Number(v).toFixed(2)}%`);
   const block = (b, withMonth = true) => {
     const head = `<tr>${withMonth ? "<th>Month</th>" : ""}<th>Category</th>${b.columns.map((c) => `<th class="num">${esc(c)}</th>`).join("")}${b.pct ? `<th class="num">%</th>` : ""}</tr>`;
@@ -1519,7 +1755,12 @@ async function misSheetView(el, report = "mis-finance-sheet") {
       <tr class="total click" data-drill='${esc(JSON.stringify({ src: "", dst: "", kind: "", title: "All material used by another division" }))}'><td>Total</td><td></td><td></td><td class="num">${r.transfers.reduce((a, t) => a + t.vouchers, 0)}</td><td class="num">${money(r.transfers.reduce((a, t) => a + Number(t.value), 0).toFixed(2))}</td></tr>
       </tbody></table></div>` : `<p class="muted">No division used another division's material in this period.</p>`}</details>`;
   const blocks = r.blocks.map((b, i) => block(b) + (i === 0 ? moved : "") + (i === 0 && r.purchase.columns.length > 1 ? block(r.purchase, false) : "")).join("");
-  el.innerHTML = `<p class="fs-title">Monthly Finance Sheet - ${esc(r.period)}</p>${misNote(r)}`
+  const basisNote = !generic ? "" : `<p class="small muted">Rows are this company's <b>${r.basis === "category" ? "stock item categories"
+    : "top stock groups (it keeps no stock item categories)"}</b>. Sales, purchases and stock go to the category of their items;
+    overheads and other amounts without items are shared by each ${r.basis === "category" ? "category" : "group"}'s share of the
+    month's sales. Raw material / WIP / finished goods stock is told by the stock group names (RM, WIP, FG) or, failing that,
+    an item that is sold counts as finished goods.</p>`;
+  el.innerHTML = `<p class="fs-title">Monthly Finance Sheet - ${esc(r.period)}</p>${generic ? basisNote : misNote(r)}`
     + `<div class="tree-tools"><button type="button" class="link" data-fs="1">Expand all</button><button type="button" class="link" data-fs="0">Collapse all</button></div>`
     + `<p class="small muted">% is of each division's net revenue. ${editable ? "Click an opening or closing stock value to enter it by hand for this month." : r.month ? "" : "Choose a single month (from the 1st) to enter stock values by hand."}</p>`
     + `<div class="fs-blocks">${blocks}</div>`;
@@ -2075,10 +2316,10 @@ renderers.reports = async () => {
     "purchase-analysis": (el) => analysisView(el, "purchase-analysis"),
     "sales-rm-cost": (el) => analysisView(el, "sales-rm-cost"),
     "sales-fifo-cost": (el) => analysisView(el, "sales-fifo-cost"),
-    "sales-group-wise": groupWiseView, "sales-group-units": groupUnitsView, "stock-journal": (el) => stockJournalView(el), "material-transfer-wip": (el) => stockJournalView(el, "material-transfer-wip"),
+    "sales-group-wise": groupWiseView, "sales-group-units": groupUnitsView, "sales-item-units": (el) => groupUnitsView(el, "sales-item-units"), "stock-journal": (el) => stockJournalView(el), "material-transfer-wip": (el) => stockJournalView(el, "material-transfer-wip"),
     "material-transfer-wip-main": (el) => stockJournalView(el, "material-transfer-wip-main"),
     "wo-manufacturing": woManufacturingView,
-    "mis-finance-sheet": (el) => misSheetView(el), "mis-finance-sheet-coolace": (el) => misSheetView(el, "mis-finance-sheet-coolace"),
+    "mis-finance-sheet": (el) => misSheetView(el), "mis-monthly-sheet": (el) => misSheetView(el, "mis-monthly-sheet"), "mis-finance-sheet-coolace": (el) => misSheetView(el, "mis-finance-sheet-coolace"),
     "mis-pl": misPlView, "mis-expense": misExpenseView, "mis-exp-breakup": (el) => misBreakupView(el),
     "mis-deferred": misDeferredView,
     "fifo-costing": fifoView, "fifo-monthly": fifoMonthlyView, "godown-summary": godownSummaryView,
@@ -2976,7 +3217,7 @@ $("#ld-edit").onclick = async () => {
 // ------------------------------------------------------------------ connector settings
 const CF = { host: "#c-host", port: "#c-port", tally_company_name: "#c-name", alter_by: "#c-alter", inbound_from_date: "#c-from",
   voucher_batch_size: "#c-batch" };
-const CB = { enabled: "#c-enabled", freeze_outbound: "#c-fout", freeze_inbound: "#c-fin" };
+const CB = { enabled: "#c-enabled", freeze_outbound: "#c-fout", freeze_inbound: "#c-fin", auto_pull: "#c-auto-pull", auto_push: "#c-auto-push" };
 const cMode = () => (document.querySelector('input[name="c-mode"]:checked') || {}).value || "one_way";
 // Settings > Delete this company: company admin or system admin; the name must be typed to confirm.
 // Settings > Company data: back up, clear and read again from Tally, restore from a backup (company admin).
@@ -2998,13 +3239,13 @@ $("#co-reset").onclick = async (e) => {
   const name = coName();
   const typed = prompt(`Delete the data of "${name}" and read everything again from Tally?\n\n`
     + "Vouchers, masters, reports and sync history are deleted here, then read again from Tally (a large company "
-    + "takes a while; the Sync tab shows the progress). Tally is not changed.\n\nType the company name to confirm.");
+    + "takes a while; Admin > Pull / Push shows the progress). Tally is not changed.\n\nType the company name to confirm.");
   if (typed === null) return;
   e.target.disabled = true; coMsg(`<span class="muted">Deleting the data…</span>`);
   try {
     const r = await api(`/companies/${state.company}/reset?confirm=${encodeURIComponent(typed)}`, { method: "POST" });
     coMsg(`Data deleted (${Object.values(r.rows_deleted).reduce((a, b) => a + b, 0).toLocaleString("en-IN")} rows). `
-      + "Reading everything again from Tally: see the Sync tab.");
+      + "Reading everything again from Tally: see Admin > Pull / Push.");
     setTimeout(() => show("dashboard"), 1200);
   } catch (err) { coMsg(`<span class="error">${esc(err.message)}</span>`); }
   finally { e.target.disabled = false; }

@@ -21,13 +21,13 @@ from app.core.security import Perm
 from app.licensing import enforce as licence
 from app.models import (
     AppSetting, Company, ImportBatch, OutboxStatus, ReconciliationRun, SyncAttempt, SyncConflict, SyncInbox, SyncOutbox,
-    SyncProgress, TallyConnector, TallyMapping, Voucher, VoucherVersion,
+    SyncProgress, SyncRun, TallyConnector, TallyMapping, Voucher, VoucherVersion,
 )
 from app.models.base import utcnow
 from app.services import canonical
 from app.services.accounting import masters
 from app.services.accounting.vouchers import VoucherError
-from app.services.sync import common, conflicts, inbound, initial_import, progress, reconcile
+from app.services.sync import common, conflicts, history, inbound, initial_import, progress, reconcile
 from app.workers.sync_worker import check_tally, run_company
 
 log = logging.getLogger("api.sync")
@@ -54,6 +54,9 @@ class ConnectorIn(BaseModel):
     sync_mode: Literal["one_way", "bidirectional"] | None = None
     # What to do with software changes queued while the sync was one-way, when it becomes bidirectional.
     queued_changes: Literal["send", "discard"] | None = None
+    # Automatic pull / push of this company while automatic sync is on (None: left as it is).
+    auto_pull: bool | None = None
+    auto_push: bool | None = None
 
 
 
@@ -182,6 +185,9 @@ def put_connector(company_id: uuid.UUID, body: ConnectorIn, db: DB, user: Curren
         conn = TallyConnector(company_id=company_id, tally_company_name=body.tally_company_name)
         db.add(conn)
     values = body.model_dump(exclude={"sync_mode", "queued_changes"})
+    for k in ("auto_pull", "auto_push"):
+        if values[k] is None:
+            values.pop(k)
     if body.sync_mode:
         values["inbound_enabled"], values["outbound_enabled"] = True, body.sync_mode == "bidirectional"
     if values["outbound_enabled"] and not _two_way_allowed(db, company_id):
@@ -251,60 +257,122 @@ def check_connector(company_id: uuid.UUID, db: DB, user: CurrentUser):
         return {"server_running": True, "open_companies": [], "matched": conn.health_status == "ok",
                 "tally_company_name": conn.tally_company_name, "status": "sync_running",
                 "message": "A sync is running" + (f" ({step['name']}: {step['detail']})" if step else "")
-                           + ". Tally answers one request at a time, so it was not asked again; see the Sync tab.",
+                           + ". Tally answers one request at a time, so it was not asked again; see Admin > Pull / Push.",
                 "checked_at": row.updated_at}
     result = check_tally(db, conn)
     db.commit()
     return result
 
 
-MAX_PASSES = 200          # Sync now keeps going until every changed voucher is in (500 per pass)
+MAX_PASSES = 200          # a Pull keeps going until every changed voucher is in (500 per pass)
 
 
-def _run_in_background(company_id: uuid.UUID, who: str) -> None:
-    """Sync now: one pass, then more passes while Tally still has vouchers waiting (a large company's first
-    sync has thousands), so nobody has to click Sync now again and again. A pause between passes leaves
-    Tally free for the people working in it."""
+def _push_due(cid) -> int:
+    with SessionLocal() as db:
+        return db.scalar(select(func.count()).select_from(SyncOutbox).where(
+            SyncOutbox.company_id == cid, SyncOutbox.status == OutboxStatus.PENDING,
+            SyncOutbox.next_attempt_at <= utcnow())) or 0
+
+
+def _run_in_background(company_id: uuid.UUID, who: str, direction: str = "both") -> None:
+    """Pull / Push: one pass, then more passes while Tally still has vouchers waiting (a large company's
+    first pull has thousands) or the software still has vouchers to push, so nobody has to click again and
+    again. A pause between passes leaves Tally free for the people working in it. Kept in the history."""
     import time
     from app.services.sync import progress as sync_progress
+    pull, push = history.has_pull(direction), history.has_push(direction)
 
     def more_waiting(cid) -> bool:
         with SessionLocal() as db:
             conn = db.get(TallyConnector, cid)
-            return bool(conn and conn.voucher_backlog and conn.health_status == "ok")
+            if not conn or conn.health_status != "ok":
+                return False
+            return bool((pull and conn.voucher_backlog) or (push and claimed[0] and _push_due(cid)))
 
+    if push:     # a Push sends what is waiting now, also what waits for its next try after an error
+        with SessionLocal() as db:
+            db.query(SyncOutbox).filter(SyncOutbox.company_id == company_id, SyncOutbox.status == OutboxStatus.PENDING,
+                                        SyncOutbox.next_attempt_at > utcnow()).update(
+                {SyncOutbox.next_attempt_at: utcnow()}, synchronize_session=False)
+            db.commit()
     run = sync_progress.new_run()
+    run_id = history.start(company_id, direction, who)
+    counts, state, problem, claimed = history.new_counts(), "failed", None, [0]
     try:
         for n in range(1, MAX_PASSES + 1):
-            trigger = f"Sync now by {who}" + (f" (part {n})" if n > 1 else "")
+            trigger = f"{history.LABEL[direction]} by {who}" + (f" (part {n})" if n > 1 else "")
             last = n == MAX_PASSES
             stats = run_company(SessionLocal, company_id, force=(n == 1), trigger=trigger, run=run,
-                                more_follows=None if last else more_waiting)
-            if last or stats.get("stopped") or "error" in (stats.get("inbound") or {}) or not more_waiting(company_id):
+                                more_follows=None if last else more_waiting, direction=direction, who=who)
+            history.add(counts, stats)
+            claimed[0] = (stats.get("outbound") or {}).get("claimed", 0)
+            state, problem = history.state_of(stats), history.problem_of(stats)
+            if last or state != "done" or not more_waiting(company_id):
                 break
             time.sleep(settings.sync_voucher_batch_pause)
-    except Exception:   # already recorded on the progress row; nothing to return to
+    except Exception as exc:   # already recorded on the progress row; nothing to return to
         log.exception("sync run failed for %s", company_id)
+        problem = f"{type(exc).__name__}: {exc}"
+    finally:
+        history.finish(run_id, counts, state, problem)
+
+
+def _start(db, user, company_id: uuid.UUID, direction: str, background: BackgroundTasks) -> dict:
+    conn = _connector(db, company_id)
+    if history.has_push(direction) and direction == "push":
+        if not conn.outbound_enabled:
+            raise HTTPException(409, "Push is off for this company: the connector is one way (Tally → software). "
+                                     "The company admin can make it bidirectional in Admin > Connector.")
+        if conn.freeze_outbound:
+            raise HTTPException(409, "Push is frozen for this company (Admin > Connector > Emergency freeze).")
+    row = db.get(SyncProgress, company_id)
+    if row and progress.is_running(row.data):
+        what = (row.data.get("direction") or "both")
+        raise HTTPException(409, f"A {history.LABEL.get(what, 'sync').lower()} is already running for this company. "
+                                 "Tally answers one request at a time: wait for it to finish, or stop it.")
+    progress.release(company_id)           # after Stop: automatic sync works again too
+    audit.record(db, actor_of(user), f"sync.{direction}", "company", company_id, company_id=company_id)
+    db.commit()
+    background.add_task(_run_in_background, company_id, user.username, direction)
+    return {"status": "started", "direction": direction, "progress": f"/api/v1/sync/progress?company_id={company_id}"}
+
+
+@router.post("/sync/pull", status_code=202)
+def pull_now(company_id: uuid.UUID, db: DB, user: CurrentUser, background: BackgroundTasks):
+    """Pull: read what changed in Tally (masters and vouchers) into the software."""
+    authorize(db, user, company_id, Perm.SYNC_PULL)
+    return _start(db, user, company_id, "pull", background)
+
+
+@router.post("/sync/push", status_code=202)
+def push_now(company_id: uuid.UUID, db: DB, user: CurrentUser, background: BackgroundTasks):
+    """Push: write the vouchers made or changed in the software into Tally (see GET /sync/push/pending)."""
+    authorize(db, user, company_id, Perm.SYNC_PUSH)
+    return _start(db, user, company_id, "push", background)
 
 
 @router.post("/sync/run", status_code=202)
 def run_now(company_id: uuid.UUID, db: DB, user: CurrentUser, background: BackgroundTasks):
-    """Start a sync now; follow it with GET /sync/progress."""
-    authorize(db, user, company_id, Perm.SYNC_MANAGE)
-    _connector(db, company_id)
-    row = db.get(SyncProgress, company_id)
-    if row and progress.is_running(row.data):
-        raise HTTPException(409, "A sync is already running for this company")
-    progress.release(company_id)           # Sync now after Stop sync: automatic sync works again too
-    background.add_task(_run_in_background, company_id, user.username)
-    return {"status": "started", "progress": f"/api/v1/sync/progress?company_id={company_id}"}
+    """Pull and push in one go (for integrations); needs both rights. Follow it with GET /sync/progress."""
+    authorize(db, user, company_id, Perm.SYNC_PULL)
+    authorize(db, user, company_id, Perm.SYNC_PUSH)
+    return _start(db, user, company_id, "both", background)
+
+
+def _authorize_any(db, user, company_id: uuid.UUID, perms) -> None:
+    """Stop / Resume: anyone who may pull or push."""
+    from app.core.security import has_perm
+    for p in perms:
+        if has_perm(db, user, company_id, p):
+            return authorize(db, user, company_id, p)
+    authorize(db, user, company_id, perms[0])     # raises the usual 403 / 404
 
 
 @router.post("/sync/stop")
 def stop_sync(company_id: uuid.UUID, db: DB, user: CurrentUser):
-    """Stop sync: the running sync ends at the next safe point (after the request Tally is answering now),
-    and automatic sync leaves this company alone until Sync now or Resume."""
-    authorize(db, user, company_id, Perm.SYNC_MANAGE)
+    """Stop: the running pull / push ends at the next safe point (after the request Tally is answering now),
+    and automatic sync leaves this company alone until the next Pull / Push or Resume."""
+    _authorize_any(db, user, company_id, (Perm.SYNC_PULL, Perm.SYNC_PUSH))
     row = db.get(SyncProgress, company_id)
     running = bool(row and progress.is_running(row.data))
     progress.request_stop(company_id, user.username, running=running)
@@ -316,8 +384,8 @@ def stop_sync(company_id: uuid.UUID, db: DB, user: CurrentUser):
 
 @router.post("/sync/resume")
 def resume_sync(company_id: uuid.UUID, db: DB, user: CurrentUser):
-    """After Stop sync: automatic sync takes this company up again (Sync now does the same)."""
-    authorize(db, user, company_id, Perm.SYNC_MANAGE)
+    """After Stop: automatic sync takes this company up again (a Pull or Push does the same)."""
+    _authorize_any(db, user, company_id, (Perm.SYNC_PULL, Perm.SYNC_PUSH))
     progress.release(company_id)
     audit.record(db, actor_of(user), "sync.resume", "company", company_id, company_id=company_id)
     db.commit()
@@ -339,6 +407,31 @@ def sync_progress(company_id: uuid.UUID, db: DB, user: CurrentUser):
     return data
 
 
+@router.get("/sync/history")
+def sync_history(company_id: uuid.UUID, db: DB, user: CurrentUser, direction: str | None = None, limit: int = 100,
+                 offset: int = 0):
+    """Push / pull history, newest first: who, when, what moved."""
+    authorize(db, user, company_id, Perm.SYNC_READ)
+    return history.runs(db, company_id, direction, limit, offset)
+
+
+@router.get("/sync/history/{run_id}")
+def sync_history_run(run_id: uuid.UUID, db: DB, user: CurrentUser):
+    """One pull / push: each voucher (and master) it moved, and what changed in it."""
+    run = db.get(SyncRun, run_id)
+    if run is None:
+        raise HTTPException(404, "Not found")
+    authorize(db, user, run.company_id, Perm.SYNC_READ)
+    return history.details(db, run)
+
+
+@router.get("/sync/push/pending")
+def push_pending(company_id: uuid.UUID, db: DB, user: CurrentUser, limit: int = 1000):
+    """Audit before a Push: every voucher made or changed in the software that is not in Tally yet."""
+    authorize(db, user, company_id, Perm.SYNC_READ)
+    return history.pending_push(db, company_id, db.get(TallyConnector, company_id), limit)
+
+
 @router.get("/sync/dashboard")
 def dashboard(company_id: uuid.UUID, db: DB, user: CurrentUser):
     authorize(db, user, company_id, Perm.SYNC_READ)
@@ -355,9 +448,15 @@ def dashboard(company_id: uuid.UUID, db: DB, user: CurrentUser):
     last_rec = db.scalar(select(ReconciliationRun).where(ReconciliationRun.company_id == company_id)
                          .order_by(ReconciliationRun.started_at.desc()).limit(1))
     from app.workers.auto_sync import auto_sync
+    last = {d: db.scalar(select(SyncRun).where(SyncRun.company_id == company_id, SyncRun.direction.in_([d, "both"]))
+                         .order_by(SyncRun.started_at.desc()).limit(1)) for d in ("pull", "push")}
     return {
         "auto_sync": auto_sync.status(),
         "connector": _conn_out(conn) if conn else None,
+        "last_pull": {"at": conn.last_pull_at, "by": conn.last_pull_by} if conn else None,
+        "last_push": {"at": conn.last_push_at, "by": conn.last_push_by} if conn else None,
+        "last_runs": {d: history.run_out(r) if r else None for d, r in last.items()},
+        "push_waiting": _waiting(db, company_id),
         "pending": outbox_count(OutboxStatus.PENDING, OutboxStatus.PROCESSING),
         "failed": outbox_count(OutboxStatus.FAILED),
         "outbound_conflicts": outbox_count(OutboxStatus.CONFLICT),
@@ -412,6 +511,9 @@ def set_auto_sync(body: AutoSyncIn, db: DB, user: CurrentUser):
         raise HTTPException(403, "Only a super admin can switch automatic sync")
     from app.workers.auto_sync import auto_sync
     auto_sync.set_paused(not body.enabled)
+    row = db.get(AppSetting, "auto_sync") or AppSetting(key="auto_sync")
+    row.value, row.updated_by, row.updated_at = body.enabled, user.username, utcnow()
+    db.merge(row)       # kept in the database: a software update or restart does not switch it back
     audit.record(db, actor_of(user), "sync.auto", "server", None, after={"enabled": body.enabled})
     db.commit()
     return auto_sync.status()

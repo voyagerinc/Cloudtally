@@ -12,7 +12,6 @@
   <select id="company" aria-label="Company"></select>
   <button id="open-tally" class="secondary" title="List the companies open in Tally and open or link one">Open Tally company</button>
   <nav id="tabs">
-    <button data-tab="dashboard" data-perm="sync.read">Sync</button>
     <button data-tab="vouchers" data-perm="voucher.read">Vouchers</button>
     <button data-tab="entry" data-perm="voucher.create">New voucher</button>
     <button data-tab="reports" data-perm="report">Reports</button>
@@ -23,6 +22,7 @@
     <details id="admin-menu" class="menu">
       <summary>Admin <span id="admin-badge" class="badge" hidden></span></summary>
       <div class="menu-list">
+        <button data-tab="dashboard" data-perm="sync.read">Pull / Push</button>
         <button data-tab="settings" data-perm="sync.read">Connector</button>
         <button data-tab="conflicts" data-perm="sync.read">Conflicts <span id="conflict-badge" class="badge" hidden></span></button>
         <button data-tab="users" data-perm="users.manage">Users</button>
@@ -86,25 +86,41 @@
 
 <main>
 <section id="dashboard" class="tab" hidden>
-  <div class="row between"><h2>Synchronization</h2>
-    <div><button id="check-tally">Check Tally</button> <button id="run-sync" disabled title="Check Tally first">Sync now</button>
-      <button id="stop-sync" class="secondary danger" hidden title="Stops the running sync after the request Tally is answering now. What was read so far is saved.">Stop sync</button>
+  <div class="row between wrap"><h2>Tally: pull and push</h2>
+    <div class="row wrap"><button id="check-tally" class="secondary">Check Tally</button>
+      <button id="pull-sync" class="pull" disabled title="Check Tally first">&#x2B07; Pull from Tally</button>
+      <button id="push-sync" class="push" disabled title="Check Tally first">&#x2B06; Push to Tally</button>
+      <button id="stop-sync" class="secondary danger" hidden title="Stops the running pull / push after the request Tally is answering now. What was done so far is saved.">Stop</button>
       <button id="resume-sync" class="secondary" hidden title="Automatic sync takes this company up again">Resume automatic sync</button>
       <button id="retry-failed" class="secondary">Retry all failed</button>
       <a id="errors-csv" class="button secondary" href="#">Export error log</a></div></div>
+  <p class="small muted"><b>Pull</b> reads what was entered or changed in Tally into the software.
+    <b>Push</b> writes the vouchers made or changed in the software into Tally. Each needs its own right (Admin &gt; Users).</p>
+  <div id="last-pp" class="pp-times"></div>
   <div id="tally-check" class="check-panel" hidden></div>
   <div id="sync-progress" class="panel progress-panel" hidden aria-live="polite"></div>
   <div id="health" class="cards"></div>
+  <div class="row between wrap"><h3>Pending push: in the software, not in Tally yet <span id="pp-count" class="badge" hidden></span></h3>
+    <select id="pp-status" aria-label="Show"><option value="">Everything waiting</option><option value="pending">Waiting for Push</option>
+      <option value="failed">Not accepted by Tally</option><option value="conflict">Conflicts</option></select></div>
+  <p id="pp-blocked" class="small error" hidden></p>
+  <div class="tablewrap"><table id="push-pending"></table></div>
+  <div class="row between wrap"><h3>Push / pull history</h3>
+    <select id="hist-dir" aria-label="Show"><option value="">Pull and push</option><option value="pull">Pull only</option>
+      <option value="push">Push only</option></select></div>
+  <p class="small muted">Every pull and push someone started, and every automatic one that moved something. Click a row
+    for each voucher it brought or sent and what changed in it.</p>
+  <div class="tablewrap"><table id="sync-history"></table></div>
   <h3>Amended in Tally and synced</h3>
   <table id="amends"></table>
-  <h3>Outbound queue (ERP → Tally)</h3>
+  <h3>Push queue: every job (software → Tally)</h3>
   <div class="row filters">
     <select id="job-status"><option value="">All statuses</option><option>pending</option><option>failed</option><option>conflict</option><option>completed</option><option>paused</option><option>superseded</option></select>
     <input id="job-number" placeholder="Voucher number">
     <button id="job-filter" class="secondary">Filter</button>
   </div>
   <table id="jobs"></table>
-  <div class="row between"><h3>Inbound (Tally → ERP)</h3>
+  <div class="row between"><h3>Pulled from Tally: latest received</h3>
     <button type="button" id="inbox-retry" class="secondary">Reprocess all failed</button></div>
   <table id="inbox"></table>
   <h3>Reconciliation</h3>
@@ -149,9 +165,9 @@
     </div>
     <!-- item invoice: sales, purchase, notes, orders -->
     <div id="ve-inv" hidden>
-      <table class="lines"><thead><tr><th>Name of item</th><th>Godown</th><th>Batch</th><th class="num">Quantity</th><th class="num">Rate</th><th>per</th><th class="num">Amount</th><th></th></tr></thead>
+      <table class="lines"><thead><tr><th>Name of item</th><th>Godown</th><th>Batch</th><th class="num">Quantity</th><th class="num">Alt. qty</th><th class="num">Rate</th><th>per</th><th class="num" title="Amount ÷ alternate quantity">Alt. rate</th><th class="num">Amount</th><th></th></tr></thead>
         <tbody id="ve-items"></tbody>
-        <tfoot><tr><td><button type="button" class="secondary" data-add-item="ve-items">+ Item</button></td><td colspan="5" class="num">Items total</td>
+        <tfoot><tr><td><button type="button" class="secondary" data-add-item="ve-items">+ Item</button></td><td colspan="7" class="num">Items total</td>
           <td class="num" id="ve-items-total">0.00</td><td></td></tr></tfoot></table>
       <div id="ve-extra-box">
       <table class="lines"><thead><tr><th>Additional ledger (GST, freight, discount …)</th><th class="num">Rate %</th><th class="num">Amount</th><th></th></tr></thead>
@@ -163,13 +179,13 @@
     <!-- stock journal: source (consumption) and destination (production) -->
     <div id="ve-sj" class="sj-pair" hidden>
       <div><h4>Source (Consumption)</h4>
-        <table class="lines"><thead><tr><th>Name of item</th><th>Godown</th><th>Batch</th><th class="num">Quantity</th><th class="num">Rate</th><th>per</th><th class="num">Amount</th><th></th></tr></thead>
+        <table class="lines"><thead><tr><th>Name of item</th><th>Godown</th><th>Batch</th><th class="num">Quantity</th><th class="num">Alt. qty</th><th class="num">Rate</th><th>per</th><th class="num" title="Amount ÷ alternate quantity">Alt. rate</th><th class="num">Amount</th><th></th></tr></thead>
           <tbody id="ve-src"></tbody>
-          <tfoot><tr><td><button type="button" class="secondary" data-add-item="ve-src">+ Item</button></td><td colspan="5" class="num">Total</td><td class="num" id="ve-src-total">0.00</td><td></td></tr></tfoot></table></div>
+          <tfoot><tr><td><button type="button" class="secondary" data-add-item="ve-src">+ Item</button></td><td colspan="7" class="num">Total</td><td class="num" id="ve-src-total">0.00</td><td></td></tr></tfoot></table></div>
       <div><h4>Destination (Production)</h4>
-        <table class="lines"><thead><tr><th>Name of item</th><th>Godown</th><th>Batch</th><th class="num">Quantity</th><th class="num">Rate</th><th>per</th><th class="num">Amount</th><th></th></tr></thead>
+        <table class="lines"><thead><tr><th>Name of item</th><th>Godown</th><th>Batch</th><th class="num">Quantity</th><th class="num">Alt. qty</th><th class="num">Rate</th><th>per</th><th class="num" title="Amount ÷ alternate quantity">Alt. rate</th><th class="num">Amount</th><th></th></tr></thead>
           <tbody id="ve-dst"></tbody>
-          <tfoot><tr><td><button type="button" class="secondary" data-add-item="ve-dst">+ Item</button></td><td colspan="5" class="num">Total</td><td class="num" id="ve-dst-total">0.00</td><td></td></tr></tfoot></table></div>
+          <tfoot><tr><td><button type="button" class="secondary" data-add-item="ve-dst">+ Item</button></td><td colspan="7" class="num">Total</td><td class="num" id="ve-dst-total">0.00</td><td></td></tr></tfoot></table></div>
     </div>
     <!-- manufacturing journal: product, BOM components, co-products / by-products / scrap -->
     <div id="ve-mfg" hidden>
@@ -181,13 +197,13 @@
         <label>Quantity<input id="vm-qty" class="num" inputmode="decimal"></label>
       </div>
       <h4>Components (Consumption)</h4>
-      <table class="lines"><thead><tr><th>Name of item</th><th>Godown</th><th>Batch</th><th class="num">Quantity</th><th class="num">Rate</th><th>per</th><th class="num">Amount</th><th></th></tr></thead>
+      <table class="lines"><thead><tr><th>Name of item</th><th>Godown</th><th>Batch</th><th class="num">Quantity</th><th class="num">Alt. qty</th><th class="num">Rate</th><th>per</th><th class="num" title="Amount ÷ alternate quantity">Alt. rate</th><th class="num">Amount</th><th></th></tr></thead>
         <tbody id="vm-comp"></tbody>
-        <tfoot><tr><td><button type="button" class="secondary" data-add-item="vm-comp">+ Item</button></td><td colspan="5" class="num">Total</td><td class="num" id="vm-comp-total">0.00</td><td></td></tr></tfoot></table>
+        <tfoot><tr><td><button type="button" class="secondary" data-add-item="vm-comp">+ Item</button></td><td colspan="7" class="num">Total</td><td class="num" id="vm-comp-total">0.00</td><td></td></tr></tfoot></table>
       <h4>Co-product / By-product / Scrap</h4>
-      <table class="lines"><thead><tr><th>Name of item</th><th>Godown</th><th>Batch</th><th class="num">Quantity</th><th class="num">Rate</th><th>per</th><th class="num">Amount</th><th></th></tr></thead>
+      <table class="lines"><thead><tr><th>Name of item</th><th>Godown</th><th>Batch</th><th class="num">Quantity</th><th class="num">Alt. qty</th><th class="num">Rate</th><th>per</th><th class="num" title="Amount ÷ alternate quantity">Alt. rate</th><th class="num">Amount</th><th></th></tr></thead>
         <tbody id="vm-by"></tbody>
-        <tfoot><tr><td><button type="button" class="secondary" data-add-item="vm-by">+ Item</button></td><td colspan="5" class="num">Total</td><td class="num" id="vm-by-total">0.00</td><td></td></tr></tfoot></table>
+        <tfoot><tr><td><button type="button" class="secondary" data-add-item="vm-by">+ Item</button></td><td colspan="7" class="num">Total</td><td class="num" id="vm-by-total">0.00</td><td></td></tr></tfoot></table>
       <p id="vm-cost" class="small"></p>
     </div>
     <datalist id="item-names"></datalist><datalist id="godown-names"></datalist>
@@ -234,11 +250,13 @@
       <option value="sales-fifo-cost" data-report="sales-fifo-cost">Sales register with FIFO cost</option>
       <option value="sales-group-wise" data-report="sales-group-wise">Item group-wise sales</option>
       <option value="sales-group-units" data-report="sales-group-units">Item group-wise sales (main &amp; alternate unit)</option>
+      <option value="sales-item-units" data-report="sales-item-units">Item-wise sales with FIFO cost (main &amp; alternate unit)</option>
       <option value="material-transfer-wip" data-report="material-transfer-wip">Material transfer to WIP</option>
       <option value="material-transfer-wip-main" data-report="material-transfer-wip-main">Material transfer to WIP (main group)</option>
       <option value="wo-manufacturing" data-report="wo-manufacturing">WO manufacturing &amp; manufacturing journal</option>
       <option value="stock-journal" data-report="stock-journal">Stock journal register (in / out)</option>
-      <option value="mis-finance-sheet" data-report="mis-finance-sheet">MIS: Monthly finance sheet (P&amp;L)</option>
+      <option value="mis-monthly-sheet" data-report="mis-monthly-sheet">MIS: Monthly finance sheet (P&amp;L)</option>
+      <option value="mis-finance-sheet" data-report="mis-finance-sheet">Coolace MIS: Monthly finance sheet (P&amp;L)</option>
       <option value="mis-finance-sheet-coolace" data-report="mis-finance-sheet-coolace">Coolace: Monthly finance sheet (P&amp;L)</option>
       <option value="mis-pl" data-report="mis-pl">MIS: P&amp;L by division</option>
       <option value="mis-expense" data-report="mis-expense">MIS: Expenses by division</option>
@@ -261,6 +279,8 @@
     <label id="ra-item-label">Item<input id="ra-item" list="ra-items" placeholder="all items"></label>
     <label>Item category<select id="ra-cat"><option value="">all</option></select></label>
     <label>Stock group<select id="ra-group"><option value="">all</option></select></label>
+    <label id="ra-view-label" hidden>View<select id="ra-view"><option value="group">Group-wise</option>
+      <option value="item">Stock item-wise</option></select></label>
     <label class="check" id="ra-returns-label"><input type="checkbox" id="ra-returns" checked> Deduct returns</label>
     <datalist id="ra-parties"></datalist><datalist id="ra-items"></datalist>
   </div>
@@ -424,6 +444,13 @@
         Vouchers entered or changed in the software are also written into Tally.</span></label>
       <p class="small muted" id="c-waiting"></p>
       <p class="small error" id="c-two-way-note" hidden>Your licence allows one way only (Tally → software). Contact Voyager to approve two-way sync.</p>
+    </fieldset>
+    <fieldset><legend>Automatic sync of this company</legend>
+      <label class="check"><input type="checkbox" id="c-auto-pull"> <span><b>Pull automatically</b> while Tally is open</span></label>
+      <label class="check"><input type="checkbox" id="c-auto-push"> <span><b>Push automatically</b> (bidirectional only)</span></label>
+      <p class="small muted">Used when automatic sync is on for this server (Admin > Pull / Push). With both off, this company is
+        pulled and pushed only when someone clicks Pull or Push. These connector settings are kept in the database:
+        a software update does not change them.</p>
     </fieldset>
     <fieldset><legend>Emergency freeze</legend>
       <label class="check"><input type="checkbox" id="c-fout"> Freeze outbound</label>
@@ -716,6 +743,11 @@
     <p id="pw-msg" class="error" aria-live="polite"></p>
     <div class="row"><button>Change password</button> <button type="button" id="pw-cancel" class="secondary">Cancel</button></div>
   </form>
+</dialog>
+
+<dialog id="run-dlg" class="wide">
+  <div class="row between"><h2 id="run-title">Pull / push</h2><button type="button" class="secondary" id="run-close">Close</button></div>
+  <div id="run-body"></div>
 </dialog>
 
 <dialog id="fail-dlg" class="wide">

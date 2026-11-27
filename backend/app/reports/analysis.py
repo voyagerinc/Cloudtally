@@ -441,11 +441,11 @@ def fifo_line_costs(db: Session, company_id: uuid.UUID, to_date: date, item_ids)
 def group_wise(db: Session, company_id: uuid.UUID, side: str, from_date: date, to_date: date, *,
                party: uuid.UUID | None = None, category: str | None = None, stock_group: uuid.UUID | None = None,
                voucher_types: list[str] | None = None, include_returns: bool = True, cost: str | None = "fifo",
-               units: bool = False) -> dict:
+               units: bool = False, view: str = "group", item: uuid.UUID | None = None) -> dict:
     """Sales (or purchases) by stock group as a tree, like Tally's group-wise reports: each group holds its
     sub-groups and items, and its figures include everything under it. stock_group keeps that group's
     branch only, sub-groups included."""
-    data = trade_analysis(db, company_id, side, from_date, to_date, by="item", party=party, category=category,
+    data = trade_analysis(db, company_id, side, from_date, to_date, by="item", party=party, item=item, category=category,
                           voucher_types=voucher_types, include_returns=include_returns, cost=cost, alt=units)
     groups = {g.id: g for g in db.scalars(select(StockGroup).where(StockGroup.company_id == company_id))}
     item_group = dict(db.execute(select(StockItem.id, StockItem.group_id).where(StockItem.company_id == company_id)).all())
@@ -554,10 +554,28 @@ def group_wise(db: Session, company_id: uuid.UUID, side: str, from_date: date, t
                      **{k: n.get(k) for k in cols if k in n}})
         for c in n.get("children", []):
             flatten(c, level + 1, path + [n["name"]])
+    base = {"side": side, "from": data["from"], "to": data["to"], "include_returns": include_returns, "cost": cost,
+            "voucher_types": data["voucher_types"], "total": total, "view": view}
+    if view == "item":
+        # Stock item-wise: one row per item, with its stock group and that group's parent, largest value first.
+        items = []
+
+        def leaves(n, path):
+            if n["kind"] == "item":
+                items.append({"key": n["key"], "stock_item": n["name"], "stock_group": path[-1] if path else "",
+                              "parent_group": path[-2] if len(path) > 1 else "",
+                              **{k: n.get(k) for k in cols if k in n},
+                              **({"lines_without_cost": n.get("lines_without_cost")} if costed else {})})
+                return
+            for c in n.get("children", []):
+                leaves(c, path + ([n["name"]] if n["key"] else []))
+        for n in tree:
+            leaves(n, [])
+        items.sort(key=lambda r: -abs(Decimal(r["value"])))
+        return {**base, "rows": items}
     for n in tree:
         flatten(n, 1, [])
-    return {"side": side, "from": data["from"], "to": data["to"], "include_returns": include_returns, "cost": cost,
-            "voucher_types": data["voucher_types"], "tree": tree, "rows": rows, "total": total}
+    return {**base, "tree": tree, "rows": rows}
 
 
 def fifo_costing(db: Session, company_id: uuid.UUID, from_date: date, to_date: date, *, item: uuid.UUID | None = None,

@@ -114,7 +114,7 @@ def _read_again_from_tally(company_id: uuid.UUID, who: str, actor) -> None:
     try:
         _run_import(company_id, ImportIn(company_id=company_id), actor)      # masters, as when it was linked
     finally:
-        _run_in_background(company_id, who)                                  # then every voucher (Sync now)
+        _run_in_background(company_id, who, "pull")                          # then every voucher (a Pull)
 
 
 @router.get("/companies/{company_id}/backup")

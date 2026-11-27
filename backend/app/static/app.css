@@ -2,12 +2,14 @@
   --bg: #f6f7f9; --panel: #ffffff; --text: #1d232b; --muted: #5d6875; --line: #dde2e8;
   --accent: #1f5fa8; --accent-text: #ffffff; --ok: #1d7a46; --warn: #a86a00; --bad: #b3261e;
   --chip-ok: #e3f3ea; --chip-warn: #fdf1dc; --chip-bad: #fbe4e2; --chip-info: #e6eef8;
+  --pull: #1d7a46; --push: #6b3fa0;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #14181d; --panel: #1c2128; --text: #e6e9ed; --muted: #9aa5b1; --line: #313943;
     --accent: #6ea8ec; --accent-text: #0e1620; --ok: #6fcf97; --warn: #f2c14e; --bad: #f28b82;
     --chip-ok: #1f3a2b; --chip-warn: #3d3018; --chip-bad: #45211f; --chip-info: #1f2f44;
+    --pull: #6fcf97; --push: #c3a6f0;
   }
 }
 * { box-sizing: border-box; }
@@ -185,3 +187,31 @@ tr.muted td { color: var(--muted); }
 button.linklike { background: none; border: 0; padding: 0; min-height: 0; color: var(--accent); text-decoration: underline; cursor: pointer; font: inherit; }
 .tablewrap { overflow: auto; max-height: 360px; }
 #fail-body details { margin: 8px 0; } #fail-body summary { cursor: pointer; }
+
+/* Pull (Tally -> software) and Push (software -> Tally): two different buttons */
+button.pull { background: var(--pull); border-color: var(--pull); color: var(--accent-text); font-weight: 600; }
+button.push { background: var(--push); border-color: var(--push); color: var(--accent-text); font-weight: 600; }
+.pp-times { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin: 6px 0 12px; }
+.pp-times > div { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--pull); border-radius: 8px; padding: 10px 14px; }
+.pp-times > div.push { border-left-color: var(--push); }
+.pp-times .v { font-size: 18px; font-weight: 600; }
+.dir-pull { color: var(--pull); font-weight: 600; } .dir-push { color: var(--push); font-weight: 600; }
+
+/* stock lines: alternate quantity (e.g. 1336 KGS for 800 PCS) and its rate */
+.lines td.alt-cell { white-space: nowrap; } .lines td.alt-cell input { width: 7em; }
+.lines td.alt-cell .i-altunit { margin-left: 4px; color: var(--muted); }
+.lines td.i-altrate { white-space: nowrap; color: var(--muted); }
+
+#fail-body input.use-pick { min-width: 260px; flex: 1 1 260px; }
+
+/* filter boxes under the column headings; the total row adds up the rows shown */
+table.colfilter tr.filters th { padding: 2px 4px; }
+table.colfilter tr.filters input { width: 100%; min-width: 70px; font-size: 12px; padding: 2px 4px; box-sizing: border-box; }
+table.colfilter tfoot tr.total td { border-top: 2px solid var(--line); font-weight: 600; position: sticky; bottom: 0; background: var(--panel); }
+
+/* item-wise reports: the table uses the full height of the window; headings, filters and total stay in view */
+.tablewrap.full { max-height: calc(100vh - 150px); min-height: 300px; }
+.tablewrap.full table { display: table; overflow: visible; }
+.tablewrap.full thead th { position: sticky; top: 0; background: var(--panel); z-index: 2; }
+.tablewrap.full thead tr.filters th { top: 30px; }
+.tablewrap.full tfoot td { position: sticky; bottom: 0; z-index: 2; }

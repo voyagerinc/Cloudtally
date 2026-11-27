@@ -555,7 +555,7 @@ def test_sync_reports_progress_step_by_step(db, company, tc, mock, monkeypatch):
     row = db.get(SyncProgress, company.id)
     db.refresh(row)
     assert row.data["state"] == "done" and [s["state"] for s in row.data["steps"]] == ["done"] * 4
-    assert "3 voucher change(s) received from Tally; 1 sent to Tally" == row.data["summary"]
+    assert "3 voucher change(s) received from Tally; 1 pushed to Tally" == row.data["summary"]
     vouchers = [snap[2] for snap in seen if snap[2][0] == "running" and snap[2][2] == 3]
     assert [v[1] for v in vouchers] == [0, 1, 2, 3]      # the voucher bar moves batch by batch
     outbound_step = row.data["steps"][3]
@@ -573,7 +573,7 @@ def test_sync_now_runs_in_background_and_refuses_a_second_run(db, company, mock)
     r = api.post(f"/api/v1/sync/run?company_id={company.id}", headers={"X-API-Key": "k-boss"})
     assert r.status_code == 202
     p = api.get(f"/api/v1/sync/progress?company_id={company.id}", headers={"X-API-Key": "k-boss"}).json()
-    assert p["state"] == "done" and p["trigger"] == "Sync now by boss" and len(p["steps"]) == 4
+    assert p["state"] == "done" and p["trigger"] == "Pull and push by boss" and len(p["steps"]) == 4
     row = db.get(SyncProgress, company.id)
     db.refresh(row)
     row.data = {**row.data, "state": "running", "updated_at": utcnow().isoformat()}
@@ -1463,3 +1463,96 @@ def test_stop_sync_ends_the_run_at_a_safe_point_and_holds_automatic_sync(db, com
     db.expire_all()
     assert db.get(SyncProgress, company.id).data["state"] == "done"
     assert db.scalar(select(func.count()).select_from(Voucher).where(Voucher.voucher_number.like("S-%"))) == 6
+
+
+def test_pull_and_push_are_separate_with_their_own_rights_times_history_and_pending_list(db, company, tc, mock, monkeypatch):
+    """Pull brings Tally's changes only, Push sends the software's only; each has its own tick, its last
+    date and time, a history of what moved, and a list of what is still waiting to be pushed."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.api.sync import _run_in_background
+    from app.core.security import hash_password
+    from app.models import AppSetting, SyncRun, User, UserCompanyAccess
+    from app.workers.auto_sync import AutoSync, auto_sync
+    sync()
+    mock.enter_voucher(tc, receipt_xml("20260501", "PP-1"))
+    in_tally = len(tally_vouchers(tc))
+    v = post(db, company)                                 # made in the software, not in Tally yet
+    api = TestClient(app)
+    heads = {}
+    for name, perms in [("puller", ["sync.read", "sync.pull"]), ("pusher", ["sync.read", "sync.push"]),
+                        ("viewer", ["sync.read"])]:
+        u = User(username=name, password_hash=hash_password("Some-pass99"))
+        db.add(u)
+        db.flush()
+        db.add(UserCompanyAccess(user_id=u.id, company_id=company.id, role="custom", permissions=perms))
+        db.commit()
+        tok = api.post("/api/v1/auth/login", json={"username": name, "password": "Some-pass99"}).json()["token"]
+        heads[name] = {"Authorization": f"Bearer {tok}"}
+    q = f"company_id={company.id}"
+    # the audit before pushing: what is waiting, who changed it
+    pend = api.get(f"/api/v1/sync/push/pending?{q}", headers=heads["viewer"]).json()
+    assert pend["total"] == 1 and pend["blocked"] is None
+    assert [(i["voucher_type"], i["operation"], i["why"], i["changed_by"]) for i in pend["items"]] == \
+        [("Payment", "new", "Waiting for Push", "asha")]
+    # rights: a viewer can do neither, the puller cannot push, the pusher cannot pull
+    for who, path in [("viewer", "pull"), ("viewer", "push"), ("puller", "push"), ("pusher", "pull"), ("puller", "run")]:
+        assert api.post(f"/api/v1/sync/{path}?{q}", headers=heads[who]).status_code == 403, (who, path)
+    monkeypatch.setattr("app.api.sync._run_in_background", lambda *a: None)    # run them below, one at a time
+    assert api.post(f"/api/v1/sync/pull?{q}", headers=heads["puller"]).status_code == 202
+    assert api.post(f"/api/v1/sync/push?{q}", headers=heads["pusher"]).status_code == 202
+
+    _run_in_background(company.id, "puller", "pull")      # Pull: Tally's voucher comes in, nothing goes to Tally
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(Voucher).where(Voucher.voucher_number == "PP-1")) == 1
+    assert len(tally_vouchers(tc)) == in_tally and db.get(Voucher, v.id).sync_status != "synced"
+    steps = db.get(SyncProgress, company.id).data["steps"]
+    assert [s["state"] for s in steps] == ["done", "done", "done", "skipped"]
+    _run_in_background(company.id, "pusher", "push")      # Push: the software's voucher goes to Tally
+    db.expire_all()
+    assert len(tally_vouchers(tc)) == in_tally + 1 and db.get(Voucher, v.id).sync_status == "synced"
+    conn = db.get(TallyConnector, company.id)
+    assert (conn.last_pull_by, conn.last_push_by) == ("puller", "pusher") and conn.last_push_at >= conn.last_pull_at
+
+    d = api.get(f"/api/v1/sync/dashboard?{q}", headers=heads["viewer"]).json()
+    assert d["last_pull"]["by"] == "puller" and d["last_push"]["by"] == "pusher" and d["push_waiting"] == 0
+    hist = api.get(f"/api/v1/sync/history?{q}", headers=heads["viewer"]).json()
+    assert [(h["direction"], h["started_by"], h["state"]) for h in hist] == [("push", "pusher", "done"), ("pull", "puller", "done")]
+    assert hist[0]["counts"]["push"]["completed"] == 1 and hist[1]["counts"]["pull"]["applied"] == 1
+    pushed = api.get(f"/api/v1/sync/history/{hist[0]['id']}", headers=heads["viewer"]).json()["pushed"]
+    assert [(p["voucher_id"], p["operation"], p["result"]) for p in pushed] == [(str(v.id), "new", "sent")]
+    pulled = api.get(f"/api/v1/sync/history/{hist[1]['id']}", headers=heads["viewer"]).json()["pulled"]
+    assert [(p["voucher_number"], p["action"]) for p in pulled if p["entity_type"] == "voucher"] == [("PP-1", "new")]
+    assert api.get(f"/api/v1/sync/push/pending?{q}", headers=heads["viewer"]).json()["total"] == 0
+
+    # one-way connector: Push is refused, and the pending list says why
+    conn.outbound_enabled = False
+    db.commit()
+    post(db, company, {**PAYMENT, "narration": "second"})
+    boss = boss_client(db)
+    assert boss.post(f"/api/v1/sync/push?{q}").status_code == 409
+    assert "one way" in boss.get(f"/api/v1/sync/push/pending?{q}").json()["blocked"]
+
+    # automatic sync per company, chosen in Admin > Connector: pull only here
+    r = boss.put(f"/api/v1/sync/connectors/{company.id}", json={"tally_company_name": conn.tally_company_name,
+                 "host": conn.host, "port": conn.port, "enabled": True, "auto_pull": True, "auto_push": False})
+    assert r.status_code == 200 and (r.json()["auto_pull"], r.json()["auto_push"]) == (True, False)
+    calls = []
+    monkeypatch.setattr("app.workers.auto_sync.run_company", lambda *a, **k: calls.append(k["direction"]))
+    AutoSync.run_round()
+    assert calls == ["pull"]
+    boss.put(f"/api/v1/sync/connectors/{company.id}", json={"tally_company_name": conn.tally_company_name,
+             "host": conn.host, "port": conn.port, "enabled": True, "auto_pull": False})
+    AutoSync.run_round()
+    assert calls == ["pull"]                     # both off: automatic sync leaves the company alone
+    # the on / off of automatic sync is kept in the database, so an update or restart does not change it
+    paused = auto_sync.paused
+    try:
+        boss.put("/api/v1/sync/auto", json={"enabled": True})
+        db.expire_all()
+        assert db.get(AppSetting, "auto_sync").value is True
+        auto_sync.paused = True
+        assert auto_sync.load_saved() is True and auto_sync.paused is False
+    finally:
+        auto_sync.paused = paused
+    assert db.scalar(select(func.count()).select_from(SyncRun)) == 2       # nothing moved automatically

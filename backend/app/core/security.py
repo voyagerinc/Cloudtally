@@ -26,7 +26,9 @@ class Perm:
     EXPORT = "export"
     AUDIT_READ = "audit.read"
     SYNC_READ = "sync.read"
-    SYNC_MANAGE = "sync.manage"
+    SYNC_MANAGE = "sync.manage"         # Tally connector settings (company admin)
+    SYNC_PULL = "sync.pull"             # Pull: read vouchers and masters from Tally into the software
+    SYNC_PUSH = "sync.push"             # Push: write vouchers made in the software into Tally
     CONFLICT_RESOLVE = "conflict.resolve"
     INTEGRATION = "integration"
 
@@ -60,6 +62,7 @@ REPORTS: dict[str, str] = {
     "sales-fifo-cost": "Sales register with FIFO cost",
     "sales-group-wise": "Item group-wise sales",
     "sales-group-units": "Item group-wise sales (main & alternate unit, sale and FIFO cost rates)",
+    "sales-item-units": "Item-wise sales with FIFO cost (main & alternate unit)",
     "stock-journal": "Stock journal register (in / out)",
     "material-transfer-wip": "Material transfer to WIP",
     "material-transfer-wip-main": "Material transfer to WIP (main group)",
@@ -71,7 +74,8 @@ REPORTS: dict[str, str] = {
     "eway-bill": "GST: E-way bill status",
     "custom-fields": "Custom fields from Tally (e.g. chassis / motor no.)",
     "mis-pl": "MIS: P&L by division",
-    "mis-finance-sheet": "MIS: Monthly finance sheet (P&L)",
+    "mis-monthly-sheet": "MIS: Monthly finance sheet (P&L)",
+    "mis-finance-sheet": "Coolace MIS: Monthly finance sheet (P&L)",
     "mis-finance-sheet-coolace": "Coolace: Monthly finance sheet (P&L)",
     "mis-expense": "MIS: Expenses by division",
     "mis-exp-breakup": "MIS: Expense breakup",
@@ -88,8 +92,11 @@ PERM_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
                  (Perm.MASTERS_WRITE, "Create and alter ledgers and stock items")]),
     ("Reports", [(Perm.REPORTS_READ, "All reports")] + [(Perm.report(k), v) for k, v in REPORTS.items()]
                 + [(Perm.EXPORT, "Export to CSV")]),
-    # Running sync and changing the Tally connection stay with the company admin (manager): no tick for it.
-    ("Tally sync", [(Perm.SYNC_READ, "View sync status"), (Perm.CONFLICT_RESOLVE, "Resolve conflicts")]),
+    # Changing the Tally connection stays with the company admin (manager): no tick for it.
+    ("Tally sync", [(Perm.SYNC_READ, "View sync status, history and vouchers pending push"),
+                    (Perm.SYNC_PULL, "Pull from Tally (Tally to software)"),
+                    (Perm.SYNC_PUSH, "Push to Tally (software to Tally)"),
+                    (Perm.CONFLICT_RESOLVE, "Resolve conflicts")]),
     ("Administration", [(Perm.USERS_MANAGE, "Manage users and permissions"),
                         (Perm.COMPANY_MANAGE, "Company settings"), (Perm.PERIOD_LOCK, "Lock periods"),
                         (Perm.AUDIT_READ, "View the audit trail")]),
@@ -200,7 +207,11 @@ def role_for(db: Session, user: User, company_id: uuid.UUID) -> str | None:
 def perms_of(access: UserCompanyAccess) -> set[str]:
     """A custom permission list replaces the role's defaults."""
     perms = upgrade_perms(access.permissions) & ALL_PERMS if access.permissions is not None else set(ROLES.get(access.role, set()))
-    return perms if access.role == "owner" else perms - MANAGER_ONLY
+    if access.role != "owner":
+        return perms - MANAGER_ONLY
+    if Perm.SYNC_MANAGE in perms:       # the company admin ran sync before Pull and Push were two ticks
+        perms |= {Perm.SYNC_PULL, Perm.SYNC_PUSH}
+    return perms
 
 
 def perms_for(db: Session, user: User, company_id: uuid.UUID) -> set[str]:

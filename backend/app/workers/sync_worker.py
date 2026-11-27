@@ -18,7 +18,7 @@ from app.core.db import SessionLocal
 from app.models import Company, TallyConnector
 from app.models.base import utcnow
 from app.services.sync import common, inbound, outbound
-from app.services.sync.progress import Progress, SyncStopped
+from app.services.sync.progress import PULL_STEPS, PUSH_STEPS, Progress, SyncStopped
 
 log = logging.getLogger("sync.worker")
 _stop = False
@@ -102,29 +102,42 @@ def check_health(db, conn: TallyConnector) -> bool:
 
 
 def run_company(session_factory: sessionmaker, company_id: uuid.UUID, force: bool = False,
-                trigger: str = "background sync", run: dict | None = None, more_follows=None) -> dict:
-    """run: shared by the passes of one Sync now (overall progress). more_follows(company_id) -> True when
-    another pass comes right after this one, so the Sync tab keeps showing one running sync."""
-    stats: dict = {}
-    progress = Progress(company_id, trigger, run)
+                trigger: str = "background sync", run: dict | None = None, more_follows=None,
+                direction: str = "both", who: str = "automatic sync") -> dict:
+    """direction: "pull" (Tally -> software), "push" (software -> Tally) or "both".
+    run: shared by the passes of one Pull / Push (overall progress). more_follows(company_id) -> True when
+    another pass comes right after this one, so Admin > Pull / Push keeps showing one running pull / push."""
+    pull, push = direction in ("pull", "both"), direction in ("push", "both")
+    stats: dict = {"direction": direction}
+    skip = () if pull and push else (PUSH_STEPS if pull else PULL_STEPS)
+    progress = Progress(company_id, trigger, run, skip=skip, direction=direction)
     try:
         with session_factory() as db:
             conn = db.get(TallyConnector, company_id)
             progress.step(0, f"Contacting Tally at {conn.host}:{conn.port}")
             healthy = check_health(db, conn)
             db.commit()
-            stats["health"] = conn.health_status
+            stats["health"], stats["health_message"] = conn.health_status, conn.health_message
             if not healthy:   # events stay queued; nothing is discarded
                 progress.step(0, conn.health_message or conn.health_status, state="failed")
                 progress.finish(f"Tally not ready: {conn.health_message or conn.health_status}", failed=True)
                 return stats
             progress.step(0, f"Connected to '{conn.tally_company_name}'", state="done")
             company = db.get(Company, company_id)
-            client = common.client_for(conn)
+            from app.licensing.enforce import entitlement_for
+            if push and not (conn.enabled and conn.outbound_enabled and not conn.freeze_outbound
+                             and entitlement_for(db, company_id).allows_module("tally_two_way")):
+                push = False
+                stats["outbound"] = {"skipped": "push is off: one way, or frozen (Admin > Connector)"}
+            client = common.client_for(conn) if pull else None
             try:
                 started = utcnow()
-                stats["inbound"] = inbound.poll(db, company, conn, client, force=force, progress=progress)
-                if conn.custom_fields:     # custom (TDL) fields the normal fetch does not bring: from the Day Book
+                if pull:
+                    stats["inbound"] = inbound.poll(db, company, conn, client, force=force, progress=progress)
+                    if not stats["inbound"].get("skipped"):
+                        conn.last_pull_at, conn.last_pull_by = utcnow(), who
+                        db.commit()
+                if pull and conn.custom_fields:     # custom (TDL) fields the normal fetch does not bring: the Day Book
                     from app.services.sync import custom_fields
                     try:
                         stats["custom_fields"] = custom_fields.after_sync(db, company_id, started)
@@ -137,11 +150,20 @@ def run_company(session_factory: sessionmaker, company_id: uuid.UUID, force: boo
                 log.warning("inbound poll failed for %s: %s", conn.tally_company_name, exc.message)
                 progress.step(2, exc.message, state="failed")
             finally:
-                client.close()
-        stats["outbound"] = outbound.process_batch(session_factory, company_id=company_id, progress=progress)
+                if client is not None:
+                    client.close()
+        if push:
+            stats["outbound"] = outbound.process_batch(session_factory, company_id=company_id, progress=progress)
+            with session_factory() as db:
+                conn = db.get(TallyConnector, company_id)
+                conn.last_push_at, conn.last_push_by = utcnow(), who
+                db.commit()
+        elif "outbound" in stats:
+            progress.step(3, "Push is off for this company: one way, or frozen (Admin > Connector)", state="skipped")
     except SyncStopped as exc:     # Stop sync: what was saved so far stays, the next sync carries on
         log.info("sync of %s stopped by %s", company_id, exc)
-        progress.finish(f"Stopped by {exc}. What was read so far is saved; Sync now carries on from there.", stopped=True)
+        progress.finish(f"Stopped by {exc}. What was done so far is saved; the next Pull / Push carries on from there.",
+                        stopped=True)
         stats["stopped"] = str(exc)
         return stats
     except Exception as exc:
@@ -155,7 +177,10 @@ def run_company(session_factory: sessionmaker, company_id: uuid.UUID, force: boo
 
 def _summary(stats: dict) -> str:
     inbound_, outbound_ = stats.get("inbound") or {}, stats.get("outbound") or {}
-    if "error" in inbound_:
+    direction = stats.get("direction", "both")
+    if direction == "push":
+        received = None
+    elif "error" in inbound_:
         received = f"receiving from Tally failed ({inbound_['message']})"
     elif inbound_.get("skipped"):
         received = "receiving from Tally is switched off"
@@ -163,9 +188,14 @@ def _summary(stats: dict) -> str:
         received = f"{inbound_.get('received', 0)} voucher change(s) received from Tally"
         if inbound_.get("remaining"):
             received += f", {inbound_['remaining']} more on the next sync"
-    sent = f"{outbound_.get('completed', 0)} sent to Tally"
+    if direction == "pull":
+        sent = None
+    elif outbound_.get("skipped"):
+        sent = "push is off for this company (one way, or frozen)"
+    else:
+        sent = f"{outbound_.get('completed', 0)} pushed to Tally"
     problems = sum(outbound_.get(k, 0) for k in ("failed", "conflict")) + inbound_.get("failed", 0) + inbound_.get("conflict", 0)
-    return f"{received}; {sent}" + (f"; {problems} need attention" if problems else "")
+    return "; ".join(x for x in (received, sent) if x) + (f"; {problems} need attention" if problems else "")
 
 
 def run_once(session_factory: sessionmaker = SessionLocal) -> dict:

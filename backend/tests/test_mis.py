@@ -392,3 +392,37 @@ def test_coolace_sheet_api_and_excel(db, books):  # noqa: F811
     assert x.status_code == 200
     sheet = zipfile.ZipFile(io.BytesIO(x.content)).read("xl/worksheets/sheet1.xml").decode()
     assert "Material used by another division" in sheet and "From Cooler" in sheet
+
+
+def test_monthly_sheet_for_every_company_by_category_else_by_stock_group(db, books):  # noqa: F811
+    """MIS: Monthly finance sheet (P&L) needs no MIS set-up: a row per stock item category, or per stock group
+    when the company keeps no categories; company totals are the same either way."""
+    _setup(db, books)
+    s = mis.category_settings(db, books.id, *JUNE)
+    assert s["basis"] == "category"
+    names = [d["name"] for d in s["divisions"]]
+    assert "FINISH GOODS" in names and "(No category)" in names
+    r = mis.finance_sheet(db, books.id, *JUNE, settings=s)
+    assert r["basis"] == "category" and all(not b["editable"] for b in r["blocks"])
+    sales = next(b for b in r["blocks"] if b["title"] == "Sales")
+    by = {row["category"]: row["values"][0] for row in sales["rows"]}
+    assert by["FINISH GOODS"] == "500.00" and by["Total"] == "500.00"        # the cooler's sale, in its category
+    net = next(b for b in r["blocks"] if b["title"] == "Net Profit")["rows"][-1]["values"][-1]
+    # no categories: the stock groups are the rows, and the company's net profit does not change
+    db.query(StockItem).filter_by(company_id=books.id).update({"category": None})
+    db.commit()
+    g = mis.category_settings(db, books.id, *JUNE)
+    assert g["basis"] == "group" and {"RAW MATERIAL COOLER", "FINISHED GOODS OC"} <= {d["name"] for d in g["divisions"]}
+    kinds = {db.get(StockItem, iid).name: k for iid, (_, k) in g["_item_dk"].items()}
+    assert kinds["Component A"] == "rm" and kinds["Finished Cooler"] == "fg"
+    r2 = mis.finance_sheet(db, books.id, *JUNE, settings=g)
+    assert next(b for b in r2["blocks"] if b["title"] == "Net Profit")["rows"][-1]["values"][-1] == net
+    db.add(User(username="ms-boss", api_key_hash=hash_key("k-ms"), is_superadmin=True))
+    db.commit()
+    api, h = TestClient(app), {"X-API-Key": "k-ms"}
+    url = f"/api/v1/reports/mis-monthly-sheet?company_id={books.id}&from_date={JUNE[0]}&to_date={JUNE[1]}"
+    assert api.get(url, headers=h).json()["basis"] == "group"
+    assert api.get(url + "&format=xlsx", headers=h).content[:2] == b"PK"
+    labels = {p["key"]: p["label"] for grp in api.get("/api/v1/permissions", headers=h).json()["groups"] for p in grp["permissions"]}
+    assert labels["report.mis-monthly-sheet"] == "MIS: Monthly finance sheet (P&L)"
+    assert labels["report.mis-finance-sheet"] == "Coolace MIS: Monthly finance sheet (P&L)"

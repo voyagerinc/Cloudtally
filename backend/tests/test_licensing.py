@@ -364,7 +364,8 @@ def test_only_the_manager_runs_tally_sync(db, admin):
     cid = api.post(f"{V1}/companies", headers=admin, json={"name": "Sync Co", "books_from": "2026-04-01"}).json()["id"]
     heads = {}
     for name, role, perms in [("manager", "owner", None), ("accadmin", "accounts_admin", None),
-                              ("custom", "custom", ["sync.read", "sync.manage"])]:
+                              ("custom", "custom", ["sync.read", "sync.manage"]),
+                              ("puller", "custom", ["sync.read", "sync.pull"])]:
         u = User(username=name, password_hash=hash_password("Some-pass99"))
         db.add(u)
         db.flush()
@@ -375,9 +376,13 @@ def test_only_the_manager_runs_tally_sync(db, admin):
     assert api.post(f"{V1}/sync/run?company_id={cid}", headers=heads["accadmin"]).status_code == 403
     assert api.post(f"{V1}/sync/run?company_id={cid}", headers=heads["custom"]).status_code == 403
     assert api.post(f"{V1}/sync/run?company_id={cid}", headers=heads["manager"]).status_code != 403
+    assert api.post(f"{V1}/sync/pull?company_id={cid}", headers=heads["puller"]).status_code != 403
+    assert api.post(f"{V1}/sync/push?company_id={cid}", headers=heads["puller"]).status_code == 403
+    assert api.post(f"{V1}/sync/pull?company_id={cid}", headers=heads["custom"]).status_code == 403
     assert api.get(f"{V1}/sync/dashboard?company_id={cid}", headers=heads["accadmin"]).status_code == 200
     catalog = api.get(f"{V1}/permissions", headers=heads["manager"]).json()
-    assert "sync.manage" not in {p["key"] for g in catalog["groups"] for p in g["permissions"]}
+    keys = {p["key"] for g in catalog["groups"] for p in g["permissions"]}
+    assert "sync.manage" not in keys and {"sync.pull", "sync.push"} <= keys
 
 
 def _package(version: str, extra: dict | None = None) -> bytes:

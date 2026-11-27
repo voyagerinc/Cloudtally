@@ -1,4 +1,4 @@
-"""Live progress of a sync run, for the progress bars on the Sync tab.
+"""Live progress of a sync run, for the progress bars on Admin > Pull / Push.
 
 Written to its own table on its own short transaction, so viewers see it while the sync's own
 transaction is still open and it never waits on rows the sync has locked.
@@ -12,7 +12,8 @@ from sqlalchemy import text
 from app.core.db import engine
 from app.models.base import utcnow
 
-STEPS = ("Check Tally", "Masters from Tally", "Vouchers from Tally", "ERP changes to Tally")
+STEPS = ("Check Tally", "Pull: masters from Tally", "Pull: vouchers from Tally", "Push: software vouchers to Tally")
+PULL_STEPS, PUSH_STEPS = (1, 2), (3,)
 # A run that has not reported for this long is treated as dead (worker killed, server restarted).
 STALE_AFTER = timedelta(minutes=5)
 
@@ -53,7 +54,8 @@ def new_run() -> dict:
 
 
 class Progress:
-    def __init__(self, company_id: uuid.UUID, trigger: str, run: dict | None = None):
+    def __init__(self, company_id: uuid.UUID, trigger: str, run: dict | None = None, skip: tuple = (),
+                 direction: str = "both"):
         self.company_id = company_id
         self.run = run if run is not None else new_run()
         self.run["part"] = self.run.get("part", 0) + 1
@@ -61,6 +63,9 @@ class Progress:
                      "summary": None, "run": self.run,
                      "steps": [{"name": n, "state": "pending", "detail": "", "done": None, "total": None}
                                for n in STEPS]}
+        self.data["direction"] = direction
+        for i in skip:              # a Pull does not push, a Push does not pull
+            self.data["steps"][i].update(state="skipped", detail="not part of this " + ("pull" if i in PUSH_STEPS else "push"))
         self._write()
 
     def vouchers_left(self, left: int) -> None:

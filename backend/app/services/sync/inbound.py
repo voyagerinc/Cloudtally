@@ -100,7 +100,7 @@ def poll(db: Session, company: Company, conn: TallyConnector, client: TallyClien
     elif not force and not conn.voucher_backlog and conn.voucher_scan_at and \
             (wait := settings.sync_voucher_scan_seconds - (utcnow() - conn.voucher_scan_at).total_seconds()) > 0:
         stats["vouchers"] = f"changed; next scan in {int(wait)} s"
-        progress.step(2, f"Vouchers changed in Tally; next scan in {int(wait) // 60 + 1} min (Sync now scans at once)",
+        progress.step(2, f"Vouchers changed in Tally; next scan in {int(wait) // 60 + 1} min (a Pull scans at once)",
                       state="skipped")
     else:
         _pull_vouchers(db, company, conn, client, counters["alt_vch_id"], stats, progress)
@@ -229,7 +229,7 @@ def _pull_vouchers(db: Session, company: Company, conn: TallyConnector, client: 
     high = rest[0][1] - 1 if rest else max([conn.voucher_watermark, counter or 0, *(r.alter_id for r in index)])
     held = None
     done, total = 0, len(wanted)
-    # What is still to read, kept up to date batch by batch: if Tally stops answering part-way, the Sync tab
+    # What is still to read, kept up to date batch by batch: if Tally stops answering part-way, Admin > Pull / Push
     # shows the vouchers left instead of "all read", and the next sync carries on with them.
     conn.voucher_backlog = total + len(rest)
     db.commit()

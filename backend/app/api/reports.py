@@ -23,7 +23,7 @@ CSV_ROWS = {
     "trial-balance": "lines", "day-book": "vouchers", "ledger": "lines", "stock-summary": "items",
     "outstanding": "bills", "register": "vouchers", "ledger-balances": None, "stock-item": "lines",
     "sales-analysis": "rows", "purchase-analysis": "rows", "sales-rm-cost": "rows", "fifo-costing": "items", "fifo-monthly": "rows", "godown-summary": "rows",
-    "sales-fifo-cost": "rows", "sales-group-wise": "rows", "sales-group-units": "rows", "stock-journal": "rows", "material-transfer-wip": "rows",
+    "sales-fifo-cost": "rows", "sales-group-wise": "rows", "sales-group-units": "rows", "sales-item-units": "rows", "stock-journal": "rows", "material-transfer-wip": "rows",
     "material-transfer-wip-main": "rows", "wo-manufacturing": "rows",
     "gstr1": "rows", "gstr2": "rows", "hsn-summary": "rows", "einvoice": "rows", "eway-bill": "rows", "outstanding-monthly": "rows", "custom-fields": "rows", "cash-flow": "rows", "funds-flow": "rows",
 }
@@ -68,13 +68,16 @@ def _respond(db, user, company_id, name: str, data, fmt: str):
 
 Fmt = Literal["json", "csv", "xlsx"]
 XLSX_LABELS = {"sales-fifo-cost": {"cost": "FIFO cost"}, "sales-rm-cost": {"cost": "Raw-material cost"},
-               "sales-group-wise": {"cost": "FIFO cost", "group_path": "Under"},
+               "sales-group-wise": {"cost": "FIFO cost", "group_path": "Under", "stock_item": "Stock item",
+                                    "stock_group": "Stock group", "parent_group": "Parent group"},
                "sales-group-units": {"group_path": "Under", "quantity": "Qty (main unit)", "unit": "Main unit",
+                                     "stock_item": "Stock item", "stock_group": "Stock group", "parent_group": "Parent group",
                                      "rate": "Sale rate (main unit)", "alt_quantity": "Qty (alternate unit)",
                                      "alt_unit": "Alternate unit", "alt_rate": "Sale rate (alternate unit)",
                                      "value": "Sales value", "cost_rate": "FIFO cost rate (main unit)",
                                      "cost_alt_rate": "FIFO cost rate (alternate unit)", "cost": "FIFO cost",
                                      "margin": "Gross profit", "margin_pct": "Margin %"}}
+XLSX_LABELS["sales-item-units"] = XLSX_LABELS["sales-group-units"]
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
@@ -380,13 +383,14 @@ def sales_fifo_cost(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date:
 def sales_group_wise(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
                      to_date: date | None = None, party: uuid.UUID | None = None, category: str | None = None,
                      stock_group: uuid.UUID | None = None, voucher_types: str | None = None,
-                     include_returns: bool = True, format: Fmt = "json"):
-    """Sales by stock group as an expandable tree: groups, their sub-groups and items, with FIFO gross profit."""
+                     include_returns: bool = True, format: Fmt = "json", view: Literal["group", "item"] = "group"):
+    """Sales by stock group as an expandable tree: groups, their sub-groups and items, with FIFO gross profit.
+    view=item: one row per stock item, with its stock group and parent group."""
     authorize(db, user, company_id, Perm.report("sales-group-wise"))
     f, t = _default_period(db, company_id, from_date, to_date)
     types = [x.strip() for x in voucher_types.split(",") if x.strip()] if voucher_types else None
     data = analysis.group_wise(db, company_id, "sales", f, t, party=party, category=category, stock_group=stock_group,
-                               voucher_types=types, include_returns=include_returns)
+                               voucher_types=types, include_returns=include_returns, view=view)
     return _respond(db, user, company_id, "sales-group-wise", data, format)
 
 
@@ -394,14 +398,31 @@ def sales_group_wise(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date
 def sales_group_units(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
                       to_date: date | None = None, party: uuid.UUID | None = None, category: str | None = None,
                       stock_group: uuid.UUID | None = None, voucher_types: str | None = None,
-                      include_returns: bool = True, format: Fmt = "json"):
-    """Item group-wise sales in the main and the alternate unit, each with its sale rate and FIFO cost rate."""
+                      include_returns: bool = True, format: Fmt = "json", view: Literal["group", "item"] = "group"):
+    """Item group-wise sales in the main and the alternate unit, each with its sale rate and FIFO cost rate.
+    view=item: one row per stock item, with its stock group and parent group."""
     authorize(db, user, company_id, Perm.report("sales-group-units"))
     f, t = _default_period(db, company_id, from_date, to_date)
     types = [x.strip() for x in voucher_types.split(",") if x.strip()] if voucher_types else None
     data = analysis.group_wise(db, company_id, "sales", f, t, party=party, category=category, stock_group=stock_group,
-                               voucher_types=types, include_returns=include_returns, units=True)
+                               voucher_types=types, include_returns=include_returns, units=True, view=view)
     return _respond(db, user, company_id, "sales-group-units", data, format)
+
+
+@router.get("/sales-item-units")
+def sales_item_units(company_id: uuid.UUID, db: DB, user: CurrentUser, from_date: date | None = None,
+                     to_date: date | None = None, party: uuid.UUID | None = None, item: uuid.UUID | None = None,
+                     category: str | None = None, stock_group: uuid.UUID | None = None, voucher_types: str | None = None,
+                     include_returns: bool = True, format: Fmt = "json"):
+    """Item-wise sales: each stock item with its stock group and parent group, quantity and sale rate in the main
+    and the alternate unit, FIFO cost and FIFO cost rate in both units, gross profit."""
+    authorize(db, user, company_id, Perm.report("sales-item-units"))
+    f, t = _default_period(db, company_id, from_date, to_date)
+    types = [x.strip() for x in voucher_types.split(",") if x.strip()] if voucher_types else None
+    data = analysis.group_wise(db, company_id, "sales", f, t, party=party, item=item, category=category,
+                               stock_group=stock_group, voucher_types=types, include_returns=include_returns,
+                               units=True, view="item")
+    return _respond(db, user, company_id, "sales-item-units", data, format)
 
 
 SJ_HEAD = ["Item", "Item group", "Qty", "Unit", "Rate", "Amount", "Godown", "Batch"]
@@ -659,7 +680,7 @@ def report_filters(company_id: uuid.UUID, db: DB, user: CurrentUser):
     from app.core.security import has_perm
     from app.models import Ledger, StockGroup, StockItem, Voucher
     allowed = [k for k in ("sales-analysis", "purchase-analysis", "fifo-costing", "fifo-monthly", "godown-summary", "sales-rm-cost", "sales-fifo-cost",
-                              "sales-group-wise", "sales-group-units")
+                              "sales-group-wise", "sales-group-units", "sales-item-units")
                if has_perm(db, user, company_id, Perm.report(k))]
     authorize(db, user, company_id, Perm.report(allowed[0] if allowed else "sales-analysis"))
     parties = db.execute(select(Ledger.id, Ledger.name).where(
